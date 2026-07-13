@@ -710,19 +710,22 @@ class MemoryServiceTests(unittest.TestCase):
         provider.search("approved", 7)
         config = captured["config"]
         self.assertEqual(
-            config["history_db_path"], str(self.data / "mem0" / "history.db")
+            Path(config["history_db_path"]).resolve(),
+            (self.data / "mem0" / "history.db").resolve(),
         )
         vector = config["vector_store"]["config"]
-        self.assertEqual(vector["path"], str(self.data / "mem0" / "qdrant"))
+        self.assertEqual(
+            Path(vector["path"]).resolve(),
+            (self.data / "mem0" / "qdrant").resolve(),
+        )
         self.assertTrue(vector["on_disk"])
         self.assertTrue(vector["collection_name"].startswith("opc_"))
+        factory_env = captured["factory_env"]
         self.assertEqual(
-            captured["factory_env"],
-            {
-                "MEM0_DIR": str(self.data / "mem0"),
-                "MEM0_TELEMETRY": "False",
-            },
+            Path(factory_env["MEM0_DIR"]).resolve(),
+            (self.data / "mem0").resolve(),
         )
+        self.assertEqual(factory_env["MEM0_TELEMETRY"], "False")
         self.assertEqual(
             captured["search"],
             {
@@ -756,8 +759,8 @@ class MemoryServiceTests(unittest.TestCase):
         )
         provider.search("query", 1)
         self.assertEqual(
-            captured["config"]["history_db_path"],
-            str(self.data / "mem0" / "history.db"),
+            Path(captured["config"]["history_db_path"]).resolve(),
+            (self.data / "mem0" / "history.db").resolve(),
         )
 
     def test_mem0_support_is_exactly_the_tested_release(self) -> None:
@@ -1043,7 +1046,9 @@ class MemoryServiceTests(unittest.TestCase):
         with patch.object(opc_memory.Mem0Provider, "installed", return_value=False):
             status = service.status()
         self.assertTrue(status["isolated_venv"]["python_exists"])
-        self.assertIn(str(venv_python), status["isolated_venv"]["rerun_hint"])
+        self.assertIn(
+            str(venv_python.resolve()), status["isolated_venv"]["rerun_hint"]
+        )
 
     def test_structured_metadata_rejects_machine_absolute_paths(self) -> None:
         with self.assertRaisesRegex(opc_memory.OpcMemoryError, "portable relative"):
