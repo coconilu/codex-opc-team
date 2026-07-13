@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-13
+
 ### Added
 
 - Codex-native OPC plugin repository and marketplace layout.
@@ -26,4 +28,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Kept active run snapshots project-local so normal run updates cannot dirty or bypass the private knowledge repository's Git provenance gate.
 - Made unsupported or malformed memory scopes fail closed, including hand-edited global records that incorrectly retain a project identity.
 
-[Unreleased]: https://github.com/coconilu/codex-opc-team/commits/main
+[Unreleased]: https://github.com/coconilu/codex-opc-team/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/coconilu/codex-opc-team/releases/tag/v0.1.0

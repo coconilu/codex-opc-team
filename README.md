@@ -1,6 +1,6 @@
 # Codex OPC Team
 
-[简体中文](README.zh-CN.md) · [Architecture](docs/architecture.md) · [Security](SECURITY.md) · [Roadmap](docs/roadmap.md)
+[简体中文](README.zh-CN.md) · [Release notes](docs/release-notes-v0.1.0.en.md) · [Architecture](docs/architecture.md) · [Security](SECURITY.md) · [Roadmap](docs/roadmap.md)
 
 Codex OPC Team is an open-source, Codex-native operating model for a one-person company. It turns a project request into an aligned plan, delegated implementation, independent QA, and an evidence-backed retrospective while keeping the user in the manager role.
 
@@ -34,20 +34,20 @@ flowchart LR
 
 ## Project status
 
-The repository is a `v0.1.0` release candidate. The Codex-native team loop, File/Git memory, optional Mem0 adapter, safe hooks, installer, and automated gates are implemented and pass local validation. Treat the Git tag, rather than `main`, as the stable install source after the release workflow completes. See the [roadmap](docs/roadmap.md) and [acceptance contract](docs/testing-and-acceptance.md).
+`v0.1.0` is the first stable release. The Codex-native team loop, File/Git memory, optional Mem0 adapter, safe hooks, installer, and automated gates have passed the release checks. Use the fixed `v0.1.0` tag rather than `main` as the stable install source. See the [v0.1.0 release notes](docs/release-notes-v0.1.0.en.md), [roadmap](docs/roadmap.md), and [acceptance contract](docs/testing-and-acceptance.md).
 
 ## Installation
 
 Prerequisites: Codex CLI, Git, and Python 3.10 or newer. Mem0 is not required.
 
-After a tagged release is published, add this repository as a Codex marketplace and install the plugin:
+Add the `v0.1.0` repository snapshot as a Codex marketplace and install the plugin:
 
 ```powershell
 codex plugin marketplace add coconilu/codex-opc-team --ref v0.1.0
 codex plugin add codex-opc-team@opc
 ```
 
-The default File/Git memory mode has no Mem0 dependency. Mem0 setup is optional and must degrade safely when unavailable. Detailed install, upgrade, removal, and data-retention behavior is documented in [installation and distribution](docs/installation-and-distribution.md).
+The default File/Git memory mode has no Mem0 dependency. Mem0 setup is optional and must degrade safely when unavailable. Detailed install, upgrade, removal, and data-retention behavior is documented in [installation and distribution](docs/installation-and-distribution.md); release-specific compatibility, migration, rollback, and evidence are in the [v0.1.0 release notes](docs/release-notes-v0.1.0.en.md).
 
 ## Public code, private knowledge
 
@@ -59,6 +59,7 @@ Private knowledge is initialized outside the plugin cache and remains user-contr
 
 | Document | Purpose |
 |---|---|
+| [v0.1.0 release notes](docs/release-notes-v0.1.0.en.md) | Compatibility, installation, migration, limitations, rollback, and gate evidence |
 | [Origin and decisions](docs/origin-and-decisions.md) | Why this project exists and how the design converged |
 | [Vision and scope](docs/vision-and-scope.md) | Product goals, boundaries, and user experience |
 | [Architecture](docs/architecture.md) | Components, contracts, and execution flow |

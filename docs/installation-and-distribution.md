@@ -22,7 +22,7 @@ Marketplace 名称是 `opc`，插件名称是 `codex-opc-team`。版本由插件
 
 ## 3. 发布版本安装
 
-发布 `v0.1.0` 后的推荐方式：
+`v0.1.0` 的推荐安装方式：
 
 ```powershell
 codex plugin marketplace add coconilu/codex-opc-team --ref v0.1.0
@@ -31,7 +31,7 @@ codex plugin add codex-opc-team@opc
 
 首次安装后开启一个新的 Codex 任务，让插件发现和 Skill 注册状态重新加载。调用 `$opc-manager` 时，它会先运行 Doctor；若私人知识库尚未初始化，会展示目标路径，得到确认后用模板创建私有 Git 仓库和基线 Commit。也可调用 `$opc-memory` 只检查记忆状态。未经确认不得在用户目录创建知识库。
 
-> 在 `v0.1.0` 标签发布前，上述命令仅表示目标分发契约，不应把 `main` 当作稳定版本。
+请固定使用 `v0.1.0`；`main` 是持续演进分支，不作为稳定安装源。本版兼容范围、数据与 Schema 迁移、已知限制、回滚和 Gate 证据见 [v0.1.0 发布说明](release-notes-v0.1.0.md)。
 
 ## 4. 本地开发和验证
 
@@ -140,4 +140,4 @@ python scripts/plugin_admin.py uninstall --remove-marketplace --apply
 
 ## 11. 发布检查
 
-每个 GitHub Release 至少包括：版本兼容范围、安装命令、重要变更、数据/Schema Migration、已知限制、回滚步骤和验证证据。Release Gate 详见[测试与验收](testing-and-acceptance.md)。
+每个 GitHub Release 至少包括：版本兼容范围、安装命令、重要变更、数据/Schema Migration、已知限制、回滚步骤和验证证据。`v0.1.0` 的完整记录见 [发布说明](release-notes-v0.1.0.md)，Release Gate 详见[测试与验收](testing-and-acceptance.md)。

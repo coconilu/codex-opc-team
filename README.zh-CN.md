@@ -1,6 +1,6 @@
 # Codex OPC Team
 
-[English](README.md) · [架构](docs/architecture.md) · [安全](SECURITY.md) · [路线图](docs/roadmap.md)
+[English](README.md) · [v0.1.0 发布说明](docs/release-notes-v0.1.0.md) · [架构](docs/architecture.md) · [安全](SECURITY.md) · [路线图](docs/roadmap.md)
 
 Codex OPC Team 是一套开源、Codex 原生的“一人公司”团队运行机制。它把一个想法转化为：目标对齐、任务委派、具体实现、独立验收和有证据的复盘；用户始终扮演经理，只把握方向与关键决策。
 
@@ -45,20 +45,20 @@ flowchart LR
 
 ## 当前状态
 
-仓库当前是 `v0.1.0` 发布候选版。Codex 原生团队闭环、File/Git 记忆、可选 Mem0 Adapter、安全 Hook、安装器与自动化门禁均已实现并通过本地验证。发布流程完成后，应以 Git 标签而不是 `main` 作为稳定安装源。进度以[路线图](docs/roadmap.md)和[测试与验收契约](docs/testing-and-acceptance.md)为准。
+`v0.1.0` 是首个稳定版本。Codex 原生团队闭环、File/Git 记忆、可选 Mem0 Adapter、安全 Hook、安装器与自动化门禁均已通过发布检查。稳定安装应固定到 `v0.1.0` 标签，不要使用持续变化的 `main`。兼容范围、迁移、限制、回滚与验证证据见 [v0.1.0 发布说明](docs/release-notes-v0.1.0.md)，后续进度见[路线图](docs/roadmap.md)和[测试与验收契约](docs/testing-and-acceptance.md)。
 
 ## 安装
 
 前置条件：Codex CLI、Git、Python 3.10 或更高版本。Mem0 不是必需依赖。
 
-发布带标签的版本后，可把 GitHub 仓库作为 Codex Marketplace 添加并安装插件：
+把 GitHub 仓库的 `v0.1.0` 快照作为 Codex Marketplace 添加并安装插件：
 
 ```powershell
 codex plugin marketplace add coconilu/codex-opc-team --ref v0.1.0
 codex plugin add codex-opc-team@opc
 ```
 
-默认 File/Git 记忆模式不依赖 Mem0。Mem0 需要用户明确选择后才安装或启用，并且故障时必须安全降级。安装、升级、卸载和数据保留规则详见[安装与分发](docs/installation-and-distribution.md)。
+默认 File/Git 记忆模式不依赖 Mem0。Mem0 需要用户明确选择后才安装或启用，并且故障时必须安全降级。安装、升级、卸载和数据保留规则详见[安装与分发](docs/installation-and-distribution.md)；本版兼容范围、迁移、回滚和门禁证据见 [v0.1.0 发布说明](docs/release-notes-v0.1.0.md)。
 
 ## 公开代码与私人知识
 
@@ -76,6 +76,7 @@ codex plugin add codex-opc-team@opc
 
 | 文档 | 内容 |
 |---|---|
+| [v0.1.0 发布说明](docs/release-notes-v0.1.0.md) | 兼容范围、安装、迁移、限制、回滚与发布证据 |
 | [缘起与决策](docs/origin-and-decisions.md) | 从真实需求到架构选择的演变 |
 | [愿景与范围](docs/vision-and-scope.md) | 产品目标、边界和用户体验 |
 | [系统架构](docs/architecture.md) | 分层、组件、契约和执行流程 |

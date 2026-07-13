@@ -2,11 +2,12 @@
 
 ## Supported versions
 
-在首个稳定版本发布前，仅 `main` 分支接受安全修复。版本发布后，本表随 Release 更新：
+安全修复优先落到受支持的发布线，并按需要同步到 `main`。本表随 Release 更新：
 
 | Version | Supported |
 |---|---:|
-| `main` / pre-release | Yes |
+| `0.1.x` | Yes |
+| `main` | Yes |
 | 未列出的历史版本 | No |
 
 ## Reporting a vulnerability
