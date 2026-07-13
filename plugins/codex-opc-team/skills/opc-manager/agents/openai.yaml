@@ -1,0 +1,4 @@
+interface:
+  display_name: "OPC 总管"
+  short_description: "组织 Codex 员工完成从目标对齐、实施到独立验收的闭环"
+  default_prompt: "使用 $opc-manager 把这个想法交给团队完成，通过内部验收后再通知我体验。"

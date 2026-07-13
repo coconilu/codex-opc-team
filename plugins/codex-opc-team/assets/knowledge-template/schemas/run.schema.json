@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:schema:run:v1",
+  "title": "OPC Run",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "title",
+    "project_id",
+    "status",
+    "active",
+    "evidence",
+    "created_at",
+    "updated_at",
+    "expires_at"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "pattern": "^opc-[A-Za-z0-9._-]+$"},
+    "title": {"type": "string", "minLength": 1},
+    "project_id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$"},
+    "manager": {"type": "string", "minLength": 1},
+    "status": {
+      "enum": ["aligning", "planned", "implementing", "validating", "ready_for_manager", "completed", "paused", "failed"]
+    },
+    "active": {"type": "boolean"},
+    "allow_stop": {"type": "boolean"},
+    "team": {"type": "array"},
+    "acceptance_criteria": {"type": "array"},
+    "evidence": {"type": "object", "additionalProperties": {"type": "string"}},
+    "notes": {"type": "array", "items": {"type": "string"}},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

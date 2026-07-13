@@ -1,0 +1,20 @@
+{
+  "name": "opc",
+  "interface": {
+    "displayName": "Codex OPC Team"
+  },
+  "plugins": [
+    {
+      "name": "codex-opc-team",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-opc-team"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

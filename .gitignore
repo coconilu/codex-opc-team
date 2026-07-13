@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+dist/
+build/
+*.egg-info/
+
+# Runtime and private organizational state never belong in the public repo.
+.opc/
+opc-knowledge/
+hook-events.jsonl
+*.local.json
+*.local.toml

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "organization": "personal-opc",
+  "default_manager": "user",
+  "roles": ["product", "architect", "researcher", "developer", "qa"],
+  "knowledge_policy": "company/knowledge-policy.md",
+  "canonical_backend": "file-git",
+  "recall_provider": "file"
+}

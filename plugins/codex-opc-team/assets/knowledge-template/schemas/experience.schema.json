@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:schema:experience:v1",
+  "title": "OPC Organizational Experience",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "type",
+    "summary",
+    "content",
+    "keywords",
+    "metadata",
+    "scope",
+    "owner",
+    "evidence",
+    "confidence",
+    "status",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^exp-[A-Za-z0-9._-]+$"},
+    "type": {"type": "string", "minLength": 1},
+    "summary": {"type": "string", "minLength": 1},
+    "content": {"type": "string", "minLength": 1},
+    "status": {"enum": ["candidate", "approved", "rejected", "obsolete"]},
+    "keywords": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "metadata": {"type": "object"},
+    "scope": {"type": "string"},
+    "owner": {"type": "string"},
+    "project_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+    "source": {"type": ["string", "object"]},
+    "evidence": {"type": "object"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "validation": {"type": ["string", "object"]},
+    "approved_by": {"type": "string"},
+    "approved_at": {"type": "string", "format": "date-time"},
+    "rejected_by": {"type": "string"},
+    "rejected_at": {"type": "string", "format": "date-time"},
+    "rejection_reason": {"type": "string"},
+    "obsolete_at": {"type": "string", "format": "date-time"},
+    "obsolete_reason": {"type": "string"},
+    "superseded_by": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "approved"}}, "required": ["status"]},
+      "then": {"required": ["approved_by", "approved_at", "validation"]}
+    },
+    {
+      "if": {"properties": {"status": {"const": "rejected"}}, "required": ["status"]},
+      "then": {"required": ["rejected_by", "rejected_at", "rejection_reason"]}
+    },
+    {
+      "if": {"properties": {"status": {"const": "obsolete"}}, "required": ["status"]},
+      "then": {"required": ["obsolete_at", "obsolete_reason"]}
+    }
+  ],
+  "additionalProperties": false
+}

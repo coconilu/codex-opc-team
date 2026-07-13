@@ -1,0 +1,38 @@
+{
+  "name": "codex-opc-team",
+  "version": "0.1.0",
+  "description": "A Codex-native one-person-company team with delegated delivery, independent QA, and governed organizational memory.",
+  "author": {
+    "name": "coconilu",
+    "url": "https://github.com/coconilu"
+  },
+  "homepage": "https://github.com/coconilu/codex-opc-team",
+  "repository": "https://github.com/coconilu/codex-opc-team",
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "opc",
+    "multi-agent",
+    "memory",
+    "qa"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex OPC Team",
+    "shortDescription": "Run a durable AI team inside Codex.",
+    "longDescription": "Keep Codex as the harness while adding manager alignment, role delegation, independent QA, evidence-backed handoffs, portable File/Git knowledge, and optional Mem0 semantic recall.",
+    "developerName": "coconilu",
+    "category": "Productivity",
+    "capabilities": [
+      "Multi-agent",
+      "Project workflow",
+      "Independent QA",
+      "Organizational memory"
+    ],
+    "defaultPrompt": [
+      "Use $opc-manager to take this idea from alignment through independent acceptance.",
+      "Use $opc-project-bootstrap to onboard the current repository into my OPC team.",
+      "Use $opc-memory to check or configure the optional semantic-memory backend."
+    ]
+  }
+}

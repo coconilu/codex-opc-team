@@ -1,0 +1,80 @@
+# Codex OPC Team
+
+[简体中文](README.zh-CN.md) · [Architecture](docs/architecture.md) · [Security](SECURITY.md) · [Roadmap](docs/roadmap.md)
+
+Codex OPC Team is an open-source, Codex-native operating model for a one-person company. It turns a project request into an aligned plan, delegated implementation, independent QA, and an evidence-backed retrospective while keeping the user in the manager role.
+
+Codex remains the harness. The project does not replace Codex's file, browser, web, tool, and sub-agent capabilities with another agent runtime.
+
+## Design principles
+
+| Principle | Meaning |
+|---|---|
+| Codex-native | Reuse Codex as the execution harness and distribute the team as a plugin. |
+| Manager-first | Ask the user for direction and material decisions, not routine implementation details. |
+| Portable memory | Git-managed files are the durable source of truth. |
+| Optional Mem0 | Mem0 can improve semantic recall, but the full workflow must work without it. |
+| Controlled learning | Experience moves from candidate to manager-approved knowledge, then becomes recallable only after an exact Git commit is verifiable at the current HEAD; it is never silently promoted. |
+| Independent acceptance | A developer's self-report is not QA evidence. The manager is notified only after an independent gate. |
+| Private by default | Public plugin code is separated from private organizational knowledge and runtime data. |
+
+## Operating loop
+
+```mermaid
+flowchart LR
+    U["Manager intent"] --> M["OPC manager: align and contract"]
+    M --> D["Delegate to role agents"]
+    D --> Q["Independent QA"]
+    Q -->|"FAIL"| D
+    Q -->|"PASS"| H["Manager handoff"]
+    H --> R["Retrospective candidate"]
+    R --> V["Validate and approve"]
+    V --> K["Portable knowledge"]
+```
+
+## Project status
+
+The repository is a `v0.1.0` release candidate. The Codex-native team loop, File/Git memory, optional Mem0 adapter, safe hooks, installer, and automated gates are implemented and pass local validation. Treat the Git tag, rather than `main`, as the stable install source after the release workflow completes. See the [roadmap](docs/roadmap.md) and [acceptance contract](docs/testing-and-acceptance.md).
+
+## Installation
+
+Prerequisites: Codex CLI, Git, and Python 3.10 or newer. Mem0 is not required.
+
+After a tagged release is published, add this repository as a Codex marketplace and install the plugin:
+
+```powershell
+codex plugin marketplace add coconilu/codex-opc-team --ref v0.1.0
+codex plugin add codex-opc-team@opc
+```
+
+The default File/Git memory mode has no Mem0 dependency. Mem0 setup is optional and must degrade safely when unavailable. Detailed install, upgrade, removal, and data-retention behavior is documented in [installation and distribution](docs/installation-and-distribution.md).
+
+## Public code, private knowledge
+
+This repository contains plugin behavior, schemas, empty templates, tests, and documentation. It must not contain a user's manager profile, project history, approved organizational experience, raw conversations, credentials, local paths, or runtime identifiers.
+
+Private knowledge is initialized outside the plugin cache and remains user-controlled. Removing the plugin must not delete that knowledge.
+
+## Documentation
+
+| Document | Purpose |
+|---|---|
+| [Origin and decisions](docs/origin-and-decisions.md) | Why this project exists and how the design converged |
+| [Vision and scope](docs/vision-and-scope.md) | Product goals, boundaries, and user experience |
+| [Architecture](docs/architecture.md) | Components, contracts, and execution flow |
+| [Memory architecture](docs/memory-architecture.md) | File/Git authority, optional Mem0, and learning governance |
+| [Installation and distribution](docs/installation-and-distribution.md) | Local install, marketplace release, upgrade, and removal |
+| [Migration](docs/migration-from-local-prototype.md) | Safe cutover from the local prototype |
+| [Security and privacy](docs/security-and-privacy.md) | Data boundaries, hook safety, and publication checks |
+| [Testing and acceptance](docs/testing-and-acceptance.md) | Test matrix and release gates |
+| [Roadmap](docs/roadmap.md) | Planned delivery stages |
+
+Architecture decisions live under [`docs/adr`](docs/adr/README.md).
+
+## Contributing and security
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing. Report vulnerabilities according to [SECURITY.md](SECURITY.md); do not disclose sensitive reports in public issues.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).

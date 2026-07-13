@@ -1,0 +1,3 @@
+# Optional semantic-recall adapter. OPC works completely without this file.
+mem0ai==2.0.11
+httpx[socks]==0.28.1

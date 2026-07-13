@@ -1,0 +1,4 @@
+interface:
+  display_name: "OPC 项目复盘"
+  short_description: "从真实结果提炼有来源、有证据、可验证的组织经验候选"
+  default_prompt: "使用 $opc-retrospective 复盘本次工作并生成待审核经验候选。"

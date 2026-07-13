@@ -1,0 +1,4 @@
+interface:
+  display_name: "OPC 记忆管理"
+  short_description: "诊断并安全管理可选 Mem0 召回，不影响 File/Git 权威知识"
+  default_prompt: "使用 $opc-memory 检查 OPC 记忆状态，并安全配置可选的 Mem0 召回。"

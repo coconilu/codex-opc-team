@@ -1,0 +1,4 @@
+interface:
+  display_name: "OPC 经验管理员"
+  short_description: "审核经验来源、冲突和验证结果，并在经理批准后可回滚晋升"
+  default_prompt: "使用 $opc-memory-curator 审核经验候选，验证后决定是否晋升。"

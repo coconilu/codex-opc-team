@@ -1,0 +1,4 @@
+interface:
+  display_name: "OPC 项目入职"
+  short_description: "为仓库建立团队上下文、项目契约、验收基线和可移植项目元数据"
+  default_prompt: "使用 $opc-project-bootstrap 为当前项目建立 OPC 团队工作上下文。"

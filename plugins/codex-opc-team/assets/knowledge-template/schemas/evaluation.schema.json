@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:schema:evaluation:v1",
+  "title": "OPC Evaluation Record",
+  "type": "object",
+  "required": ["event", "at"],
+  "properties": {
+    "event": {"type": "string", "minLength": 1},
+    "at": {"type": "string", "format": "date-time"},
+    "run_id": {"type": "string", "pattern": "^opc-[A-Za-z0-9._-]+$"},
+    "candidate_id": {"type": "string", "pattern": "^exp-[A-Za-z0-9._-]+$"},
+    "project_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+    "role": {"type": "string"},
+    "outcome": {"type": "string"},
+    "artifact_refs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"}
+    }
+  },
+  "additionalProperties": false
+}

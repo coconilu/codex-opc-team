@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/opc_hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/scripts/opc_hook.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking OPC employee handoff"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/opc_hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/scripts/opc_hook.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking OPC acceptance gate"
+          }
+        ]
+      }
+    ]
+  }
+}

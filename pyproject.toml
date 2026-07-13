@@ -1,0 +1,14 @@
+[project]
+name = "codex-opc-team"
+version = "0.1.0"
+description = "Portable memory and validation helpers for the Codex OPC Team plugin"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+
+[project.optional-dependencies]
+mem0 = ["mem0ai==2.0.11", "httpx[socks]==0.28.1"]
+test = ["pytest>=8,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

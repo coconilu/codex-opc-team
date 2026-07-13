@@ -1,0 +1,4 @@
+interface:
+  display_name: "OPC 验收门禁"
+  short_description: "用真实构建、测试、运行时和产物证据执行独立验收"
+  default_prompt: "使用 $opc-qa-gate 独立验收当前实现，并判断能否通知经理体验。"
