@@ -18,6 +18,7 @@ This is a public release candidate for review and fixed-ref lifecycle validation
 ### Fixed
 
 - Isolated Hook/runtime events from canonical knowledge even when `PLUGIN_DATA` is missing or misconfigured, and added redacted preview-first legacy event diagnostics and archival.
+- Made release-tag validation fail closed when Git enumeration fails or any malformed, unexpected, or duplicate `v`-prefixed tag points at the candidate commit.
 
 ### Security
 

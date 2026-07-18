@@ -78,15 +78,18 @@ def validate_version_contract() -> None:
         text=True,
         capture_output=True,
     )
-    version_tags = (
-        [
-            tag
-            for tag in tags.stdout.splitlines()
-            if tag.startswith("v") and SEMVER.fullmatch(tag[1:])
-        ]
-        if tags.returncode == 0
-        else []
+    require(
+        tags.returncode == 0,
+        "Git tag enumeration at HEAD failed; version state is unknown",
     )
+    # Do not pre-filter through the valid SemVer regex.  A PEP 440 spelling
+    # such as ``v0.1.1rc1`` or a malformed ``v0.1.1-`` is precisely the state
+    # this contract must reject, not silently reinterpret as "no version tag".
+    # An untagged candidate commit is allowed; once any v-prefixed tag points
+    # at HEAD, the only permitted value is the exact manifest-derived tag.
+    version_tags = [
+        tag for tag in tags.stdout.splitlines() if tag.startswith(("v", "V"))
+    ]
     if version_tags:
         expected_tag = f"v{manifest_version}"
         require(
