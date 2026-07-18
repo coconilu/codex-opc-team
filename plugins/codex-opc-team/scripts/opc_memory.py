@@ -289,6 +289,61 @@ def _object_token(identity: Mapping[str, int]) -> str:
     )
 
 
+def _directory_object_token(identity: Mapping[str, int]) -> str:
+    """Bind a directory object while allowing expected entry metadata changes."""
+    return _metadata_token(
+        {key: identity[key] for key in ("device", "inode", "mode")}
+    )
+
+
+def _bind_archive_parent(path: Path, archive_root: Path, *, source_label: str) -> str:
+    """Validate containment and return a stable identity for a directory object."""
+    try:
+        identity = _lstat_identity(path)
+        resolved = path.resolve()
+        resolved.relative_to(archive_root)
+    except (OSError, ValueError) as exc:
+        raise OpcMemoryError(
+            "LEGACY_EVENT_MOVE_BLOCKED: archive parent is unavailable or escaped "
+            f"private data ({source_label})"
+        ) from exc
+    if path.is_symlink() or not stat.S_ISDIR(identity["mode"]):
+        raise OpcMemoryError(
+            "LEGACY_EVENT_MOVE_BLOCKED: archive parent is not a stable directory "
+            f"({source_label})"
+        )
+    return _directory_object_token(identity)
+
+
+def _archive_parent_unchanged(
+    path: Path, archive_root: Path, expected_token: str
+) -> bool:
+    try:
+        identity = _lstat_identity(path)
+        path.resolve().relative_to(archive_root)
+    except (OSError, ValueError):
+        return False
+    return (
+        not path.is_symlink()
+        and stat.S_ISDIR(identity["mode"])
+        and _directory_object_token(identity) == expected_token
+    )
+
+
+def _rollback_created_link(destination: Path, created_object_token: str | None) -> bool:
+    """Remove only the object just linked; never unlink an unverified competitor."""
+    if not created_object_token:
+        return False
+    try:
+        identity = _lstat_identity(destination)
+        if _object_token(identity) != created_object_token:
+            return False
+        destination.unlink()
+        return True
+    except OSError:
+        return False
+
+
 @contextmanager
 def _legacy_archive_lock(data_root: Path):
     """Serialize legacy archive apply operations inside private runtime data."""
@@ -1053,6 +1108,11 @@ class FileGitBackend:
                         "LEGACY_EVENT_MOVE_BLOCKED: archive destination escaped the "
                         f"private archive root ({entry['source']})"
                     ) from exc
+                parent_binding = _bind_archive_parent(
+                    destination.parent,
+                    archive_root,
+                    source_label=str(entry["source"]),
+                )
                 try:
                     identity = _lstat_identity(source)
                 except OSError as exc:
@@ -1080,6 +1140,8 @@ class FileGitBackend:
                         f"the archive target ({entry['source']})"
                     )
                 created_destination = False
+                created_object_token: str | None = None
+                created_destination_path: Path | None = None
                 try:
                     os.link(source, destination, follow_symlinks=False)
                     created_destination = True
@@ -1095,12 +1157,23 @@ class FileGitBackend:
                         f"({entry['source']})"
                     ) from exc
                 try:
-                    linked_identity = _lstat_identity(destination)
+                    created_destination_path = (
+                        destination.parent.resolve() / destination.name
+                    )
+                    linked_identity = _lstat_identity(created_destination_path)
+                    created_object_token = _object_token(linked_identity)
                     current_source_identity = _lstat_identity(source)
                     expected_object = str(entry["source_object_token"])
+                    if not _archive_parent_unchanged(
+                        destination.parent, archive_root, parent_binding
+                    ):
+                        raise OpcMemoryError(
+                            "LEGACY_EVENT_PLAN_CHANGED: archive parent changed "
+                            f"during the no-overwrite move ({entry['source']})"
+                        )
                     if (
                         not stat.S_ISREG(linked_identity["mode"])
-                        or destination.is_symlink()
+                        or created_destination_path.is_symlink()
                         or _object_token(linked_identity) != expected_object
                         or _object_token(current_source_identity) != expected_object
                         or self._tracked_path(str(entry["source"])) is not False
@@ -1109,13 +1182,24 @@ class FileGitBackend:
                             "LEGACY_EVENT_PLAN_CHANGED: source or Git state changed "
                             f"during the no-overwrite move ({entry['source']})"
                         )
+                    if not _archive_parent_unchanged(
+                        destination.parent, archive_root, parent_binding
+                    ):
+                        raise OpcMemoryError(
+                            "LEGACY_EVENT_PLAN_CHANGED: archive parent changed "
+                            f"before source removal ({entry['source']})"
+                        )
                     source.unlink()
-                except Exception:
-                    if created_destination:
-                        try:
-                            destination.unlink()
-                        except OSError:
-                            pass
+                except Exception as exc:
+                    if created_destination and not _rollback_created_link(
+                        created_destination_path or destination,
+                        created_object_token,
+                    ):
+                        raise OpcMemoryError(
+                            "LEGACY_EVENT_ROLLBACK_FAILED: source was preserved but "
+                            "the newly linked archive target could not be safely "
+                            f"removed ({entry['source']})"
+                        ) from exc
                     raise
                 moved.append(
                     {

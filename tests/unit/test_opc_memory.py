@@ -1293,6 +1293,46 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertEqual("source-event\n", legacy.read_text(encoding="utf-8"))
         self.assertEqual("competing-event\n", destination.read_text(encoding="utf-8"))
 
+    @unittest.skipUnless(shutil.which("git"), "Git is required for parent race test")
+    def test_destination_parent_symlink_swap_cannot_write_outside_data_root(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("source-event\n", encoding="utf-8")
+        preview = self.backend.legacy_runtime_plan(self.data)
+        external = self.knowledge.parent / "external-archive"
+        external.mkdir()
+        probe = self.knowledge.parent / "directory-symlink-probe"
+        try:
+            probe.symlink_to(external, target_is_directory=True)
+            probe.unlink()
+        except OSError as exc:
+            self.skipTest(f"Directory symlinks unavailable: {exc}")
+        real_link = opc_memory.os.link
+
+        def swap_parent_then_link(source, destination, **kwargs):
+            parent = Path(destination).parent
+            approved_parent = parent.with_name(parent.name + "-approved")
+            parent.rename(approved_parent)
+            parent.symlink_to(external, target_is_directory=True)
+            return real_link(source, destination, **kwargs)
+
+        with patch.object(
+            opc_memory.os, "link", side_effect=swap_parent_then_link
+        ):
+            with self.assertRaisesRegex(
+                opc_memory.OpcMemoryError, "archive parent changed"
+            ):
+                self.backend.apply_legacy_runtime_plan(
+                    self.data, plan_token=preview["approval_token"]
+                )
+        escaped = external / "hook-events.jsonl"
+        self.assertEqual("source-event\n", legacy.read_text(encoding="utf-8"))
+        self.assertFalse(escaped.exists())
+
     @unittest.skipUnless(shutil.which("git"), "Git is required for tracked legacy test")
     def test_tracked_legacy_runtime_artifact_is_never_moved_automatically(self) -> None:
         legacy = self.knowledge / "evaluations" / "events" / "historic.jsonl"

@@ -15,7 +15,7 @@ Hook 和运行事件不是组织知识。有效 OPC Run 的事件只允许进入
 
 `status` 和 `doctor` 只按已知 legacy 位置与文件名检查元数据，不读取或输出事件内容。已知 legacy 运行文件以 `LEGACY_RUNTIME_ARTIFACTS` 单独报告，不作为 `UNCOMMITTED_KNOWLEDGE`，也不改变 File/Git 权威条目的判断。
 
-修复流程默认运行 `legacy-events --dry-run`。预览返回源/目标相对路径；plan token 绑定解析后的 knowledge/data/archive roots、精确源/目标和不读取内容的 `lstat` 对象身份。只有再次显式使用 `--apply --plan-token <token>` 才能归档未跟踪的普通文件。Apply 在私有 data-root 锁内重新核验 token、对象类型、Git 状态和目标空缺，再通过同文件系统 hard link 原子创建不覆盖目标，确认源/目标仍是获批的同一对象后才移除源路径。自动流程拒绝符号链接、已跟踪文件、已有目标、变化后的计划和跨文件系统失败，并且永不自动删除、提交或上传事件数据。
+修复流程默认运行 `legacy-events --dry-run`。预览返回源/目标相对路径；plan token 绑定解析后的 knowledge/data/archive roots、精确源/目标和不读取内容的 `lstat` 对象身份。只有再次显式使用 `--apply --plan-token <token>` 才能归档未跟踪的普通文件。Apply 在私有 data-root 锁内重新核验 token、对象类型、Git 状态和目标空缺，并绑定已验证目标父目录的 filesystem object identity；通过同文件系统 hard link 原子创建不覆盖目标后，再次验证父目录仍为同一对象且仍包含在 archive root，确认源/目标仍是获批的同一对象后才移除源路径。父目录 rename/symlink race 会先安全回滚刚创建的目标并保留源。自动流程拒绝符号链接、已跟踪文件、已有目标、变化后的计划和跨文件系统失败，并且永不自动删除、提交或上传事件数据。
 
 ## Consequences
 
