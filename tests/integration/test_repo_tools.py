@@ -24,6 +24,57 @@ def load(name: str, relative: str):
 privacy_scan = load("privacy_scan", "scripts/privacy_scan.py")
 migrate_legacy = load("migrate_legacy", "scripts/migrate_legacy.py")
 plugin_admin = load("plugin_admin", "scripts/plugin_admin.py")
+validate_repo = load("validate_repo", "scripts/validate_repo.py")
+
+
+class VersionContractTests(unittest.TestCase):
+    @staticmethod
+    def tag_result(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["git", "tag", "--points-at", "HEAD"],
+            returncode=returncode,
+            stdout=stdout,
+            stderr="synthetic tag enumeration failure" if returncode else "",
+        )
+
+    @mock.patch.object(validate_repo.subprocess, "run")
+    def test_exact_release_candidate_tag_passes(self, run):
+        run.return_value = self.tag_result("v0.1.1-rc.1\n")
+        validate_repo.validate_version_contract()
+
+    @mock.patch.object(validate_repo.subprocess, "run")
+    def test_untagged_candidate_commit_passes(self, run):
+        run.return_value = self.tag_result("")
+        validate_repo.validate_version_contract()
+
+    @mock.patch.object(validate_repo.subprocess, "run")
+    def test_pep440_style_release_candidate_tag_fails(self, run):
+        run.return_value = self.tag_result("v0.1.1rc1\n")
+        with self.assertRaisesRegex(ValueError, "must be exactly v0.1.1-rc.1"):
+            validate_repo.validate_version_contract()
+
+    @mock.patch.object(validate_repo.subprocess, "run")
+    def test_wrong_or_multiple_release_candidate_tags_fail(self, run):
+        for stdout in (
+            "v0.1.2-rc.1\n",
+            "v0.1.1-rc.1\nv0.1.1-rc.2\n",
+        ):
+            with self.subTest(stdout=stdout):
+                run.return_value = self.tag_result(stdout)
+                with self.assertRaisesRegex(ValueError, "must be exactly v0.1.1-rc.1"):
+                    validate_repo.validate_version_contract()
+
+    @mock.patch.object(validate_repo.subprocess, "run")
+    def test_malformed_semver_tag_fails(self, run):
+        run.return_value = self.tag_result("v0.1.1-\n")
+        with self.assertRaisesRegex(ValueError, "must be exactly v0.1.1-rc.1"):
+            validate_repo.validate_version_contract()
+
+    @mock.patch.object(validate_repo.subprocess, "run")
+    def test_git_tag_enumeration_failure_fails_closed(self, run):
+        run.return_value = self.tag_result("", returncode=128)
+        with self.assertRaisesRegex(ValueError, "version state is unknown"):
+            validate_repo.validate_version_contract()
 
 
 class PrivacyScanTests(unittest.TestCase):

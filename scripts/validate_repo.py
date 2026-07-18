@@ -78,25 +78,28 @@ def validate_version_contract() -> None:
         text=True,
         capture_output=True,
     )
-    stable_tags = (
-        [
-            tag
-            for tag in tags.stdout.splitlines()
-            if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", tag)
-        ]
-        if tags.returncode == 0
-        else []
+    require(
+        tags.returncode == 0,
+        "Git tag enumeration at HEAD failed; version state is unknown",
     )
-    if stable_tags:
+    # Do not pre-filter through the valid SemVer regex.  A PEP 440 spelling
+    # such as ``v0.1.1rc1`` or a malformed ``v0.1.1-`` is precisely the state
+    # this contract must reject, not silently reinterpret as "no version tag".
+    # An untagged candidate commit is allowed; once any v-prefixed tag points
+    # at HEAD, the only permitted value is the exact manifest-derived tag.
+    version_tags = [
+        tag for tag in tags.stdout.splitlines() if tag.startswith(("v", "V"))
+    ]
+    if version_tags:
         expected_tag = f"v{manifest_version}"
         require(
-            stable_tags == [expected_tag],
-            f"stable tag at HEAD must be exactly {expected_tag}",
+            version_tags == [expected_tag],
+            f"version tag at HEAD must be exactly {expected_tag}",
         )
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         require(
             f"## [{manifest_version}] - " in changelog,
-            "a stable tag requires a dated matching CHANGELOG release section",
+            "a version tag requires a dated matching CHANGELOG release section",
         )
 
 

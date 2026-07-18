@@ -76,6 +76,8 @@ Optional Mem0 切片必须在安装依赖前从 `RUNNER_TEMP` 初始化 `MEM0_DI
 | 重复卸载 | 不删除未知文件，不报破坏性错误 |
 | 回滚 | 配置、Marketplace 和旧插件恢复后最小流程通过 |
 
+仓库使用 `scripts/plugin_lifecycle_acceptance.py` 执行真实 Codex CLI 安装态 Gate，并通过 `codex debug prompt-input` 的全新进程输出精确验证 model-visible canonical Skill names。Pull Request 和 `main` push 在 disposable Windows/Linux Runner 中执行本地合成候选/回滚生命周期；固定标签发布另由手动工作流解析并钉住两个不可变 commit OID。隔离边界、脱敏报告和人工新任务抽查步骤见[安装态生命周期验收](installed-lifecycle-acceptance.md)。目录或假 CLI Fixture 只能测试编排契约，不能冒充实际插件发现证据。
+
 ## 7. 独立 QA 测试
 
 正向端到端场景必须由不同职责完成：
@@ -107,6 +109,8 @@ sequenceDiagram
 | G8 发布 | 版本、Changelog、Release Notes、安装与迁移说明一致 |
 
 G1–G7 未全部通过不得创建稳定 Release；G8 在发布动作中完成。
+
+G5/G7 的发布证据必须使用两个不同的固定 Ref；本地路径对同一版本执行的重装只证明包生命周期与幂等性，不证明版本回滚。候选标签尚未存在时，应把固定标签回滚 Gate 标记为待发布执行，不能用当前工作区结果替代。
 
 ## 9. 验收证据格式
 
