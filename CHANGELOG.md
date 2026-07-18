@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added a preview-first, real-Codex clean-room acceptance flow for fixed-ref install, fresh-process Skill discovery, uninstall, reinstall, rollback, idempotency, and synthetic knowledge/config/data preservation on Windows and Linux.
+
 ### Fixed
 
 - Isolated Hook/runtime events from canonical knowledge even when `PLUGIN_DATA` is missing or misconfigured, and added redacted preview-first legacy event diagnostics and archival.

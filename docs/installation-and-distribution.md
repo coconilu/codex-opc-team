@@ -141,3 +141,5 @@ python scripts/plugin_admin.py uninstall --remove-marketplace --apply
 ## 11. 发布检查
 
 每个 GitHub Release 至少包括：版本兼容范围、安装命令、重要变更、数据/Schema Migration、已知限制、回滚步骤和验证证据。`v0.1.0` 的完整记录见 [发布说明](release-notes-v0.1.0.md)，Release Gate 详见[测试与验收](testing-and-acceptance.md)。
+
+固定候选 Ref 的真实安装、全新进程 Skill 发现、卸载、重装、回滚和数据保留，使用[安装态生命周期验收](installed-lifecycle-acceptance.md)。该流程必须同时隔离 `CODEX_HOME` 与操作系统用户 Home；只改 `CODEX_HOME` 仍可能加载真实 Personal Marketplace，不能作为 clean-room 证据。

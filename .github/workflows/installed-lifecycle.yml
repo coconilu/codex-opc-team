@@ -1,0 +1,90 @@
+name: Installed lifecycle acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Immutable candidate release tag or commit
+        required: true
+        type: string
+      candidate_version:
+        description: Expected plugin manifest version
+        required: true
+        type: string
+      rollback_ref:
+        description: Previous supported release tag
+        required: true
+        default: v0.1.0
+        type: string
+      rollback_version:
+        description: Expected rollback plugin manifest version
+        required: true
+        default: 0.1.0
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  installed-lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install pinned Codex CLI (tooling and network boundary)
+        run: npm install --global @openai/codex@0.144.1
+
+      - name: Verify Codex lifecycle capability
+        run: |
+          codex --version
+          codex debug prompt-input --help
+
+      - name: Run fixed-ref installed lifecycle (package boundary)
+        shell: python
+        env:
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          CANDIDATE_VERSION: ${{ inputs.candidate_version }}
+          ROLLBACK_REF: ${{ inputs.rollback_ref }}
+          ROLLBACK_VERSION: ${{ inputs.rollback_version }}
+        run: |
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "opc-installed-lifecycle"
+          report = Path(os.environ["RUNNER_TEMP"]) / "opc-installed-lifecycle-report.json"
+          command = [
+              sys.executable,
+              "scripts/plugin_lifecycle_acceptance.py",
+              "--workspace", str(root),
+              "--candidate-source", os.environ["GITHUB_REPOSITORY"],
+              "--candidate-ref", os.environ["CANDIDATE_REF"],
+              "--expected-candidate-version", os.environ["CANDIDATE_VERSION"],
+              "--rollback-source", os.environ["GITHUB_REPOSITORY"],
+              "--rollback-ref", os.environ["ROLLBACK_REF"],
+              "--expected-rollback-version", os.environ["ROLLBACK_VERSION"],
+              "--require-fixed-refs",
+              "--report", str(report),
+              "--apply",
+          ]
+          raise SystemExit(subprocess.run(command, check=False).returncode)
+
+      - name: Upload redacted lifecycle report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-lifecycle-${{ matrix.os }}
+          path: ${{ runner.temp }}/opc-installed-lifecycle-report.json
+          if-no-files-found: warn
+          retention-days: 14
