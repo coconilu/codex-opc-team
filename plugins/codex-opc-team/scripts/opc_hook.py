@@ -41,6 +41,20 @@ def _block(reason: str) -> dict[str, Any]:
     return {"continue": False, "stopReason": reason}
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    """Return true when either resolved root contains the other."""
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        pass
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
+
+
 def _read_payload() -> dict[str, Any]:
     try:
         value = json.load(sys.stdin)
@@ -99,14 +113,29 @@ def _valid_run(run: Mapping[str, Any], run_path: Path, start: Path) -> bool:
 
 
 def _event_path(run_path: Path, run_id: str) -> Path:
+    project_fallback = run_path.parent / "events.jsonl"
     plugin_data = os.environ.get("PLUGIN_DATA")
-    if plugin_data:
-        return (
-            Path(plugin_data).expanduser().resolve()
-            / "run-events"
-            / f"{run_id}.jsonl"
+    if not plugin_data:
+        return project_fallback
+    try:
+        configured_data = Path(plugin_data).expanduser()
+        if not configured_data.is_absolute():
+            return project_fallback
+        data_root = configured_data.resolve()
+        knowledge_value = os.environ.get("OPC_KNOWLEDGE_HOME")
+        knowledge_root = (
+            Path(knowledge_value).expanduser().resolve()
+            if knowledge_value
+            else (Path.home() / "opc-knowledge").resolve()
         )
-    return run_path.parent / "events.jsonl"
+        if not _paths_overlap(data_root, knowledge_root):
+            return data_root / "run-events" / f"{run_id}.jsonl"
+    except (OSError, RuntimeError):
+        return project_fallback
+    # A misconfigured PLUGIN_DATA inside canonical knowledge must never turn
+    # runtime telemetry into organizational knowledge. Keep the event local to
+    # the already validated project run instead.
+    return project_fallback
 
 
 def _rotate_event_log(path: Path, incoming_bytes: int) -> None:

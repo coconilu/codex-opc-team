@@ -55,6 +55,8 @@ This repository contains plugin behavior, schemas, empty templates, tests, and d
 
 Private knowledge is initialized outside the plugin cache and remains user-controlled. Removing the plugin must not delete that knowledge.
 
+Hook/runtime events live in private `PLUGIN_DATA` or a project `.opc` fallback, never in canonical knowledge. `opc-memory` reports known legacy event artifacts without reading their contents and requires a dry-run plus a separately approved, unchanged plan before archiving them.
+
 ## Documentation
 
 | Document | Purpose |

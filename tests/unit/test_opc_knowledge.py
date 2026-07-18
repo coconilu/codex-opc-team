@@ -51,6 +51,9 @@ class KnowledgeLifecycleTests(unittest.TestCase):
             (self.knowledge / "evaluations" / "runs" / f"{run['run_id']}.json").exists()
         )
 
+    def test_clean_knowledge_initialization_has_no_runtime_event_directory(self) -> None:
+        self.assertFalse((self.knowledge / "evaluations" / "events").exists())
+
     @unittest.skipUnless(shutil.which("git"), "Git is required for cleanliness test")
     def test_run_lifecycle_does_not_dirty_knowledge_repository(self) -> None:
         knowledge = Path(self.tempdir.name) / "clean-knowledge"

@@ -4,7 +4,3 @@
 *.sqlite
 *.sqlite3
 *.db
-
-# Raw event streams are runtime data. Preserve only the empty directory marker.
-evaluations/events/*
-!evaluations/events/.gitkeep

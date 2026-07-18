@@ -72,6 +72,8 @@ flowchart TB
 
 Run Marker 同时是 Hook 记录的前置安全条件。Marker 不存在、已结束、已过期、项目标识不匹配，或 `.opc` 通过符号链接逃逸 Workspace 时，Hook 必须不产生任何事件。
 
+有效事件写入 `PLUGIN_DATA/run-events`；缺少可用的 `PLUGIN_DATA` 时回退到当前项目 `.opc/events.jsonl`。若 `PLUGIN_DATA` 被误配置到 `OPC_KNOWLEDGE_HOME` 内，Hook 必须使用项目回退路径，不能把运行事件写入权威知识库。该隔离决策见 [ADR-0007](adr/0007-runtime-events-outside-canonical-knowledge.md)。
+
 ### 3.3 Role Agents
 
 角色通过 Skills 和子 Agent 配置表达。委派包遵循最小充分原则：
@@ -137,7 +139,7 @@ sequenceDiagram
 | 状态 | 位置 | 生命周期 |
 |---|---|---|
 | 插件代码和模板 | 安装缓存/插件仓库 | 随版本替换，可重新安装 |
-| 插件运行数据 | Codex 提供的 `PLUGIN_DATA` 或等效私有数据目录 | 升级保留，卸载策略明确 |
+| 插件运行数据 | Codex 提供的 `PLUGIN_DATA`；不可用时使用项目 `.opc` 回退 | 升级保留，卸载策略明确；永不进入知识库 |
 | 项目运行标记和契约 | 项目自身 `.opc` 或约定目录 | 随项目版本控制策略管理 |
 | 组织知识 | 用户配置的 `OPC_KNOWLEDGE_HOME` | 独立于插件，用户拥有 |
 | Mem0 索引 | 用户私有数据目录 | 可删除、可重建，不是权威源 |
@@ -195,6 +197,7 @@ v0.1 以 `plugins/codex-opc-team/scripts/opc_memory.py` 为真实可调用契约
 | 子 Agent 失败 | 总管保留已有证据，重试、缩小任务或升级真实阻塞 |
 | QA 缺少环境 | 标记 BLOCKED，不转换成 PASS |
 | Hook 标记无效 | 零记录并安全退出 |
+| 发现 legacy Hook 事件 | 只报告相对路径和数量；先预览、另行批准后才移入私有运行目录 |
 
 ## 8. 扩展点
 

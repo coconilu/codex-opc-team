@@ -151,7 +151,7 @@ def init_knowledge(
     copied = _copy_template(template or _template_root(), root, force=force)
     backend = FileGitBackend(root)
     backend.ensure_layout()
-    for relative in ("evaluations/runs", "evaluations/events", "promotions"):
+    for relative in ("evaluations/runs", "promotions"):
         (root / relative).mkdir(parents=True, exist_ok=True)
     git_initialized = False
     git_baseline_commit: str | None = None

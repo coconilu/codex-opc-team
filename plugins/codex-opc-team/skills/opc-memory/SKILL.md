@@ -18,7 +18,7 @@ Manage recall without weakening the canonical File/Git knowledge boundary. Mem0 
 7. Resolve recalled records back to an approved canonical relative `source_path` and matching content hash before using them. Treat stale, missing, or rejected records as unusable.
 8. For `query` or `export-context` in a project, read `project_id` from `.opc/project.json` and pass `--project-id <current-project-id>`. Without project context, omit it and return global records only; never infer scope from an absolute path.
 9. Require `knowledge_root`, private `data_root`, and the installed plugin tree to be pairwise non-overlapping. Treat `ROOT_ISOLATION_ERROR` as a hard stop, including during dry-run.
-10. Read the Git audit in `status` or `doctor`: report repository root, HEAD, `provenance_ready`, dirty/staged/untracked paths, and `UNCOMMITTED_KNOWLEDGE`. A structurally valid `file_git.ok=true` is not enough to index or start managed work unless `file_git.provenance_ready=true`. Never stage or commit unrelated user changes.
+10. Read the Git audit in `status` or `doctor`: report repository root, HEAD, `provenance_ready`, dirty/staged/untracked paths, `UNCOMMITTED_KNOWLEDGE`, and separate `LEGACY_RUNTIME_ARTIFACTS`. A structurally valid `file_git.ok=true` is not enough to index or start managed work unless `file_git.provenance_ready=true`. Never stage or commit unrelated user changes.
 
 ## Choose the safe operation
 
@@ -26,6 +26,8 @@ Manage recall without weakening the canonical File/Git knowledge boundary. Mem0 
 |---|---|---|
 | Show current mode | `status` | Read-only; run directly |
 | Diagnose layout/provider | `doctor` | Read-only; run directly and separate warnings from failures |
+| Preview legacy events | `legacy-events --dry-run` | Default and read-only; follow `references/legacy-runtime-events.md` |
+| Archive legacy events | `legacy-events --apply --plan-token <preview-token>` | Requires separate approval of the unchanged preview; moves only eligible files |
 | Preview setup | `setup --enable-mem0 --dry-run` | Default; show paths, dependencies, network, and credential needs |
 | Apply setup | `setup --enable-mem0 --apply` | Obtain explicit approval after preview if packages, downloads, credentials, or persistent config are involved |
 | Preview incremental rebuild | `reindex --dry-run [--limit N]` | Default and read-only; report approved records that differ from local derived state |
@@ -37,6 +39,8 @@ Manage recall without weakening the canonical File/Git knowledge boundary. Mem0 
 | Purge data | No CLI command by design | Treat as destructive; follow the audited manual workflow below |
 
 Prefix table operations with `<memory-python> "<plugin-root>/scripts/opc_memory.py"`. Pass `--knowledge-root`, `--data-root`, and `--timeout` before the subcommand. Do not invent a `purge` or destructive uninstall flag. `reindex` defaults to preview; apply and force must always be explicit.
+
+When `status` or `doctor` reports `LEGACY_RUNTIME_ARTIFACTS`, read and follow `references/legacy-runtime-events.md`. Never open an event file to decide how to classify or remediate it.
 
 ## Guide setup
 

@@ -942,6 +942,455 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertEqual(report["state"], "NOT_INITIALIZED")
         self.assertFalse(report["provenance_ready"])
 
+    @unittest.skipUnless(shutil.which("git"), "Git is required for legacy audit test")
+    def test_legacy_runtime_artifact_is_redacted_and_not_uncommitted_knowledge(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        synthetic_private_marker = "synthetic-private-hook-payload"
+        legacy.write_text(synthetic_private_marker + "\n", encoding="utf-8")
+
+        audit = self.backend.git_audit()
+        self.assertIn("LEGACY_RUNTIME_ARTIFACTS", audit["warning_codes"])
+        self.assertNotIn("UNCOMMITTED_KNOWLEDGE", audit["warning_codes"])
+        self.assertEqual(
+            ["evaluations/events/hook-events.jsonl"],
+            audit["legacy_runtime_artifacts"],
+        )
+        self.assertEqual([], audit["authoritative_uncommitted"])
+
+        report = self.backend.doctor()
+        self.assertTrue(report["legacy_runtime"]["detected"])
+        self.assertFalse(report["legacy_runtime"]["contents_inspected"])
+        self.assertNotIn(synthetic_private_marker, json.dumps(report))
+        self.assertIn("legacy-events --dry-run", report["legacy_runtime"]["action"])
+        status = opc_memory.MemoryService(
+            self.backend, data_root=self.data
+        ).status()
+        self.assertTrue(status["legacy_runtime"]["detected"])
+        self.assertIn("legacy-events --dry-run", status["legacy_runtime"]["action"])
+        self.assertNotIn(synthetic_private_marker, json.dumps(status))
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for legacy archive test")
+    def test_legacy_runtime_archive_requires_unchanged_preview_token(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("synthetic-event\n", encoding="utf-8")
+
+        preview = self.backend.legacy_runtime_plan(self.data)
+        self.assertTrue(preview["dry_run"])
+        self.assertTrue(preview["detected"])
+        self.assertFalse(preview["contents_inspected"])
+        self.assertTrue(legacy.is_file())
+        self.assertFalse(self.data.exists())
+        self.assertEqual(
+            ["delete", "commit", "upload"], preview["automatic_actions_excluded"]
+        )
+
+        with self.assertRaisesRegex(
+            opc_memory.OpcMemoryError, "LEGACY_EVENT_PLAN_CHANGED"
+        ):
+            self.backend.apply_legacy_runtime_plan(self.data, plan_token=None)
+        self.assertTrue(legacy.is_file())
+
+        applied = self.backend.apply_legacy_runtime_plan(
+            self.data, plan_token=preview["approval_token"]
+        )
+        archived = (
+            self.data
+            / "legacy-event-archive"
+            / "evaluations"
+            / "events"
+            / "hook-events.jsonl"
+        )
+        self.assertTrue(applied["changed"])
+        self.assertFalse(legacy.exists())
+        self.assertEqual("synthetic-event\n", archived.read_text(encoding="utf-8"))
+        self.assertEqual([], self.backend.legacy_runtime_artifacts())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for plan binding test")
+    def test_legacy_plan_token_is_bound_to_data_and_knowledge_roots(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("synthetic-event\n", encoding="utf-8")
+        preview = self.backend.legacy_runtime_plan(self.data)
+
+        other_data = self.knowledge.parent / "other-plugin-data"
+        with self.assertRaisesRegex(
+            opc_memory.OpcMemoryError, "LEGACY_EVENT_PLAN_CHANGED"
+        ):
+            self.backend.apply_legacy_runtime_plan(
+                other_data, plan_token=preview["approval_token"]
+            )
+
+        other_knowledge = self.knowledge.parent / "other-knowledge"
+        other_backend = opc_memory.FileGitBackend(other_knowledge)
+        other_backend.ensure_layout()
+        (other_knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        subprocess.run(
+            ["git", "init", "-b", "main", str(other_knowledge)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(other_knowledge), "add", "--", "."],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(other_knowledge),
+                "-c",
+                "user.name=OPC Test",
+                "-c",
+                "user.email=opc-test@example.invalid",
+                "commit",
+                "-m",
+                "baseline",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        other_legacy = (
+            other_knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        )
+        other_legacy.parent.mkdir(parents=True)
+        other_legacy.write_text("synthetic-event\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            opc_memory.OpcMemoryError, "LEGACY_EVENT_PLAN_CHANGED"
+        ):
+            other_backend.apply_legacy_runtime_plan(
+                self.data, plan_token=preview["approval_token"]
+            )
+        self.assertTrue(legacy.is_file())
+        self.assertTrue(other_legacy.is_file())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for identity test")
+    def test_same_size_and_mtime_source_replacement_invalidates_plan_token(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("event-one\n", encoding="utf-8")
+        original = legacy.stat()
+        preview = self.backend.legacy_runtime_plan(self.data)
+
+        replacement = legacy.with_name("replacement.tmp")
+        replacement.write_text("event-two\n", encoding="utf-8")
+        os.utime(
+            replacement,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+        )
+        os.replace(replacement, legacy)
+        self.assertEqual(original.st_size, legacy.stat().st_size)
+        self.assertEqual(original.st_mtime_ns, legacy.stat().st_mtime_ns)
+        with self.assertRaisesRegex(
+            opc_memory.OpcMemoryError, "LEGACY_EVENT_PLAN_CHANGED"
+        ):
+            self.backend.apply_legacy_runtime_plan(
+                self.data, plan_token=preview["approval_token"]
+            )
+        self.assertEqual("event-two\n", legacy.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for Git failure test")
+    def test_git_tracked_state_failure_is_unknown_and_blocks_apply(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("synthetic-event\n", encoding="utf-8")
+        real_git = opc_memory._git
+
+        def failed_ls_files(cwd, args, **kwargs):
+            if args and args[0] == "ls-files":
+                return None
+            return real_git(cwd, args, **kwargs)
+
+        with patch.object(opc_memory, "_git", side_effect=failed_ls_files):
+            preview = self.backend.legacy_runtime_plan(self.data)
+            self.assertIsNone(preview["entries"][0]["tracked"])
+            self.assertFalse(preview["entries"][0]["eligible"])
+            self.assertIn("diagnosis failed", preview["entries"][0]["blocked_reason"])
+            with self.assertRaisesRegex(
+                opc_memory.OpcMemoryError, "LEGACY_EVENT_MOVE_BLOCKED"
+            ):
+                self.backend.apply_legacy_runtime_plan(
+                    self.data, plan_token=preview["approval_token"]
+                )
+        self.assertTrue(legacy.is_file())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for source race test")
+    def test_source_swap_during_atomic_archive_is_detected_and_rolled_back(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("event-one\n", encoding="utf-8")
+        replacement = legacy.with_name("replacement.tmp")
+        replacement.write_text("event-two\n", encoding="utf-8")
+        preview = self.backend.legacy_runtime_plan(self.data)
+        real_link = opc_memory.os.link
+
+        def swap_then_link(source, destination, **kwargs):
+            os.replace(replacement, source)
+            return real_link(source, destination, **kwargs)
+
+        with patch.object(opc_memory.os, "link", side_effect=swap_then_link):
+            with self.assertRaisesRegex(
+                opc_memory.OpcMemoryError, "LEGACY_EVENT_PLAN_CHANGED"
+            ):
+                self.backend.apply_legacy_runtime_plan(
+                    self.data, plan_token=preview["approval_token"]
+                )
+        destination = (
+            self.data
+            / "legacy-event-archive"
+            / "evaluations"
+            / "events"
+            / "hook-events.jsonl"
+        )
+        self.assertEqual("event-two\n", legacy.read_text(encoding="utf-8"))
+        self.assertFalse(destination.exists())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for tracked race test")
+    def test_source_becoming_tracked_during_archive_is_rolled_back(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("source-event\n", encoding="utf-8")
+        preview = self.backend.legacy_runtime_plan(self.data)
+        real_link = opc_memory.os.link
+
+        def track_then_link(source, destination, **kwargs):
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.knowledge),
+                    "add",
+                    "--",
+                    "evaluations/events/hook-events.jsonl",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            return real_link(source, destination, **kwargs)
+
+        with patch.object(opc_memory.os, "link", side_effect=track_then_link):
+            with self.assertRaisesRegex(
+                opc_memory.OpcMemoryError, "LEGACY_EVENT_PLAN_CHANGED"
+            ):
+                self.backend.apply_legacy_runtime_plan(
+                    self.data, plan_token=preview["approval_token"]
+                )
+        destination = (
+            self.data
+            / "legacy-event-archive"
+            / "evaluations"
+            / "events"
+            / "hook-events.jsonl"
+        )
+        self.assertTrue(legacy.is_file())
+        self.assertFalse(destination.exists())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for symlink race test")
+    def test_symlink_swap_during_atomic_archive_is_detected_and_rolled_back(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("event-one\n", encoding="utf-8")
+        outside = self.knowledge.parent / "outside-event.jsonl"
+        outside.write_text("outside-event\n", encoding="utf-8")
+        probe = legacy.with_name("symlink-probe")
+        try:
+            probe.symlink_to(outside)
+            probe.unlink()
+        except OSError as exc:
+            self.skipTest(f"File symlinks unavailable: {exc}")
+        preview = self.backend.legacy_runtime_plan(self.data)
+        real_link = opc_memory.os.link
+
+        def symlink_then_link(source, destination, **kwargs):
+            Path(source).unlink()
+            Path(source).symlink_to(outside)
+            return real_link(source, destination, **kwargs)
+
+        with patch.object(opc_memory.os, "link", side_effect=symlink_then_link):
+            with self.assertRaises(opc_memory.OpcMemoryError):
+                self.backend.apply_legacy_runtime_plan(
+                    self.data, plan_token=preview["approval_token"]
+                )
+        destination = (
+            self.data
+            / "legacy-event-archive"
+            / "evaluations"
+            / "events"
+            / "hook-events.jsonl"
+        )
+        self.assertTrue(legacy.is_symlink())
+        self.assertFalse(destination.exists())
+        self.assertEqual("outside-event\n", outside.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for destination race test")
+    def test_destination_race_never_overwrites_existing_archive_file(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("source-event\n", encoding="utf-8")
+        preview = self.backend.legacy_runtime_plan(self.data)
+        real_link = opc_memory.os.link
+
+        def create_destination_then_link(source, destination, **kwargs):
+            Path(destination).write_text("competing-event\n", encoding="utf-8")
+            return real_link(source, destination, **kwargs)
+
+        with patch.object(
+            opc_memory.os, "link", side_effect=create_destination_then_link
+        ):
+            with self.assertRaisesRegex(
+                opc_memory.OpcMemoryError, "LEGACY_EVENT_DESTINATION_EXISTS"
+            ):
+                self.backend.apply_legacy_runtime_plan(
+                    self.data, plan_token=preview["approval_token"]
+                )
+        destination = (
+            self.data
+            / "legacy-event-archive"
+            / "evaluations"
+            / "events"
+            / "hook-events.jsonl"
+        )
+        self.assertEqual("source-event\n", legacy.read_text(encoding="utf-8"))
+        self.assertEqual("competing-event\n", destination.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for parent race test")
+    def test_destination_parent_symlink_swap_cannot_write_outside_data_root(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        legacy = self.knowledge / "evaluations" / "events" / "hook-events.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("source-event\n", encoding="utf-8")
+        preview = self.backend.legacy_runtime_plan(self.data)
+        external = self.knowledge.parent / "external-archive"
+        external.mkdir()
+        probe = self.knowledge.parent / "directory-symlink-probe"
+        try:
+            probe.symlink_to(external, target_is_directory=True)
+            probe.unlink()
+        except OSError as exc:
+            self.skipTest(f"Directory symlinks unavailable: {exc}")
+        real_link = opc_memory.os.link
+
+        def swap_parent_then_link(source, destination, **kwargs):
+            parent = Path(destination).parent
+            approved_parent = parent.with_name(parent.name + "-approved")
+            parent.rename(approved_parent)
+            parent.symlink_to(external, target_is_directory=True)
+            return real_link(source, destination, **kwargs)
+
+        with patch.object(
+            opc_memory.os, "link", side_effect=swap_parent_then_link
+        ):
+            with self.assertRaisesRegex(
+                opc_memory.OpcMemoryError, "archive parent changed"
+            ):
+                self.backend.apply_legacy_runtime_plan(
+                    self.data, plan_token=preview["approval_token"]
+                )
+        escaped = external / "hook-events.jsonl"
+        self.assertEqual("source-event\n", legacy.read_text(encoding="utf-8"))
+        self.assertFalse(escaped.exists())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for tracked legacy test")
+    def test_tracked_legacy_runtime_artifact_is_never_moved_automatically(self) -> None:
+        legacy = self.knowledge / "evaluations" / "events" / "historic.jsonl"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("synthetic-event\n", encoding="utf-8")
+        self.commit_knowledge("synthetic tracked legacy layout")
+
+        preview = self.backend.legacy_runtime_plan(self.data)
+        self.assertFalse(preview["entries"][0]["eligible"])
+        self.assertTrue(preview["entries"][0]["tracked"])
+        with self.assertRaisesRegex(
+            opc_memory.OpcMemoryError, "LEGACY_EVENT_MOVE_BLOCKED"
+        ):
+            self.backend.apply_legacy_runtime_plan(
+                self.data, plan_token=preview["approval_token"]
+            )
+        self.assertTrue(legacy.is_file())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for legacy symlink test")
+    def test_legacy_runtime_symlink_is_reported_but_never_followed_or_moved(self) -> None:
+        (self.knowledge / "README.md").write_text(
+            "# Synthetic knowledge\n", encoding="utf-8"
+        )
+        self.commit_knowledge("baseline knowledge")
+        outside = self.knowledge.parent / "outside-private.jsonl"
+        outside.write_text("synthetic-outside-event\n", encoding="utf-8")
+        linked = self.knowledge / "evaluations" / "events" / "linked.jsonl"
+        linked.parent.mkdir(parents=True)
+        try:
+            linked.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"File symlinks unavailable: {exc}")
+
+        preview = self.backend.legacy_runtime_plan(self.data)
+        self.assertEqual("evaluations/events/linked.jsonl", preview["entries"][0]["source"])
+        self.assertFalse(preview["entries"][0]["eligible"])
+        self.assertIn("symbolic link", preview["entries"][0]["blocked_reason"])
+        with self.assertRaisesRegex(
+            opc_memory.OpcMemoryError, "LEGACY_EVENT_MOVE_BLOCKED"
+        ):
+            self.backend.apply_legacy_runtime_plan(
+                self.data, plan_token=preview["approval_token"]
+            )
+        self.assertTrue(linked.is_symlink())
+        self.assertEqual(
+            "synthetic-outside-event\n", outside.read_text(encoding="utf-8")
+        )
+
+    def test_approved_knowledge_named_like_event_is_not_misclassified(self) -> None:
+        approved = self.knowledge / "experiences" / "approved" / "hook-events.jsonl"
+        approved.write_text("synthetic-approved-record\n", encoding="utf-8")
+        self.assertEqual([], self.backend.legacy_runtime_artifacts())
+
+    def test_legacy_events_cli_defaults_to_preview(self) -> None:
+        args = opc_memory.build_parser().parse_args(["legacy-events"])
+        self.assertFalse(args.apply)
+        self.assertIsNone(args.plan_token)
+
     @unittest.skipUnless(shutil.which("git"), "Git is required for readiness test")
     def test_git_repository_without_head_is_not_provenance_ready(self) -> None:
         subprocess.run(

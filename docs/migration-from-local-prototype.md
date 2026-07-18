@@ -76,6 +76,20 @@ flowchart LR
 
 Hook 事件日志不是组织知识，不应因迁移进入受控知识层。对已有越界日志，先隔离和评估，再按用户明确指示决定保留用于安全审计或删除。
 
+当前公开仓库只能确认首个提交已创建空的 `evaluations/events` 模板目录，不能确认真实 `hook-events.jsonl` 的写入来源；这类文件应标记为 unresolved historical provenance。使用 Memory CLI 时先执行：
+
+```text
+opc_memory.py --knowledge-root <knowledge-root> --data-root <data-root> legacy-events --dry-run
+```
+
+该命令不读取事件内容、不创建归档目录，也不移动文件。用户核对源/目标路径并单独批准后，才可使用预览返回的 token：
+
+```text
+opc_memory.py --knowledge-root <knowledge-root> --data-root <data-root> legacy-events --apply --plan-token <approval-token>
+```
+
+Apply 只移动未跟踪的普通文件到私有 `data_root/legacy-event-archive`；不删除、提交或上传。已跟踪文件、符号链接、目标冲突或跨文件系统场景保持原位并转人工处理。
+
 **Gate M3：** 核心知识数量和内容一致；新 Schema 可读；回滚可恢复；公共仓库仍不含私人内容。
 
 ## 7. 阶段 M4：隔离验证新版
