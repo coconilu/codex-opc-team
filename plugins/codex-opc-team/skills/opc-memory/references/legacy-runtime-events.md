@@ -9,4 +9,4 @@ Treat `LEGACY_RUNTIME_ARTIFACTS` as private runtime data, not canonical knowledg
 5. Run `legacy-events --apply --plan-token <approval-token>`. A missing or changed token is a hard stop.
 6. Rerun `doctor`. Confirm that the legacy warning cleared and that `UNCOMMITTED_KNOWLEDGE`, approved-transition provenance, and File/Git fallback state were not weakened.
 
-Apply uses an atomic same-filesystem move into `data_root/legacy-event-archive`. A cross-filesystem failure preserves the source and requires a separately reviewed manual move. No command in this workflow deletes, commits, uploads, or edits event contents.
+Apply serializes work with a private data-root lock, revalidates the unchanged roots, exact source/destination, `lstat` object identity, regular-file type, Git tracked state, and absent destination, then atomically creates a same-filesystem hard link without overwrite. It removes the source path only after proving both paths still identify the approved object. A cross-filesystem or race failure preserves the source and requires a separately reviewed manual move. No command in this workflow deletes unrelated data, commits, uploads, or edits event contents.

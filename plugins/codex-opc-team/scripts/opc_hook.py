@@ -41,6 +41,20 @@ def _block(reason: str) -> dict[str, Any]:
     return {"continue": False, "stopReason": reason}
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    """Return true when either resolved root contains the other."""
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        pass
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
+
+
 def _read_payload() -> dict[str, Any]:
     try:
         value = json.load(sys.stdin)
@@ -114,9 +128,8 @@ def _event_path(run_path: Path, run_id: str) -> Path:
             if knowledge_value
             else (Path.home() / "opc-knowledge").resolve()
         )
-        data_root.relative_to(knowledge_root)
-    except ValueError:
-        return data_root / "run-events" / f"{run_id}.jsonl"
+        if not _paths_overlap(data_root, knowledge_root):
+            return data_root / "run-events" / f"{run_id}.jsonl"
     except (OSError, RuntimeError):
         return project_fallback
     # A misconfigured PLUGIN_DATA inside canonical knowledge must never turn

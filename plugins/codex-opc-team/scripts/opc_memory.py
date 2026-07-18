@@ -16,9 +16,12 @@ import json
 import os
 import queue
 import re
+import stat
 import subprocess
 import sys
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -254,6 +257,151 @@ def _git(
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
     return result.stdout if binary else result.stdout.strip()
+
+
+def _lstat_identity(path: Path) -> dict[str, int]:
+    """Return metadata that identifies an object without reading its contents."""
+    value = path.lstat()
+    return {
+        "device": int(value.st_dev),
+        "inode": int(value.st_ino),
+        "mode": int(value.st_mode),
+        "links": int(value.st_nlink),
+        "size": int(value.st_size),
+        "mtime_ns": int(value.st_mtime_ns),
+        "ctime_ns": int(value.st_ctime_ns),
+    }
+
+
+def _metadata_token(value: Mapping[str, Any]) -> str:
+    return sha256_bytes(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def _object_token(identity: Mapping[str, int]) -> str:
+    """Identify the same filesystem object across a hard-link operation."""
+    return _metadata_token(
+        {
+            key: identity[key]
+            for key in ("device", "inode", "mode", "size", "mtime_ns")
+        }
+    )
+
+
+@contextmanager
+def _legacy_archive_lock(data_root: Path):
+    """Serialize legacy archive apply operations inside private runtime data."""
+    archive_path = data_root / "legacy-event-archive"
+    try:
+        archive_path.resolve().relative_to(data_root)
+    except ValueError as exc:
+        raise OpcMemoryError(
+            "LEGACY_EVENT_MOVE_BLOCKED: archive root escaped private data"
+        ) from exc
+    if archive_path.is_symlink():
+        raise OpcMemoryError(
+            "LEGACY_EVENT_MOVE_BLOCKED: archive root is a symbolic link"
+        )
+    try:
+        archive_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OpcMemoryError(
+            "LEGACY_EVENT_MOVE_BLOCKED: private archive root could not be created"
+        ) from exc
+    if archive_path.is_symlink() or archive_path.resolve().parent != data_root:
+        raise OpcMemoryError(
+            "LEGACY_EVENT_MOVE_BLOCKED: archive root changed during lock setup"
+        )
+    lock_path = archive_path / ".opc-legacy-events.lock"
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"0")
+            for attempt in range(100):
+                try:
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+                except OSError:
+                    if attempt == 99:
+                        raise OpcMemoryError(
+                            "LEGACY_EVENT_LOCK_BUSY: another archive apply is running"
+                        )
+                    time.sleep(0.01)
+        else:
+            import fcntl
+
+            for attempt in range(100):
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError:
+                    if attempt == 99:
+                        raise OpcMemoryError(
+                            "LEGACY_EVENT_LOCK_BUSY: another archive apply is running"
+                        )
+                    time.sleep(0.01)
+        yield
+    finally:
+        if locked:
+            if os.name == "nt":
+                import msvcrt
+
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _ensure_archive_parent(
+    archive_path: Path, destination_parent: Path, *, source_label: str
+) -> None:
+    """Create archive subdirectories without traversing symbolic links."""
+    archive_root = archive_path.resolve()
+    try:
+        relative = destination_parent.relative_to(archive_path)
+    except ValueError as exc:
+        raise OpcMemoryError(
+            "LEGACY_EVENT_MOVE_BLOCKED: archive destination escaped private data "
+            f"({source_label})"
+        ) from exc
+    current = archive_path
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise OpcMemoryError(
+                "LEGACY_EVENT_MOVE_BLOCKED: archive destination contains a "
+                f"symbolic link ({source_label})"
+            )
+        try:
+            current.mkdir(exist_ok=True)
+        except OSError as exc:
+            raise OpcMemoryError(
+                "LEGACY_EVENT_MOVE_BLOCKED: archive directory could not be created "
+                f"({source_label})"
+            ) from exc
+        if current.is_symlink() or not current.is_dir():
+            raise OpcMemoryError(
+                "LEGACY_EVENT_MOVE_BLOCKED: archive destination is not a safe "
+                f"directory ({source_label})"
+            )
+        try:
+            current.resolve().relative_to(archive_root)
+        except ValueError as exc:
+            raise OpcMemoryError(
+                "LEGACY_EVENT_MOVE_BLOCKED: archive destination escaped private data "
+                f"({source_label})"
+            ) from exc
 
 
 class FileGitBackend:
@@ -748,13 +896,22 @@ class FileGitBackend:
         top_text = _git(self.root, ("rev-parse", "--show-toplevel"))
         if not isinstance(top_text, str) or not top_text:
             return None
-        tracked = _git(self.root, ("ls-files", "--error-unmatch", "--", relative))
-        return isinstance(tracked, str) and bool(tracked.strip())
+        tracked = _git(self.root, ("ls-files", "--stage", "--", relative))
+        if tracked is None:
+            return None
+        return bool(tracked.strip())
 
     def legacy_runtime_plan(self, data_root: Path) -> dict[str, Any]:
         """Build a redacted, non-mutating archive plan for legacy event files."""
+        data_root = data_root.expanduser().resolve()
         validate_root_isolation(self.root, data_root)
-        archive_root = data_root / "legacy-event-archive"
+        archive_path = data_root / "legacy-event-archive"
+        archive_root = archive_path.resolve()
+        try:
+            archive_root.relative_to(data_root)
+            archive_safe = not archive_path.is_symlink()
+        except ValueError:
+            archive_safe = False
         entries: list[dict[str, Any]] = []
         fingerprints: list[dict[str, Any]] = []
         for relative in self.legacy_runtime_artifacts():
@@ -762,11 +919,19 @@ class FileGitBackend:
             tracked = self._tracked_path(relative)
             is_symlink = source.is_symlink()
             is_file = source.is_file() and not is_symlink
-            destination = archive_root / relative
+            destination = archive_path / relative
+            resolved_destination = destination.resolve()
             destination_exists = destination.exists() or destination.is_symlink()
-            eligible = tracked is False and is_file and not destination_exists
-            if tracked is None:
-                reason = "knowledge root is not a Git repository"
+            eligible = (
+                tracked is False
+                and is_file
+                and not destination_exists
+                and archive_safe
+            )
+            if not archive_safe:
+                reason = "archive root is a symbolic link or escaped private data"
+            elif tracked is None:
+                reason = "Git tracked-state diagnosis failed or is unavailable"
             elif tracked:
                 reason = "artifact is tracked; automatic movement is refused"
             elif is_symlink:
@@ -777,6 +942,9 @@ class FileGitBackend:
                 reason = "archive destination already exists"
             else:
                 reason = None
+            identity = _lstat_identity(source)
+            source_identity_token = _metadata_token(identity)
+            source_object_token = _object_token(identity)
             entries.append(
                 {
                     "source": relative,
@@ -784,23 +952,29 @@ class FileGitBackend:
                     "tracked": tracked,
                     "eligible": eligible,
                     "blocked_reason": reason,
+                    "source_identity_token": source_identity_token,
+                    "source_object_token": source_object_token,
                 }
             )
-            stat = source.lstat()
             fingerprints.append(
                 {
-                    "source": relative,
-                    "size": stat.st_size,
-                    "mtime_ns": stat.st_mtime_ns,
+                    "source": str(source),
+                    "destination": str(resolved_destination),
+                    "source_identity": identity,
                     "tracked": tracked,
                     "eligible": eligible,
+                    "destination_exists": destination_exists,
                 }
             )
         approval_token = (
-            sha256_bytes(
-                json.dumps(
-                    fingerprints, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")
+            _metadata_token(
+                {
+                    "schema_version": 2,
+                    "knowledge_root": str(self.root),
+                    "data_root": str(data_root),
+                    "archive_root": str(archive_root),
+                    "entries": fingerprints,
+                }
             )
             if fingerprints
             else None
@@ -826,6 +1000,7 @@ class FileGitBackend:
         self, data_root: Path, *, plan_token: str | None
     ) -> dict[str, Any]:
         """Move only previewed, untracked regular files into private runtime data."""
+        data_root = data_root.expanduser().resolve()
         plan = self.legacy_runtime_plan(data_root)
         expected = plan["approval_token"]
         if not expected:
@@ -843,24 +1018,111 @@ class FileGitBackend:
                 f"untracked regular files with unused destinations ({blocked_paths})"
             )
         moved: list[dict[str, str]] = []
-        for entry in plan["entries"]:
-            source = self.root / str(entry["source"])
-            destination = data_root / str(entry["destination"])
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                source.rename(destination)
-            except OSError as exc:
+        with _legacy_archive_lock(data_root):
+            locked_plan = self.legacy_runtime_plan(data_root)
+            if locked_plan["approval_token"] != plan_token:
                 raise OpcMemoryError(
-                    "LEGACY_EVENT_MOVE_FAILED: source was not deleted; place the "
-                    "private data root on the same filesystem or move it manually "
-                    f"after approval ({entry['source']})"
-                ) from exc
-            moved.append(
-                {
-                    "source": str(entry["source"]),
-                    "destination": str(entry["destination"]),
-                }
-            )
+                    "LEGACY_EVENT_PLAN_CHANGED: source, destination, roots, or Git "
+                    "state changed after preview; run a new dry-run"
+                )
+            locked_blocked = [
+                entry for entry in locked_plan["entries"] if not entry["eligible"]
+            ]
+            if locked_blocked:
+                blocked_paths = ", ".join(
+                    str(entry["source"]) for entry in locked_blocked
+                )
+                raise OpcMemoryError(
+                    "LEGACY_EVENT_MOVE_BLOCKED: state changed before apply "
+                    f"({blocked_paths})"
+                )
+            archive_path = data_root / "legacy-event-archive"
+            archive_root = archive_path.resolve()
+            for entry in locked_plan["entries"]:
+                source = self.root / str(entry["source"])
+                destination = data_root / str(entry["destination"])
+                _ensure_archive_parent(
+                    archive_path,
+                    destination.parent,
+                    source_label=str(entry["source"]),
+                )
+                try:
+                    destination.parent.resolve().relative_to(archive_root)
+                except ValueError as exc:
+                    raise OpcMemoryError(
+                        "LEGACY_EVENT_MOVE_BLOCKED: archive destination escaped the "
+                        f"private archive root ({entry['source']})"
+                    ) from exc
+                try:
+                    identity = _lstat_identity(source)
+                except OSError as exc:
+                    raise OpcMemoryError(
+                        "LEGACY_EVENT_PLAN_CHANGED: source disappeared before move "
+                        f"({entry['source']})"
+                    ) from exc
+                if (
+                    _metadata_token(identity) != entry["source_identity_token"]
+                    or not stat.S_ISREG(identity["mode"])
+                    or source.is_symlink()
+                    or self._tracked_path(str(entry["source"])) is not False
+                ):
+                    raise OpcMemoryError(
+                        "LEGACY_EVENT_PLAN_CHANGED: source identity, type, or Git "
+                        f"state changed before move ({entry['source']})"
+                    )
+                try:
+                    destination.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise OpcMemoryError(
+                        "LEGACY_EVENT_DESTINATION_EXISTS: refusing to overwrite "
+                        f"the archive target ({entry['source']})"
+                    )
+                created_destination = False
+                try:
+                    os.link(source, destination, follow_symlinks=False)
+                    created_destination = True
+                except FileExistsError as exc:
+                    raise OpcMemoryError(
+                        "LEGACY_EVENT_DESTINATION_EXISTS: refusing to overwrite "
+                        f"the archive target ({entry['source']})"
+                    ) from exc
+                except OSError as exc:
+                    raise OpcMemoryError(
+                        "LEGACY_EVENT_MOVE_FAILED: source was not deleted; the "
+                        "archive requires same-filesystem hard-link support "
+                        f"({entry['source']})"
+                    ) from exc
+                try:
+                    linked_identity = _lstat_identity(destination)
+                    current_source_identity = _lstat_identity(source)
+                    expected_object = str(entry["source_object_token"])
+                    if (
+                        not stat.S_ISREG(linked_identity["mode"])
+                        or destination.is_symlink()
+                        or _object_token(linked_identity) != expected_object
+                        or _object_token(current_source_identity) != expected_object
+                        or self._tracked_path(str(entry["source"])) is not False
+                    ):
+                        raise OpcMemoryError(
+                            "LEGACY_EVENT_PLAN_CHANGED: source or Git state changed "
+                            f"during the no-overwrite move ({entry['source']})"
+                        )
+                    source.unlink()
+                except Exception:
+                    if created_destination:
+                        try:
+                            destination.unlink()
+                        except OSError:
+                            pass
+                    raise
+                moved.append(
+                    {
+                        "source": str(entry["source"]),
+                        "destination": str(entry["destination"]),
+                    }
+                )
         return {
             **plan,
             "dry_run": False,

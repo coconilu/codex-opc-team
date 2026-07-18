@@ -129,6 +129,30 @@ class HookPrivacyTests(unittest.TestCase):
         after = sorted(path.relative_to(self.knowledge) for path in self.knowledge.rglob("*"))
         self.assertEqual(before, after)
 
+    def test_plugin_data_containing_knowledge_root_uses_project_runtime_fallback(self) -> None:
+        opc_knowledge.start_run(
+            root=self.knowledge, project_root=self.project, title="Hook reverse overlap"
+        )
+        plugin_data = self.project.parent / "containing-plugin-data"
+        configured_knowledge = plugin_data / "run-events"
+        payload = {"hook_event_name": "Stop", "cwd": str(self.project)}
+        environment = {
+            **os.environ,
+            "PLUGIN_DATA": str(plugin_data),
+            "OPC_KNOWLEDGE_HOME": str(configured_knowledge),
+        }
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "opc_hook.py")],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=environment,
+            check=True,
+        )
+        self.assertFalse(json.loads(result.stdout)["continue"])
+        self.assertTrue((self.project / ".opc" / "events.jsonl").is_file())
+        self.assertFalse(plugin_data.exists())
+
     def test_ready_run_allows_stop(self) -> None:
         opc_knowledge.start_run(
             root=self.knowledge, project_root=self.project, title="Hook test"
