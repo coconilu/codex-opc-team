@@ -78,25 +78,25 @@ def validate_version_contract() -> None:
         text=True,
         capture_output=True,
     )
-    stable_tags = (
+    version_tags = (
         [
             tag
             for tag in tags.stdout.splitlines()
-            if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", tag)
+            if tag.startswith("v") and SEMVER.fullmatch(tag[1:])
         ]
         if tags.returncode == 0
         else []
     )
-    if stable_tags:
+    if version_tags:
         expected_tag = f"v{manifest_version}"
         require(
-            stable_tags == [expected_tag],
-            f"stable tag at HEAD must be exactly {expected_tag}",
+            version_tags == [expected_tag],
+            f"version tag at HEAD must be exactly {expected_tag}",
         )
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         require(
             f"## [{manifest_version}] - " in changelog,
-            "a stable tag requires a dated matching CHANGELOG release section",
+            "a version tag requires a dated matching CHANGELOG release section",
         )
 
 

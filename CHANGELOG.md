@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1-rc.1] - 2026-07-19
+
+This is a public release candidate for review and fixed-ref lifecycle validation. Stable installations remain on `v0.1.0` until the final release Gate passes.
+
 ### Added
 
 - Added a preview-first, real-Codex clean-room acceptance flow for fixed-ref install, fresh-process Skill discovery, uninstall, reinstall, rollback, idempotency, and synthetic knowledge/config/data preservation on Windows and Linux.
@@ -41,5 +45,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Kept active run snapshots project-local so normal run updates cannot dirty or bypass the private knowledge repository's Git provenance gate.
 - Made unsupported or malformed memory scopes fail closed, including hand-edited global records that incorrectly retain a project identity.
 
-[Unreleased]: https://github.com/coconilu/codex-opc-team/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/coconilu/codex-opc-team/compare/v0.1.1-rc.1...HEAD
+[0.1.1-rc.1]: https://github.com/coconilu/codex-opc-team/compare/v0.1.0...v0.1.1-rc.1
 [0.1.0]: https://github.com/coconilu/codex-opc-team/releases/tag/v0.1.0

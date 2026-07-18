@@ -9,10 +9,12 @@ on:
       candidate_ref:
         description: Immutable candidate release tag or full commit OID
         required: true
+        default: v0.1.1-rc.1
         type: string
       candidate_version:
         description: Expected plugin manifest version
         required: true
+        default: 0.1.1-rc.1
         type: string
       rollback_ref:
         description: Previous supported release tag or full commit OID

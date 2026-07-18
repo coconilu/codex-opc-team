@@ -99,14 +99,14 @@ python3 scripts/plugin_lifecycle_acceptance.py \
 
 ## 4. 不可变版本发布 Gate
 
-候选标签存在后，使用公开 Git Marketplace 和两个不同的不可变 Ref：
+候选标签存在后，使用公开 Git Marketplace 和两个不同的不可变 Ref。`v0.1.1-rc.1` 的正式 Gate 固定验证候选版回滚到稳定版 `v0.1.0`：
 
 ```powershell
 python scripts/plugin_lifecycle_acceptance.py `
   --workspace $cleanRoom `
   --candidate-source coconilu/codex-opc-team `
-  --candidate-ref <candidate-tag-or-full-commit-oid> `
-  --expected-candidate-version <candidate-version> `
+  --candidate-ref v0.1.1-rc.1 `
+  --expected-candidate-version 0.1.1-rc.1 `
   --rollback-source coconilu/codex-opc-team `
   --rollback-ref v0.1.0 `
   --expected-rollback-version 0.1.0 `

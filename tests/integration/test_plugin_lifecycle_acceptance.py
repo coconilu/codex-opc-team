@@ -422,9 +422,21 @@ class RealCodexLifecycleTests(unittest.TestCase):
                 / "plugin.json"
             )
             candidate_payload = json.loads(candidate_manifest.read_text(encoding="utf-8"))
-            candidate_payload["version"] = "0.1.1"
+            candidate_payload["version"] = "0.1.1-rc.1"
             candidate_manifest.write_text(
                 json.dumps(candidate_payload, indent=2) + "\n", encoding="utf-8"
+            )
+            rollback_manifest = (
+                rollback_source
+                / "plugins"
+                / "codex-opc-team"
+                / ".codex-plugin"
+                / "plugin.json"
+            )
+            rollback_payload = json.loads(rollback_manifest.read_text(encoding="utf-8"))
+            rollback_payload["version"] = "0.1.0"
+            rollback_manifest.write_text(
+                json.dumps(rollback_payload, indent=2) + "\n", encoding="utf-8"
             )
             command = [
                 "--workspace",
@@ -472,7 +484,9 @@ class RealCodexLifecycleTests(unittest.TestCase):
             self.assertTrue(first["checks"]["uninstall"]["unrelated_plugin_present"])
             self.assertTrue(first["protected_data"]["preserved"])
             self.assertFalse(first["release_gate"]["eligible"])
-            self.assertEqual("0.1.1", first["checks"]["candidate_install"]["version"])
+            self.assertEqual(
+                "0.1.1-rc.1", first["checks"]["candidate_install"]["version"]
+            )
             self.assertEqual("0.1.0", first["checks"]["rollback"]["version"])
             self.assertTrue(first["checks"]["rollback"]["distinct_version"])
             self.assertNotIn(str(workspace), json.dumps(first))

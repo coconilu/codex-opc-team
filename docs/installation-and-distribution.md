@@ -33,6 +33,26 @@ codex plugin add codex-opc-team@opc
 
 请固定使用 `v0.1.0`；`main` 是持续演进分支，不作为稳定安装源。本版兼容范围、数据与 Schema 迁移、已知限制、回滚和 Gate 证据见 [v0.1.0 发布说明](release-notes-v0.1.0.md)。
 
+### 3.1 公开候选版 `v0.1.1-rc.1`
+
+`v0.1.1-rc.1` 是预发布候选，不替代稳定版 `v0.1.0`。它只供评审和发布验证使用；候选 tag 必须指向已通过预发布复审的精确 commit，不能移动到后续 commit，也不能用 `main` 代替。
+
+```powershell
+codex plugin marketplace add coconilu/codex-opc-team --ref v0.1.1-rc.1
+codex plugin add codex-opc-team@opc
+```
+
+候选安装后必须新建 Codex 任务验证六个 OPC Skills。若需要回滚，先移除候选插件与 Marketplace 条目，再固定安装稳定版：
+
+```powershell
+codex plugin remove codex-opc-team@opc
+codex plugin marketplace remove opc
+codex plugin marketplace add coconilu/codex-opc-team --ref v0.1.0
+codex plugin add codex-opc-team@opc
+```
+
+卸载和回滚不得删除 File/Git 私人知识、Git 历史或可选 Mem0 数据。详细范围、无 Schema Migration 结论、已知限制和 Gate 状态见 [`v0.1.1-rc.1` 候选发布说明](release-notes-v0.1.1-rc.1.md)。
+
 ## 4. 本地开发和验证
 
 开发者应克隆仓库，在隔离的 Codex Home 或临时测试环境中添加本地 Marketplace，再执行插件结构验证、安装和端到端测试。不要用正在工作的个人配置作为首个测试环境，也不要同时激活两个同名 Skill 集合。
@@ -140,6 +160,6 @@ python scripts/plugin_admin.py uninstall --remove-marketplace --apply
 
 ## 11. 发布检查
 
-每个 GitHub Release 至少包括：版本兼容范围、安装命令、重要变更、数据/Schema Migration、已知限制、回滚步骤和验证证据。`v0.1.0` 的完整记录见 [发布说明](release-notes-v0.1.0.md)，Release Gate 详见[测试与验收](testing-and-acceptance.md)。
+每个 GitHub Release 至少包括：版本兼容范围、安装命令、重要变更、数据/Schema Migration、已知限制、回滚步骤和验证证据。稳定版 `v0.1.0` 的完整记录见 [发布说明](release-notes-v0.1.0.md)，候选版记录见 [`v0.1.1-rc.1` 候选发布说明](release-notes-v0.1.1-rc.1.md)，Release Gate 详见[测试与验收](testing-and-acceptance.md)。
 
 固定候选 Ref 的真实安装、全新进程 Skill 发现、卸载、重装、回滚和数据保留，使用[安装态生命周期验收](installed-lifecycle-acceptance.md)。该流程必须同时隔离 `CODEX_HOME` 与操作系统用户 Home；只改 `CODEX_HOME` 仍可能加载真实 Personal Marketplace，不能作为 clean-room 证据。
