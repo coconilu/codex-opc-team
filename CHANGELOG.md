@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Added a preview-first, real-Codex clean-room acceptance flow for fixed-ref install, fresh-process Skill discovery, uninstall, reinstall, rollback, idempotency, and synthetic knowledge/config/data preservation on Windows and Linux.
+- Hardened lifecycle acceptance with exact canonical Skill discovery, deny-by-default child environments, isolated Git config/hooks/signing/credentials, host-sentinel negative tests, commit-OID pinning, moving-ref rejection, and disposable Windows/Linux PR gates.
 
 ### Fixed
 

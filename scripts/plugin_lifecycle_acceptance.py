@@ -13,12 +13,14 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -36,7 +38,7 @@ FIXTURE_PLUGIN_ID = "lifecycle-sentinel@lifecycle-fixture"
 FIXTURE_MARKETPLACE = "lifecycle-fixture"
 OWNERSHIP_MARKER = ".opc-lifecycle-clean-room.json"
 REPORT_SCHEMA = "opc-plugin-lifecycle/v1"
-SKILLS = (
+SKILL_NAMES = (
     "opc-manager",
     "opc-project-bootstrap",
     "opc-qa-gate",
@@ -44,7 +46,9 @@ SKILLS = (
     "opc-memory-curator",
     "opc-memory",
 )
-FIXTURE_SKILL = "lifecycle-sentinel"
+SKILLS = tuple(f"codex-opc-team:{name}" for name in SKILL_NAMES)
+FIXTURE_SKILL_NAME = "lifecycle-sentinel"
+FIXTURE_SKILL = f"{FIXTURE_SKILL_NAME}:{FIXTURE_SKILL_NAME}"
 SYNTHETIC_EXPERIENCE = {
     "schema_version": 1,
     "id": "exp-lifecycle-sentinel",
@@ -142,23 +146,33 @@ def _tree_hashes(root: Path, *, exclude: set[str] | None = None) -> dict[str, st
     return result
 
 
-def _git(root: Path, *args: str) -> str:
+def _git(
+    root: Path, *args: str, env: Mapping[str, str] | None = None
+) -> str:
     result = subprocess.run(
         ["git", "-C", str(root), *args],
         check=True,
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
+        env=dict(env) if env is not None else None,
     )
     return result.stdout.strip()
 
 
-def _knowledge_snapshot(root: Path) -> dict[str, Any]:
+def _knowledge_snapshot(root: Path, git_env: Mapping[str, str]) -> dict[str, Any]:
     catalog = json.loads((root / "catalog.json").read_text(encoding="utf-8"))
     return {
-        "head": _git(root, "rev-parse", "HEAD"),
-        "history": _git(root, "rev-list", "--all").splitlines(),
-        "status": _git(root, "status", "--porcelain=v1", "--untracked-files=all"),
+        "head": _git(root, "rev-parse", "HEAD", env=git_env),
+        "history": _git(root, "rev-list", "--all", env=git_env).splitlines(),
+        "status": _git(
+            root,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            env=git_env,
+        ),
         "schema_version": catalog.get("schema_version"),
         "working_tree": _tree_hashes(root, exclude={".git"}),
         "approved": _tree_hashes(root / "experiences" / "approved"),
@@ -166,9 +180,10 @@ def _knowledge_snapshot(root: Path) -> dict[str, Any]:
 
 
 def _protected_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
+    git_env = _git_env(paths)
     return {
         "config_sha256": _unrelated_config_sha256(paths["config"]),
-        "knowledge": _knowledge_snapshot(paths["knowledge"]),
+        "knowledge": _knowledge_snapshot(paths["knowledge"], git_env),
         "memory": _tree_hashes(paths["memory"]),
     }
 
@@ -198,6 +213,12 @@ def _paths(workspace: Path) -> dict[str, Path]:
         "probe": workspace / "probe-project",
         "fixture_marketplace": workspace / "fixture-marketplace",
         "config": workspace / "codex-home" / "config.toml",
+        "git_home": workspace / "git-home",
+        "git_templates": workspace / "git-templates",
+        "git_hooks": workspace / "git-hooks",
+        "ref_resolution": workspace / "ref-resolution",
+        "runtime_tmp": workspace / "tmp",
+        "plugin_data": workspace / "plugin-data",
     }
 
 
@@ -240,6 +261,109 @@ def validate_workspace(workspace: Path) -> Path:
     return workspace
 
 
+def _safe_host_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    if not value:
+        return None
+    if name.upper().endswith("_PROXY"):
+        parsed = urlsplit(value)
+        if parsed.username or parsed.password:
+            return None
+    return value
+
+
+def _base_subprocess_env(paths: Mapping[str, Path]) -> dict[str, str]:
+    """Build a minimal child environment instead of copying the host env."""
+
+    env: dict[str, str] = {}
+    for name in (
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ):
+        value = _safe_host_value(name)
+        if value is not None:
+            env[name] = value
+    user_home = paths["user_home"]
+    drive, tail = os.path.splitdrive(str(user_home))
+    env.update(
+        {
+            "HOME": str(user_home),
+            "USERPROFILE": str(user_home),
+            "USER": "opc-lifecycle-fixture",
+            "USERNAME": "opc-lifecycle-fixture",
+            "PYTHONUTF8": "1",
+            "NO_COLOR": "1",
+        }
+    )
+    if drive:
+        env["HOMEDRIVE"] = drive
+        env["HOMEPATH"] = tail or os.sep
+    return env
+
+
+def _git_env(paths: Mapping[str, Path]) -> dict[str, str]:
+    env = _base_subprocess_env(paths)
+    env.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": str(paths["git_home"] / ".gitconfig-disabled"),
+            "GIT_CONFIG_COUNT": "6",
+            "GIT_CONFIG_KEY_0": "core.hooksPath",
+            "GIT_CONFIG_VALUE_0": str(paths["git_hooks"]),
+            "GIT_CONFIG_KEY_1": "init.templateDir",
+            "GIT_CONFIG_VALUE_1": str(paths["git_templates"]),
+            "GIT_CONFIG_KEY_2": "commit.gpgSign",
+            "GIT_CONFIG_VALUE_2": "false",
+            "GIT_CONFIG_KEY_3": "tag.gpgSign",
+            "GIT_CONFIG_VALUE_3": "false",
+            "GIT_CONFIG_KEY_4": "credential.helper",
+            "GIT_CONFIG_VALUE_4": "!false",
+            "GIT_CONFIG_KEY_5": "credential.interactive",
+            "GIT_CONFIG_VALUE_5": "false",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GCM_INTERACTIVE": "never",
+            "GIT_ASKPASS": "",
+            "SSH_ASKPASS": "",
+            "GIT_AUTHOR_NAME": "OPC Lifecycle Acceptance",
+            "GIT_AUTHOR_EMAIL": "opc-lifecycle@users.noreply.github.com",
+            "GIT_COMMITTER_NAME": "OPC Lifecycle Acceptance",
+            "GIT_COMMITTER_EMAIL": "opc-lifecycle@users.noreply.github.com",
+            "TEMP": str(paths["runtime_tmp"]),
+            "TMP": str(paths["runtime_tmp"]),
+            "TMPDIR": str(paths["runtime_tmp"]),
+        }
+    )
+    return env
+
+
+@contextmanager
+def _isolated_process_environment(env: Mapping[str, str]) -> Iterator[None]:
+    previous = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+
 def _prepare_fixture_tree(paths: Mapping[str, Path]) -> None:
     workspace = paths["workspace"]
     workspace.mkdir(parents=True, exist_ok=True)
@@ -257,6 +381,12 @@ def _prepare_fixture_tree(paths: Mapping[str, Path]) -> None:
         "xdg_cache",
         "memory",
         "probe",
+        "git_home",
+        "git_templates",
+        "git_hooks",
+        "ref_resolution",
+        "runtime_tmp",
+        "plugin_data",
     ):
         paths[name].mkdir(parents=True, exist_ok=True)
 
@@ -276,8 +406,10 @@ def _prepare_fixture_tree(paths: Mapping[str, Path]) -> None:
         b"synthetic optional-memory data\x00\x01\n",
     )
 
+    git_env = _git_env(paths)
     try:
-        opc_knowledge.init_knowledge(root=paths["knowledge"], git_init=True)
+        with _isolated_process_environment(git_env):
+            opc_knowledge.init_knowledge(root=paths["knowledge"], git_init=True)
     except opc_knowledge.OpcError as exc:
         raise AcceptanceError(str(exc)) from exc
     approved = paths["knowledge"] / "experiences" / "approved" / "exp-lifecycle-sentinel.json"
@@ -286,7 +418,13 @@ def _prepare_fixture_tree(paths: Mapping[str, Path]) -> None:
         raise AcceptanceError("synthetic approved fixture changed; refusing overwrite")
     if not approved.exists():
         approved.write_bytes(expected)
-        _git(paths["knowledge"], "add", "--", "experiences/approved/exp-lifecycle-sentinel.json")
+        _git(
+            paths["knowledge"],
+            "add",
+            "--",
+            "experiences/approved/exp-lifecycle-sentinel.json",
+            env=git_env,
+        )
         subprocess.run(
             [
                 "git",
@@ -304,9 +442,23 @@ def _prepare_fixture_tree(paths: Mapping[str, Path]) -> None:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
+            env=git_env,
         )
-    if _git(paths["knowledge"], "status", "--porcelain=v1", "--untracked-files=all"):
+    if _git(
+        paths["knowledge"],
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        env=git_env,
+    ):
         raise AcceptanceError("synthetic knowledge fixture must start clean")
+
+    if not (paths["probe"] / ".git").exists():
+        _git(paths["probe"], "init", "-b", "main", env=git_env)
+    probe_root = _git(paths["probe"], "rev-parse", "--show-toplevel", env=git_env)
+    if Path(probe_root).resolve() != paths["probe"].resolve():
+        raise AcceptanceError("probe project is not its own isolated Git root")
 
     marketplace = paths["fixture_marketplace"]
     _write_exact(
@@ -336,7 +488,7 @@ def _prepare_fixture_tree(paths: Mapping[str, Path]) -> None:
         ),
     )
     _write_exact(
-        marketplace / "plugin" / "skills" / FIXTURE_SKILL / "SKILL.md",
+        marketplace / "plugin" / "skills" / FIXTURE_SKILL_NAME / "SKILL.md",
         (
             "---\nname: lifecycle-sentinel\n"
             "description: Synthetic unrelated skill for isolated lifecycle acceptance.\n---\n\n"
@@ -346,9 +498,10 @@ def _prepare_fixture_tree(paths: Mapping[str, Path]) -> None:
 
 
 def _clean_env(paths: Mapping[str, Path]) -> dict[str, str]:
-    env = dict(os.environ)
+    env = _base_subprocess_env(paths)
     env.update(
         {
+            **_git_env(paths),
             "CODEX_HOME": str(paths["codex_home"]),
             "HOME": str(paths["user_home"]),
             "USERPROFILE": str(paths["user_home"]),
@@ -359,25 +512,15 @@ def _clean_env(paths: Mapping[str, Path]) -> dict[str, str]:
             "XDG_CACHE_HOME": str(paths["xdg_cache"]),
             "OPC_KNOWLEDGE_HOME": str(paths["knowledge"]),
             "OPC_MEMORY_DATA_HOME": str(paths["memory"]),
+            "PLUGIN_DATA": str(paths["plugin_data"]),
+            "MEM0_DIR": str(paths["memory"] / "mem0"),
             "MEM0_TELEMETRY": "False",
             "NO_COLOR": "1",
-            "GIT_CONFIG_GLOBAL": str(paths["user_home"] / ".gitconfig"),
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_TERMINAL_PROMPT": "0",
-            "GCM_INTERACTIVE": "never",
+            "TEMP": str(paths["runtime_tmp"]),
+            "TMP": str(paths["runtime_tmp"]),
+            "TMPDIR": str(paths["runtime_tmp"]),
         }
     )
-    for key in tuple(env):
-        upper = key.upper()
-        if upper.endswith("_API_KEY") or upper in {
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-            "AZURE_CLIENT_SECRET",
-            "GITHUB_TOKEN",
-            "GH_TOKEN",
-            "SSH_AUTH_SOCK",
-        }:
-            env.pop(key, None)
     return env
 
 
@@ -474,7 +617,110 @@ def _install_fixture(runner: CodexRunner, source: Path) -> None:
         raise AcceptanceError("unrelated fixture plugin did not install")
 
 
-def _discovery(runner: CodexRunner, *, expect_opc: bool) -> dict[str, Any]:
+def _walk_strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_strings(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _walk_strings(item)
+
+
+def _parse_skill_catalog(prompt: Any) -> list[dict[str, str]]:
+    sections = [
+        text
+        for text in _walk_strings(prompt)
+        if "<skills_instructions>" in text and "### Available skills" in text
+    ]
+    if len(sections) != 1:
+        raise AcceptanceError("expected exactly one model-visible skills catalog")
+    catalog_text = sections[0].split("### Available skills", 1)[1]
+    catalog_text = catalog_text.split("</skills_instructions>", 1)[0]
+    entries: list[dict[str, str]] = []
+    locator_pattern = re.compile(
+        r"\((file|environment resource|orchestrator resource|custom resource): (.+)\)$"
+    )
+    for line in catalog_text.splitlines():
+        if not line.startswith("- "):
+            continue
+        payload = line[2:]
+        if ": " not in payload:
+            raise AcceptanceError("malformed model-visible skill catalog entry")
+        name, description_and_locator = payload.split(": ", 1)
+        locator = locator_pattern.search(description_and_locator)
+        if not name or locator is None:
+            raise AcceptanceError(f"skill catalog entry has no canonical locator: {name}")
+        entries.append(
+            {
+                "name": name,
+                "locator_kind": locator.group(1),
+                "locator": locator.group(2),
+            }
+        )
+    names = [entry["name"] for entry in entries]
+    if not entries or len(names) != len(set(names)):
+        raise AcceptanceError("model-visible skill catalog is empty or has duplicate names")
+    return entries
+
+
+def _validate_skill_catalog(
+    entries: Sequence[Mapping[str, str]],
+    *,
+    expect_opc: bool,
+    workspace: Path,
+) -> dict[str, Any]:
+    by_name = {entry["name"]: entry for entry in entries}
+    present = sorted(set(SKILLS) & set(by_name))
+    opc_namespace = sorted(name for name in by_name if name.startswith("codex-opc-team:"))
+    if expect_opc and set(present) != set(SKILLS):
+        missing = sorted(set(SKILLS) - set(present))
+        raise AcceptanceError(f"fresh-process discovery missed exact OPC skills: {missing}")
+    if expect_opc and opc_namespace != sorted(SKILLS):
+        raise AcceptanceError("fresh-process discovery exposed an unexpected OPC skill set")
+    if not expect_opc and opc_namespace:
+        raise AcceptanceError("OPC skills remained model-visible after uninstall")
+    if FIXTURE_SKILL not in by_name:
+        raise AcceptanceError("unrelated fixture skill was removed or undiscoverable")
+
+    outside: list[str] = []
+    system_entries: list[str] = []
+    workspace = workspace.resolve()
+    for entry in entries:
+        if entry["locator_kind"] != "file":
+            continue
+        locator = Path(entry["locator"]).expanduser().resolve()
+        if _is_relative_to(locator, workspace):
+            continue
+        # Codex may expose its own bundled system Skills from the installation
+        # root.  Those are part of the CLI, not host/user discovery.  Every
+        # other file-backed Skill must originate in this clean room.
+        lowered_parts = [part.lower() for part in locator.parts]
+        is_system = any(
+            lowered_parts[index : index + 2] == ["skills", ".system"]
+            for index in range(len(lowered_parts) - 1)
+        )
+        if is_system:
+            system_entries.append(entry["name"])
+        else:
+            outside.append(entry["name"])
+    if outside:
+        raise AcceptanceError(
+            "model-visible file skills escaped the clean room: " + ", ".join(sorted(outside))
+        )
+    return {
+        "opc_skills": present,
+        "unrelated_fixture_present": True,
+        "catalog_entry_count": len(entries),
+        "outside_clean_room_file_skills": [],
+        "allowed_codex_system_skills": sorted(system_entries),
+    }
+
+
+def _discovery(
+    runner: CodexRunner, *, expect_opc: bool, workspace: Path
+) -> dict[str, Any]:
     # This starts a new OS process and asks Codex to render the real model-visible
     # prompt.  It does not call a model, use credentials, or create a session.
     prompt = runner.run("debug", "prompt-input", "lifecycle acceptance probe")
@@ -482,21 +728,13 @@ def _discovery(runner: CodexRunner, *, expect_opc: bool) -> dict[str, Any]:
         parsed = json.loads(prompt)
     except json.JSONDecodeError as exc:
         raise AcceptanceError("fresh-process prompt discovery returned invalid JSON") from exc
-    flattened = json.dumps(parsed, ensure_ascii=False)
-    present = sorted(skill for skill in SKILLS if skill in flattened)
-    fixture_present = FIXTURE_SKILL in flattened
-    if expect_opc and tuple(present) != tuple(sorted(SKILLS)):
-        missing = sorted(set(SKILLS) - set(present))
-        raise AcceptanceError(f"fresh-process discovery missed OPC skills: {missing}")
-    if not expect_opc and present:
-        raise AcceptanceError("OPC skills remained model-visible after uninstall")
-    if not fixture_present:
-        raise AcceptanceError("unrelated fixture skill was removed or undiscoverable")
+    result = _validate_skill_catalog(
+        _parse_skill_catalog(parsed), expect_opc=expect_opc, workspace=workspace
+    )
     return {
         "method": "fresh-process-debug-prompt-input",
-        "opc_skills": present,
-        "unrelated_fixture_present": fixture_present,
         "model_or_network_call": False,
+        **result,
     }
 
 
@@ -528,7 +766,9 @@ def _memory_status(install_result: Mapping[str, Any], paths: Mapping[str, Path])
     if status.get("authority") != "file-git":
         raise AcceptanceError("reinstalled plugin did not reconnect File/Git authority")
     audit = status.get("knowledge_git", {})
-    if audit.get("head") != _git(paths["knowledge"], "rev-parse", "HEAD"):
+    if audit.get("head") != _git(
+        paths["knowledge"], "rev-parse", "HEAD", env=_git_env(paths)
+    ):
         raise AcceptanceError("reinstalled plugin reported the wrong knowledge Git HEAD")
     return {
         "authority": status.get("authority"),
@@ -538,7 +778,90 @@ def _memory_status(install_result: Mapping[str, Any], paths: Mapping[str, Path])
     }
 
 
-def _source_report(source: str, ref: str | None) -> dict[str, Any]:
+def _git_remote_source(source: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source):
+        return f"https://github.com/{source}.git"
+    parsed = urlsplit(source)
+    if (
+        parsed.scheme == "https"
+        and parsed.hostname
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+    ):
+        return source
+    raise AcceptanceError("remote Marketplace source must be a credential-free HTTPS Git source")
+
+
+def _resolve_remote_ref(
+    source: str,
+    requested_ref: str,
+    *,
+    paths: Mapping[str, Path],
+    label: str,
+) -> dict[str, str]:
+    if Path(source).expanduser().exists():
+        raise AcceptanceError("local Marketplace paths do not have remote refs")
+    remote = _git_remote_source(source)
+    git_env = _git_env(paths)
+    exact_oid = bool(re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", requested_ref))
+    ref_kind = "oid" if exact_oid else "moving"
+    fetch_ref = requested_ref
+    if not exact_oid:
+        normalized = requested_ref.removeprefix("refs/tags/")
+        tag_ref = f"refs/tags/{normalized}"
+        tag_check = subprocess.run(
+            ["git", "ls-remote", "--exit-code", remote, tag_ref, f"{tag_ref}^{{}}"],
+            cwd=paths["probe"],
+            env=git_env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if tag_check.returncode == 0 and tag_check.stdout.strip():
+            ref_kind = "tag"
+            fetch_ref = tag_ref
+
+    repository = paths["ref_resolution"] / label
+    repository.mkdir(parents=True, exist_ok=True)
+    if not (repository / "HEAD").exists():
+        _git(repository, "init", "--bare", env=git_env)
+    fetch = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "fetch",
+            "--force",
+            "--no-tags",
+            "--depth=1",
+            remote,
+            fetch_ref,
+        ],
+        cwd=paths["probe"],
+        env=git_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if fetch.returncode:
+        raise CommandError(["git", "fetch", "remote", requested_ref], fetch)
+    oid = _git(repository, "rev-parse", "FETCH_HEAD^{commit}", env=git_env).lower()
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid):
+        raise AcceptanceError("remote ref did not resolve to an exact commit OID")
+    if exact_oid and oid != requested_ref.lower():
+        raise AcceptanceError("requested commit OID resolved to a different commit")
+    return {"requested_ref": requested_ref, "resolved_oid": oid, "ref_kind": ref_kind}
+
+
+def _source_report(
+    source: str,
+    ref: str | None,
+    resolved: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     path = Path(source).expanduser()
     if path.exists():
         return {"kind": "local", "name": path.resolve().name, "ref": None}
@@ -551,13 +874,23 @@ def _source_report(source: str, ref: str | None) -> dict[str, Any]:
         safe_source = source
     else:
         safe_source = "redacted-git-source"
-    return {"kind": "git", "source": safe_source, "ref": ref}
+    report: dict[str, Any] = {"kind": "git", "source": safe_source, "ref": ref}
+    if resolved:
+        report.update(
+            {
+                "resolved_oid": resolved["resolved_oid"],
+                "ref_kind": resolved["ref_kind"],
+            }
+        )
+    return report
 
 
 def _failure_domain(exc: BaseException) -> str:
     if not isinstance(exc, CommandError):
         return "local-package-discovery-or-preservation"
     command = set(exc.command)
+    if "fetch" in command and "remote" in command:
+        return "remote-ref-resolution"
     if "marketplace" in command and "add" in command:
         return "marketplace-fetch-or-ref"
     if "plugin" in command and "add" in command:
@@ -592,6 +925,26 @@ def _plan(args: argparse.Namespace, workspace: Path) -> dict[str, Any]:
     }
 
 
+def _validate_release_resolutions(
+    candidate: Mapping[str, str] | None,
+    rollback: Mapping[str, str] | None,
+) -> None:
+    if candidate is None or rollback is None:
+        raise AcceptanceError("release refs were not resolved to commit OIDs")
+    if candidate["ref_kind"] not in {"tag", "oid"} or rollback["ref_kind"] not in {
+        "tag",
+        "oid",
+    }:
+        raise AcceptanceError("release mode rejects moving branch refs")
+    if candidate["resolved_oid"] == rollback["resolved_oid"]:
+        raise AcceptanceError("release refs resolve to the same commit OID")
+
+
+def _require_same_version(expected: Any, actual: Any, label: str) -> None:
+    if actual != expected:
+        raise AcceptanceError(f"{label} version changed during idempotent reapply")
+
+
 def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
     workspace = validate_workspace(Path(args.workspace))
     plan = _plan(args, workspace)
@@ -616,13 +969,43 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         raise AcceptanceError("Codex CLI is unavailable; installed-state gate was not run")
     paths = _paths(workspace)
     _prepare_fixture_tree(paths)
+    candidate_resolution = (
+        _resolve_remote_ref(
+            args.candidate_source,
+            args.candidate_ref,
+            paths=paths,
+            label="candidate",
+        )
+        if args.candidate_ref
+        else None
+    )
+    rollback_resolution = (
+        _resolve_remote_ref(
+            args.rollback_source,
+            args.rollback_ref,
+            paths=paths,
+            label="rollback",
+        )
+        if args.rollback_ref
+        else None
+    )
+    if args.require_fixed_refs:
+        _validate_release_resolutions(candidate_resolution, rollback_resolution)
+    candidate_install_ref = (
+        candidate_resolution["resolved_oid"] if candidate_resolution else None
+    )
+    rollback_install_ref = rollback_resolution["resolved_oid"] if rollback_resolution else None
     runner = CodexRunner(executable, _clean_env(paths), paths["probe"])
     report: dict[str, Any] = {
         "schema": REPORT_SCHEMA,
         "status": "running",
         "platform": {"system": platform.system(), "python": platform.python_version()},
-        "candidate": _source_report(args.candidate_source, args.candidate_ref),
-        "rollback": _source_report(args.rollback_source, args.rollback_ref),
+        "candidate": _source_report(
+            args.candidate_source, args.candidate_ref, candidate_resolution
+        ),
+        "rollback": _source_report(
+            args.rollback_source, args.rollback_ref, rollback_resolution
+        ),
         "checks": {},
         "privacy": {
             "isolated_codex_home": True,
@@ -642,22 +1025,24 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             raise AcceptanceError("synthetic knowledge baseline is dirty")
 
         phase = "candidate-install"
-        candidate = _install_opc(runner, args.candidate_source, args.candidate_ref)
+        candidate = _install_opc(runner, args.candidate_source, candidate_install_ref)
         candidate_version = candidate.get("version")
         if args.expected_candidate_version and candidate_version != args.expected_candidate_version:
             raise AcceptanceError("candidate version did not match the expected release version")
         report["checks"]["candidate_install"] = {
             "version": candidate_version,
-            "fixed_ref": bool(args.candidate_ref),
-            "discovery": _discovery(runner, expect_opc=True),
+            "fixed_ref": candidate_resolution is not None,
+            "discovery": _discovery(runner, expect_opc=True, workspace=workspace),
         }
         _assert_protected_unchanged(baseline, paths, phase)
 
         phase = "candidate-idempotent-reapply"
-        repeated = _install_opc(runner, args.candidate_source, args.candidate_ref)
+        repeated = _install_opc(runner, args.candidate_source, candidate_install_ref)
+        candidate_reapply_same = repeated.get("version") == candidate_version
+        _require_same_version(candidate_version, repeated.get("version"), "candidate")
         report["checks"]["candidate_reapply"] = {
             "safe": True,
-            "same_version": repeated.get("version") == candidate_version,
+            "same_version": candidate_reapply_same,
         }
         _assert_protected_unchanged(baseline, paths, phase)
 
@@ -667,7 +1052,7 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         report["checks"]["uninstall"] = {
             "first": first_remove,
             "repeated": second_remove,
-            "discovery": _discovery(runner, expect_opc=False),
+            "discovery": _discovery(runner, expect_opc=False, workspace=workspace),
             "unrelated_plugin_present": FIXTURE_PLUGIN_ID in _installed_ids(runner),
         }
         if not report["checks"]["uninstall"]["unrelated_plugin_present"]:
@@ -675,34 +1060,39 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         _assert_protected_unchanged(baseline, paths, phase)
 
         phase = "reinstall"
-        reinstalled = _install_opc(runner, args.candidate_source, args.candidate_ref)
+        reinstalled = _install_opc(runner, args.candidate_source, candidate_install_ref)
+        if reinstalled.get("version") != candidate_version:
+            raise AcceptanceError("reinstall did not restore the exact candidate version")
         report["checks"]["reinstall"] = {
             "version": reinstalled.get("version"),
-            "discovery": _discovery(runner, expect_opc=True),
+            "same_version": True,
+            "discovery": _discovery(runner, expect_opc=True, workspace=workspace),
             "memory_status": _memory_status(reinstalled, paths),
         }
         _assert_protected_unchanged(baseline, paths, phase)
 
         phase = "rollback"
         _remove_owned(runner, PLUGIN_ID, MARKETPLACE)
-        rollback = _install_opc(runner, args.rollback_source, args.rollback_ref)
+        rollback = _install_opc(runner, args.rollback_source, rollback_install_ref)
         rollback_version = rollback.get("version")
         if args.expected_rollback_version and rollback_version != args.expected_rollback_version:
             raise AcceptanceError("rollback version did not match the expected supported version")
         report["checks"]["rollback"] = {
             "version": rollback_version,
             "distinct_version": rollback_version != candidate_version,
-            "fixed_ref": bool(args.rollback_ref),
-            "discovery": _discovery(runner, expect_opc=True),
+            "fixed_ref": rollback_resolution is not None,
+            "discovery": _discovery(runner, expect_opc=True, workspace=workspace),
             "memory_status": _memory_status(rollback, paths),
         }
         _assert_protected_unchanged(baseline, paths, phase)
 
         phase = "rollback-idempotent-reapply"
-        repeated_rollback = _install_opc(runner, args.rollback_source, args.rollback_ref)
+        repeated_rollback = _install_opc(runner, args.rollback_source, rollback_install_ref)
+        rollback_reapply_same = repeated_rollback.get("version") == rollback_version
+        _require_same_version(rollback_version, repeated_rollback.get("version"), "rollback")
         report["checks"]["rollback_reapply"] = {
             "safe": True,
-            "same_version": repeated_rollback.get("version") == rollback_version,
+            "same_version": rollback_reapply_same,
         }
         _assert_protected_unchanged(baseline, paths, phase)
         report["protected_data"] = {
@@ -715,16 +1105,40 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             "unrelated_config_sha256": baseline["config_sha256"],
             "preserved": True,
         }
-        report["release_gate"] = {
-            "eligible": bool(args.require_fixed_refs),
-            "candidate_fixed_ref": bool(args.candidate_ref),
-            "rollback_fixed_ref": bool(args.rollback_ref),
-            "distinct_refs": bool(
-                args.candidate_ref
-                and args.rollback_ref
-                and args.candidate_ref != args.rollback_ref
+        release_assertions = {
+            "release_mode_requested": bool(args.require_fixed_refs),
+            "candidate_resolved_to_oid": bool(candidate_resolution),
+            "rollback_resolved_to_oid": bool(rollback_resolution),
+            "immutable_ref_kinds": bool(
+                candidate_resolution
+                and rollback_resolution
+                and candidate_resolution["ref_kind"] in {"tag", "oid"}
+                and rollback_resolution["ref_kind"] in {"tag", "oid"}
+            ),
+            "distinct_resolved_oids": bool(
+                candidate_resolution
+                and rollback_resolution
+                and candidate_resolution["resolved_oid"]
+                != rollback_resolution["resolved_oid"]
+            ),
+            "expected_candidate_version": bool(
+                args.expected_candidate_version
+                and candidate_version == args.expected_candidate_version
+            ),
+            "expected_rollback_version": bool(
+                args.expected_rollback_version
+                and rollback_version == args.expected_rollback_version
             ),
             "distinct_versions": rollback_version != candidate_version,
+            "candidate_reapply_idempotent": candidate_reapply_same,
+            "rollback_reapply_idempotent": rollback_reapply_same,
+            "reinstall_exact_candidate": reinstalled.get("version") == candidate_version,
+            "discovery_and_uninstall_passed": True,
+            "protected_data_preserved": True,
+        }
+        report["release_gate"] = {
+            "eligible": all(release_assertions.values()),
+            "assertions": release_assertions,
         }
         report["status"] = "pass"
         report["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()

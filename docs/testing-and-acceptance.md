@@ -76,7 +76,7 @@ Optional Mem0 切片必须在安装依赖前从 `RUNNER_TEMP` 初始化 `MEM0_DI
 | 重复卸载 | 不删除未知文件，不报破坏性错误 |
 | 回滚 | 配置、Marketplace 和旧插件恢复后最小流程通过 |
 
-仓库使用 `scripts/plugin_lifecycle_acceptance.py` 执行真实 Codex CLI 安装态 Gate，并通过 `codex debug prompt-input` 的全新进程输出验证模型可见 Skills。固定标签发布、Windows/Linux 手动 CI、脱敏报告和人工新任务抽查步骤见[安装态生命周期验收](installed-lifecycle-acceptance.md)。目录或假 CLI Fixture 只能测试编排契约，不能冒充实际插件发现证据。
+仓库使用 `scripts/plugin_lifecycle_acceptance.py` 执行真实 Codex CLI 安装态 Gate，并通过 `codex debug prompt-input` 的全新进程输出精确验证 model-visible canonical Skill names。Pull Request 和 `main` push 在 disposable Windows/Linux Runner 中执行本地合成候选/回滚生命周期；固定标签发布另由手动工作流解析并钉住两个不可变 commit OID。隔离边界、脱敏报告和人工新任务抽查步骤见[安装态生命周期验收](installed-lifecycle-acceptance.md)。目录或假 CLI Fixture 只能测试编排契约，不能冒充实际插件发现证据。
 
 ## 7. 独立 QA 测试
 
