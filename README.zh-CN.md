@@ -72,6 +72,8 @@ codex plugin add codex-opc-team@opc
 
 公开仓库不得包含真实经理档案、项目历史、原始聊天、凭据、本机绝对路径、会话标识或 Hook 原始事件。卸载插件不得删除用户私有知识。
 
+Hook/运行事件只进入私有 `PLUGIN_DATA` 或项目 `.opc` 回退，绝不进入权威知识库。`opc-memory` 只用路径元数据报告已知 legacy 事件；归档前必须先 dry-run，再对未变化的计划单独授权。
+
 ## 文档导航
 
 | 文档 | 内容 |

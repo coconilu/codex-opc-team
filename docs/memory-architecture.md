@@ -133,3 +133,5 @@ stateDiagram-v2
 ## 10. 健康状态
 
 `doctor` 或等效检查应分别报告：Knowledge Repo 可读/可写/版本状态、Git 工作区状态、FileRecall 状态、Mem0 安装/启用/健康状态、索引 Revision，以及发现问题后的精确修复建议。降级是显式状态，不应伪装成完整语义召回。
+
+已知历史运行文件不属于知识变更。`status`/`doctor` 以 `LEGACY_RUNTIME_ARTIFACTS` 单独报告 `evaluations/events` 下的非占位文件和已知 `hook-events.jsonl` 路径，不读取文件内容，也不将它们计入 `UNCOMMITTED_KNOWLEDGE`。来源无法由公开 Git 历史证明时必须明确标记为 `unresolved_historical`。处理默认使用 `legacy-events --dry-run`；只有预览未变化且用户另行批准后，才可使用返回的 plan token 把未跟踪普通文件移入隔离的 `data_root/legacy-event-archive`。该流程不自动删除、提交或上传数据。

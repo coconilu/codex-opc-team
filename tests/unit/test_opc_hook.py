@@ -68,6 +68,7 @@ class HookPrivacyTests(unittest.TestCase):
         run = opc_knowledge.start_run(
             root=self.knowledge, project_root=self.project, title="Hook test"
         )
+        before = sorted(path.relative_to(self.knowledge) for path in self.knowledge.rglob("*"))
         response = self.run_hook(self.project)
         self.assertFalse(response["continue"])
         event_path = self.plugin_data / "run-events" / f"{run['run_id']}.jsonl"
@@ -78,6 +79,55 @@ class HookPrivacyTests(unittest.TestCase):
         serialized = json.dumps(event)
         for secret in ("secret-session", "secret-turn", str(self.project), "secret-model"):
             self.assertNotIn(secret, serialized)
+        after = sorted(path.relative_to(self.knowledge) for path in self.knowledge.rglob("*"))
+        self.assertEqual(before, after)
+
+    def test_missing_plugin_data_uses_project_runtime_fallback(self) -> None:
+        opc_knowledge.start_run(
+            root=self.knowledge, project_root=self.project, title="Hook fallback"
+        )
+        before = sorted(path.relative_to(self.knowledge) for path in self.knowledge.rglob("*"))
+        payload = {"hook_event_name": "Stop", "cwd": str(self.project)}
+        environment = {
+            key: value for key, value in os.environ.items() if key != "PLUGIN_DATA"
+        }
+        environment["OPC_KNOWLEDGE_HOME"] = str(self.knowledge)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "opc_hook.py")],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=environment,
+            check=True,
+        )
+        self.assertFalse(json.loads(result.stdout)["continue"])
+        self.assertTrue((self.project / ".opc" / "events.jsonl").is_file())
+        after = sorted(path.relative_to(self.knowledge) for path in self.knowledge.rglob("*"))
+        self.assertEqual(before, after)
+
+    def test_plugin_data_inside_knowledge_uses_project_runtime_fallback(self) -> None:
+        opc_knowledge.start_run(
+            root=self.knowledge, project_root=self.project, title="Hook isolation"
+        )
+        before = sorted(path.relative_to(self.knowledge) for path in self.knowledge.rglob("*"))
+        payload = {"hook_event_name": "Stop", "cwd": str(self.project)}
+        environment = {
+            **os.environ,
+            "PLUGIN_DATA": str(self.knowledge / "misconfigured-runtime"),
+            "OPC_KNOWLEDGE_HOME": str(self.knowledge),
+        }
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "opc_hook.py")],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=environment,
+            check=True,
+        )
+        self.assertFalse(json.loads(result.stdout)["continue"])
+        self.assertTrue((self.project / ".opc" / "events.jsonl").is_file())
+        after = sorted(path.relative_to(self.knowledge) for path in self.knowledge.rglob("*"))
+        self.assertEqual(before, after)
 
     def test_ready_run_allows_stop(self) -> None:
         opc_knowledge.start_run(
@@ -195,6 +245,7 @@ class HookPrivacyTests(unittest.TestCase):
             "PLUGIN_DATA": str(blocked_parent),
             "OPC_KNOWLEDGE_HOME": str(self.knowledge),
         }
+        before = sorted(path.relative_to(self.knowledge) for path in self.knowledge.rglob("*"))
         result = subprocess.run(
             [sys.executable, str(SCRIPTS / "opc_hook.py")],
             input=json.dumps(payload),
@@ -204,6 +255,8 @@ class HookPrivacyTests(unittest.TestCase):
             check=True,
         )
         self.assertFalse(json.loads(result.stdout)["continue"])
+        after = sorted(path.relative_to(self.knowledge) for path in self.knowledge.rglob("*"))
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

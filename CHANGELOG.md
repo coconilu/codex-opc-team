@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Isolated Hook/runtime events from canonical knowledge even when `PLUGIN_DATA` is missing or misconfigured, and added redacted preview-first legacy event diagnostics and archival.
+
+### Security
+
+- Removed the runtime event directory from new knowledge templates and required an unchanged preview token plus explicit approval before moving eligible legacy private event files; automatic deletion, commit, and upload remain forbidden.
+
 ## [0.1.0] - 2026-07-13
 
 ### Added

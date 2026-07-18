@@ -45,6 +45,8 @@ AUTHORITATIVE_KNOWLEDGE_PREFIXES = (
     "evaluations/",
     "promotions/",
 )
+LEGACY_RUNTIME_DIRECTORIES = ("evaluations/events",)
+LEGACY_RUNTIME_EXACT_PATHS = ("hook-events.jsonl", "evaluations/hook-events.jsonl")
 DEFAULT_TIMEOUT_SECONDS = 3.0
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
@@ -695,10 +697,186 @@ class FileGitBackend:
             for prefix in AUTHORITATIVE_KNOWLEDGE_PREFIXES
         )
 
-    def git_audit(self) -> dict[str, Any]:
-        """Report Git provenance without staging, committing, or changing files."""
+    @staticmethod
+    def _is_legacy_runtime_path(path: str) -> bool:
+        normalized = path.replace("\\", "/").lstrip("./")
+        if normalized in LEGACY_RUNTIME_EXACT_PATHS:
+            return True
+        return any(
+            normalized.startswith(f"{directory}/")
+            and normalized != f"{directory}/.gitkeep"
+            for directory in LEGACY_RUNTIME_DIRECTORIES
+        )
+
+    def legacy_runtime_artifacts(self) -> list[str]:
+        """Inventory known legacy runtime paths without reading file contents."""
+        found: set[str] = set()
+        for relative in LEGACY_RUNTIME_EXACT_PATHS:
+            candidate = self.root / relative
+            if candidate.is_file() or candidate.is_symlink():
+                found.add(relative)
+        for relative in LEGACY_RUNTIME_DIRECTORIES:
+            directory = self.root / relative
+            if directory.is_symlink():
+                found.add(relative)
+                continue
+            if not directory.is_dir():
+                continue
+            pending = [directory]
+            while pending:
+                current = pending.pop()
+                try:
+                    with os.scandir(current) as iterator:
+                        entries = list(iterator)
+                except OSError:
+                    found.add(current.relative_to(self.root).as_posix())
+                    continue
+                for entry in entries:
+                    candidate = Path(entry.path)
+                    candidate_relative = candidate.relative_to(self.root).as_posix()
+                    if candidate_relative.endswith("/.gitkeep"):
+                        continue
+                    if entry.is_symlink():
+                        found.add(candidate_relative)
+                    elif entry.is_dir(follow_symlinks=False):
+                        pending.append(candidate)
+                    elif entry.is_file(follow_symlinks=False):
+                        found.add(candidate_relative)
+        return sorted(found)
+
+    def _tracked_path(self, relative: str) -> bool | None:
         top_text = _git(self.root, ("rev-parse", "--show-toplevel"))
         if not isinstance(top_text, str) or not top_text:
+            return None
+        tracked = _git(self.root, ("ls-files", "--error-unmatch", "--", relative))
+        return isinstance(tracked, str) and bool(tracked.strip())
+
+    def legacy_runtime_plan(self, data_root: Path) -> dict[str, Any]:
+        """Build a redacted, non-mutating archive plan for legacy event files."""
+        validate_root_isolation(self.root, data_root)
+        archive_root = data_root / "legacy-event-archive"
+        entries: list[dict[str, Any]] = []
+        fingerprints: list[dict[str, Any]] = []
+        for relative in self.legacy_runtime_artifacts():
+            source = self.root / relative
+            tracked = self._tracked_path(relative)
+            is_symlink = source.is_symlink()
+            is_file = source.is_file() and not is_symlink
+            destination = archive_root / relative
+            destination_exists = destination.exists() or destination.is_symlink()
+            eligible = tracked is False and is_file and not destination_exists
+            if tracked is None:
+                reason = "knowledge root is not a Git repository"
+            elif tracked:
+                reason = "artifact is tracked; automatic movement is refused"
+            elif is_symlink:
+                reason = "artifact is a symbolic link; automatic movement is refused"
+            elif not is_file:
+                reason = "artifact is not a regular file"
+            elif destination_exists:
+                reason = "archive destination already exists"
+            else:
+                reason = None
+            entries.append(
+                {
+                    "source": relative,
+                    "destination": destination.relative_to(data_root).as_posix(),
+                    "tracked": tracked,
+                    "eligible": eligible,
+                    "blocked_reason": reason,
+                }
+            )
+            stat = source.lstat()
+            fingerprints.append(
+                {
+                    "source": relative,
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "tracked": tracked,
+                    "eligible": eligible,
+                }
+            )
+        approval_token = (
+            sha256_bytes(
+                json.dumps(
+                    fingerprints, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            )
+            if fingerprints
+            else None
+        )
+        return {
+            "dry_run": True,
+            "detected": bool(entries),
+            "artifact_count": len(entries),
+            "contents_inspected": False,
+            "source_provenance": "unresolved_historical",
+            "archive_root": str(archive_root),
+            "entries": entries,
+            "approval_token": approval_token,
+            "apply_requirements": [
+                "review this preview without opening event contents",
+                "obtain explicit approval for the exact source and destination paths",
+                "rerun with --apply and the unchanged --plan-token",
+            ],
+            "automatic_actions_excluded": ["delete", "commit", "upload"],
+        }
+
+    def apply_legacy_runtime_plan(
+        self, data_root: Path, *, plan_token: str | None
+    ) -> dict[str, Any]:
+        """Move only previewed, untracked regular files into private runtime data."""
+        plan = self.legacy_runtime_plan(data_root)
+        expected = plan["approval_token"]
+        if not expected:
+            return {**plan, "dry_run": False, "moved": [], "changed": False}
+        if not plan_token or plan_token != expected:
+            raise OpcMemoryError(
+                "LEGACY_EVENT_PLAN_CHANGED: run legacy-events --dry-run and pass "
+                "its unchanged approval_token with --apply --plan-token"
+            )
+        blocked = [entry for entry in plan["entries"] if not entry["eligible"]]
+        if blocked:
+            blocked_paths = ", ".join(str(entry["source"]) for entry in blocked)
+            raise OpcMemoryError(
+                "LEGACY_EVENT_MOVE_BLOCKED: automatic movement is limited to "
+                f"untracked regular files with unused destinations ({blocked_paths})"
+            )
+        moved: list[dict[str, str]] = []
+        for entry in plan["entries"]:
+            source = self.root / str(entry["source"])
+            destination = data_root / str(entry["destination"])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                source.rename(destination)
+            except OSError as exc:
+                raise OpcMemoryError(
+                    "LEGACY_EVENT_MOVE_FAILED: source was not deleted; place the "
+                    "private data root on the same filesystem or move it manually "
+                    f"after approval ({entry['source']})"
+                ) from exc
+            moved.append(
+                {
+                    "source": str(entry["source"]),
+                    "destination": str(entry["destination"]),
+                }
+            )
+        return {
+            **plan,
+            "dry_run": False,
+            "moved": moved,
+            "changed": bool(moved),
+            "automatic_actions_performed": ["move"] if moved else [],
+        }
+
+    def git_audit(self) -> dict[str, Any]:
+        """Report Git provenance without staging, committing, or changing files."""
+        legacy_artifacts = self.legacy_runtime_artifacts()
+        top_text = _git(self.root, ("rev-parse", "--show-toplevel"))
+        if not isinstance(top_text, str) or not top_text:
+            warnings = ["KNOWLEDGE_NOT_GIT"]
+            if legacy_artifacts:
+                warnings.append("LEGACY_RUNTIME_ARTIFACTS")
             return {
                 "is_repo": False,
                 "repo_root": None,
@@ -712,7 +890,8 @@ class FileGitBackend:
                 "unstaged": [],
                 "untracked": [],
                 "authoritative_uncommitted": [],
-                "warning_codes": ["KNOWLEDGE_NOT_GIT"],
+                "legacy_runtime_artifacts": legacy_artifacts,
+                "warning_codes": warnings,
             }
 
         repo_root = Path(top_text).expanduser().resolve()
@@ -753,7 +932,10 @@ class FileGitBackend:
                 unstaged.append(path)
 
         authoritative = [
-            path for path in dirty_paths if self._is_authoritative_path(path)
+            path
+            for path in dirty_paths
+            if self._is_authoritative_path(path)
+            and not self._is_legacy_runtime_path(path)
         ]
         warning_codes: list[str] = []
         if repo_root != self.root:
@@ -762,6 +944,8 @@ class FileGitBackend:
             warning_codes.append("GIT_HEAD_MISSING")
         if authoritative:
             warning_codes.append("UNCOMMITTED_KNOWLEDGE")
+        if legacy_artifacts:
+            warning_codes.append("LEGACY_RUNTIME_ARTIFACTS")
         provenance_ready = bool(repo_root == self.root and isinstance(head, str) and head)
         return {
             "is_repo": True,
@@ -776,6 +960,7 @@ class FileGitBackend:
             "unstaged": unstaged,
             "untracked": untracked,
             "authoritative_uncommitted": authoritative,
+            "legacy_runtime_artifacts": legacy_artifacts,
             "warning_codes": warning_codes,
         }
 
@@ -819,6 +1004,7 @@ class FileGitBackend:
                 except OpcMemoryError as exc:
                     invalid.append(str(exc))
         git_report = self.git_audit()
+        legacy_artifacts = list(git_report["legacy_runtime_artifacts"])
         return {
             "ok": self.root.is_dir() and not missing and not invalid,
             "knowledge_root": str(self.root),
@@ -834,6 +1020,19 @@ class FileGitBackend:
             "git": git_report,
             "provenance_ready": git_report["provenance_ready"],
             "warnings": list(git_report["warning_codes"]),
+            "legacy_runtime": {
+                "detected": bool(legacy_artifacts),
+                "artifact_count": len(legacy_artifacts),
+                "paths": legacy_artifacts,
+                "contents_inspected": False,
+                "source_provenance": "unresolved_historical",
+                "action": (
+                    "Run `legacy-events --dry-run` and review the redacted archive plan; "
+                    "moving data requires a separate --apply with the returned plan token."
+                    if legacy_artifacts
+                    else None
+                ),
+            },
         }
 
 
@@ -1503,12 +1702,25 @@ class MemoryService:
                 f'Use "{available_venv_python}" to run opc_memory.py so the isolated mem0ai install is visible.'
             )
         git_report = self.backend.git_audit()
+        legacy_artifacts = list(git_report["legacy_runtime_artifacts"])
         return {
             "knowledge_root": str(self.backend.root),
             "data_root": str(self.data_root),
             "authority": "file-git",
             "knowledge_git": git_report,
             "warnings": list(git_report["warning_codes"]),
+            "legacy_runtime": {
+                "detected": bool(legacy_artifacts),
+                "artifact_count": len(legacy_artifacts),
+                "paths": legacy_artifacts,
+                "contents_inspected": False,
+                "action": (
+                    "Run `legacy-events --dry-run`; apply requires the unchanged "
+                    "preview token and explicit approval."
+                    if legacy_artifacts
+                    else None
+                ),
+            },
             "mem0": {
                 "enabled": self.mem0_enabled,
                 "installed": installed,
@@ -1723,6 +1935,16 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("status")
     commands.add_parser("doctor")
 
+    legacy_events = commands.add_parser(
+        "legacy-events",
+        help="Preview or explicitly archive legacy runtime events outside knowledge",
+    )
+    _plan_mode(legacy_events)
+    legacy_events.add_argument(
+        "--plan-token",
+        help="Unchanged approval_token from a prior dry-run; required with --apply",
+    )
+
     setup = commands.add_parser("setup", help="Plan or initialize memory configuration")
     setup.add_argument("--enable-mem0", action="store_true")
     _plan_mode(setup)
@@ -1881,6 +2103,14 @@ def main(argv: list[str] | None = None) -> int:
                 result = service.status()
             elif args.command == "doctor":
                 result = service.doctor()
+            elif args.command == "legacy-events":
+                result = (
+                    service.backend.apply_legacy_runtime_plan(
+                        service.data_root, plan_token=args.plan_token
+                    )
+                    if args.apply
+                    else service.backend.legacy_runtime_plan(service.data_root)
+                )
             elif args.command == "reindex":
                 result = (
                     service.reindex_apply(args.limit, force=args.force)
