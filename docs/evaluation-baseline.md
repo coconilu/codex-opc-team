@@ -83,7 +83,7 @@ python scripts/evaluation_baseline.py verify
 python scripts/evaluation_baseline.py private-summary --summary <aggregate.json> --output <result.json> --report <report.md>
 ```
 
-Runner 要求 3–5 tasks、所有质量分母大于零、计数自洽，并对 scope leakage 与 stale/obsolete acceptance 保持零容忍。若真实试点没有 QA defect、recall opportunity 或 accepted recall，当前小样本不能计算完整基线，应报告“无效/需补充任务”，不得把零分母转成 PASS。
+Runner 要求 3–5 tasks、所有质量分母大于零、计数自洽，并对 scope leakage 与 stale/obsolete acceptance 保持零容忍。输入和机器输出必须是严格 JSON，`NaN`、`Infinity` 及其他非有限数一律拒绝。对 3–5 tasks，nearest-rank p95 必然是最大样本；runner 会在不重建或保留逐任务数据的前提下，验证 `total`、`median` 和 p95 是否可能来自对应数量的正数样本（context token 还必须满足正整数样本约束）。无法证明聚合可实现时按失败关闭，不得输出 PASS。若真实试点没有 QA defect、recall opportunity 或 accepted recall，当前小样本不能计算完整基线，应报告“无效/需补充任务”，不得把零分母转成 PASS。
 
 ## 6. 比较与发布解释
 

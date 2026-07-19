@@ -37,8 +37,8 @@
       "required": ["total", "median", "p95_nearest_rank"],
       "properties": {
         "total": {"type": "integer", "minimum": 1},
-        "median": {"type": "number", "exclusiveMinimum": 0},
-        "p95_nearest_rank": {"type": "number", "exclusiveMinimum": 0}
+        "median": {"type": "number", "exclusiveMinimum": 0, "multipleOf": 0.5},
+        "p95_nearest_rank": {"type": "integer", "minimum": 1}
       },
       "additionalProperties": false
     },

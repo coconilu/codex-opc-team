@@ -165,6 +165,90 @@ class EvaluationBaselineTests(unittest.TestCase):
         with self.assertRaisesRegex(baseline.EvaluationError, "accepted recalls"):
             baseline._score_private_summary(value)
 
+    def test_json_input_and_output_reject_non_finite_numbers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "summary.json"
+            for token in ("NaN", "Infinity", "-Infinity", "1e999"):
+                with self.subTest(token=token):
+                    path.write_text(f'{{"value": {token}}}', encoding="utf-8")
+                    with self.assertRaisesRegex(baseline.EvaluationError, "non-finite"):
+                        baseline._load_object(path)
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(baseline.EvaluationError):
+                    baseline._number(value, "value")
+                with self.assertRaisesRegex(baseline.EvaluationError, "strict JSON"):
+                    baseline._json_bytes({"value": value})
+
+    def test_private_summary_rejects_impossible_aggregate_distributions(self):
+        invalid_cases = (
+            (
+                "context_tokens",
+                {"total": 3, "median": 999999, "p95_nearest_rank": 999999},
+            ),
+            ("context_tokens", {"total": 100, "median": 40, "p95_nearest_rank": 60}),
+            (
+                "context_tokens",
+                {"total": 4200, "median": 1350, "p95_nearest_rank": 1600.5},
+            ),
+            (
+                "context_tokens",
+                {"total": 4200, "median": 1350.5, "p95_nearest_rank": 1600},
+            ),
+            (
+                "latency_ms",
+                {"total": 1, "median": 999999, "p95_nearest_rank": 999999},
+            ),
+            ("latency_ms", {"total": 138, "median": 53, "p95_nearest_rank": 52}),
+        )
+        for field, distribution in invalid_cases:
+            with self.subTest(field=field, distribution=distribution):
+                value = self.private_summary()
+                value[field] = distribution
+                with self.assertRaises(baseline.EvaluationError):
+                    baseline._score_private_summary(value)
+
+    def test_private_summary_accepts_feasible_even_task_aggregates(self):
+        value = self.private_summary()
+        value["task_count"] = 4
+        value["context_tokens"] = {
+            "total": 100,
+            "median": 25,
+            "p95_nearest_rank": 40,
+        }
+        value["latency_ms"] = {
+            "total": 10,
+            "median": 2.5,
+            "p95_nearest_rank": 4,
+        }
+        result = baseline._score_private_summary(value)
+        self.assertEqual(result["task_count"], 4)
+        self.assertEqual(result["metrics"]["context_tokens_per_task"]["mean"], 25)
+
+        value["context_tokens"]["total"] = 200
+        with self.assertRaisesRegex(baseline.EvaluationError, "cannot describe"):
+            baseline._score_private_summary(value)
+
+    def test_private_summary_accepts_feasible_five_task_aggregates(self):
+        value = self.private_summary()
+        value["task_count"] = 5
+        value["context_tokens"] = {
+            "total": 150,
+            "median": 30,
+            "p95_nearest_rank": 50,
+        }
+        value["latency_ms"] = {
+            "total": 15,
+            "median": 3,
+            "p95_nearest_rank": 5,
+        }
+        result = baseline._score_private_summary(value)
+        self.assertEqual(result["task_count"], 5)
+
+        value["context_tokens"]["total"] = 100
+        with self.assertRaisesRegex(baseline.EvaluationError, "cannot describe"):
+            baseline._score_private_summary(value)
+
     def test_private_safety_gate_failure_is_not_reported_as_pass(self):
         value = self.private_summary()
         value["counts"]["false_recall_acceptances"] = 2
@@ -176,7 +260,7 @@ class EvaluationBaselineTests(unittest.TestCase):
     def test_all_versioned_json_artifacts_are_valid_json(self):
         for path in sorted((ROOT / "evaluation").rglob("*.json")):
             with self.subTest(path=path):
-                self.assertIsInstance(json.loads(path.read_text(encoding="utf-8")), dict)
+                self.assertIsInstance(baseline._load_object(path), dict)
 
     def test_cli_verify_and_private_summary(self):
         verify = subprocess.run(

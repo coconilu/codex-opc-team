@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import subprocess
 import tempfile
@@ -78,6 +79,14 @@ class VersionContractTests(unittest.TestCase):
 
 
 class PrivacyScanTests(unittest.TestCase):
+    def test_reparse_attribute_is_python_310_compatible_junction_fallback(self):
+        path = mock.Mock(spec=["lstat"])
+        path.lstat.return_value = SimpleNamespace(
+            st_mode=0,
+            st_file_attributes=0x400,
+        )
+        self.assertEqual("reparse", privacy_scan._path_boundary_kind(path))
+
     def test_clean_repository_fragment_passes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -155,6 +164,51 @@ class PrivacyScanTests(unittest.TestCase):
                 self.skipTest(f"symbolic links unavailable: {exc}")
             findings = privacy_scan.scan(root)
             self.assertTrue(any("symbolic link escapes scan root" in item for item in findings))
+
+    def test_directory_reparse_boundary_is_pruned_before_content_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            boundary = root / "simulated-junction"
+            boundary.mkdir()
+            fake_secret = "sk" + "-" + ("z" * 24)
+            (boundary / "external.txt").write_text(fake_secret, encoding="utf-8")
+            original = privacy_scan._path_boundary_kind
+
+            def classify(path):
+                if path == boundary:
+                    return "reparse"
+                return original(path)
+
+            with mock.patch.object(
+                privacy_scan, "_path_boundary_kind", side_effect=classify
+            ):
+                findings = privacy_scan.scan(root)
+            self.assertTrue(any("reparse point is not scanned" in item for item in findings))
+            self.assertFalse(any("OpenAI-style secret" in item for item in findings))
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction semantics only")
+    def test_windows_junction_escape_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp)
+            external = Path(outside)
+            fake_secret = "sk" + "-" + ("j" * 24)
+            (external / "external.txt").write_text(fake_secret, encoding="utf-8")
+            junction = root / "external-junction"
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest(f"junctions unavailable: {created.stderr.strip()}")
+            try:
+                findings = privacy_scan.scan(root)
+                self.assertTrue(any("reparse point escapes scan root" in item for item in findings))
+                self.assertFalse(any("OpenAI-style secret" in item for item in findings))
+                self.assertEqual(1, len(findings))
+            finally:
+                junction.rmdir()
 
     @mock.patch.object(privacy_scan.subprocess, "run")
     def test_git_history_scan_fails_closed_when_git_is_unavailable(self, run):

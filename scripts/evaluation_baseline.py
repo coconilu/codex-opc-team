@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -45,13 +46,39 @@ class EvaluationError(RuntimeError):
     """Raised when evaluation input or evidence violates the contract."""
 
 
+def _reject_json_constant(value: str) -> None:
+    raise EvaluationError(f"JSON input contains non-finite number: {value}")
+
+
+def _assert_finite_numbers(value: Any, label: str) -> None:
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise EvaluationError(f"{label} contains a non-finite number")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _assert_finite_numbers(item, f"{label}.{key}")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _assert_finite_numbers(item, f"{label}[{index}]")
+
+
 def _load_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=_reject_json_constant,
+        )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise EvaluationError(f"cannot read JSON input {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise EvaluationError(f"JSON input must be an object: {path}")
+    _assert_finite_numbers(value, str(path))
     return value
 
 
@@ -105,9 +132,75 @@ def _integer(value: Any, label: str, *, minimum: int = 0) -> int:
 
 
 def _number(value: Any, label: str, *, minimum: float = 0) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < minimum:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise EvaluationError(f"{label} must be a number >= {minimum}")
-    return float(value)
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError):
+        raise EvaluationError(f"{label} must be a number >= {minimum}") from None
+    if not math.isfinite(numeric) or numeric < minimum:
+        raise EvaluationError(f"{label} must be a number >= {minimum}")
+    return numeric
+
+
+def _validate_aggregate_distribution(
+    *,
+    task_count: int,
+    total: float,
+    median: float,
+    p95: float,
+    integer_samples: bool,
+    label: str,
+) -> None:
+    """Prove an aggregate can come from 3-5 ordered positive samples.
+
+    For these task counts nearest-rank p95 is always the maximum sample. The
+    checks below are exact existence tests for the supplied total, median, and
+    maximum; they do not reconstruct or retain any private per-task values.
+    """
+
+    if p95 < median:
+        raise EvaluationError(f"{label} median cannot exceed p95")
+    if integer_samples:
+        if any(value > 2**53 - 1 for value in (total, median, p95)):
+            raise EvaluationError(f"{label} values exceed the exact aggregate range")
+        if not p95.is_integer():
+            raise EvaluationError(f"{label} p95 must be an integer")
+        if task_count % 2 and not median.is_integer():
+            raise EvaluationError(f"{label} median must be an integer for odd task_count")
+        if task_count % 2 == 0 and not (2 * median).is_integer():
+            raise EvaluationError(f"{label} median must be an integer or half-integer")
+
+        integer_total = int(total)
+        maximum = int(p95)
+        if task_count == 3:
+            minimum_total = int(1 + median + maximum)
+            maximum_total = int(2 * median + maximum)
+            feasible = minimum_total <= integer_total <= maximum_total
+        elif task_count == 5:
+            minimum_total = int(2 + 2 * median + maximum)
+            maximum_total = int(3 * median + 2 * maximum)
+            feasible = minimum_total <= integer_total <= maximum_total
+        else:
+            central_sum = int(2 * median)
+            first = integer_total - central_sum - maximum
+            lower_central = max(1, first, central_sum - maximum)
+            upper_central = central_sum // 2
+            feasible = first >= 1 and lower_central <= upper_central
+    elif task_count == 3:
+        first = total - median - p95
+        feasible = 0 < first <= median
+    elif task_count == 5:
+        feasible = 2 * median + p95 < total <= 3 * median + 2 * p95
+    else:
+        first = total - 2 * median - p95
+        feasible = 0 < first <= median
+
+    if not feasible:
+        raise EvaluationError(
+            f"{label} total, median, and nearest-rank p95 cannot describe "
+            f"{task_count} positive {'integer ' if integer_samples else ''}samples"
+        )
 
 
 def _identifier(value: Any, label: str, prefix: str) -> str:
@@ -197,7 +290,7 @@ def _git_environment(root: Path) -> dict[str, str]:
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes((json.dumps(dict(value), ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    path.write_bytes(_json_bytes(value))
 
 
 def _validate_record(wrapper: Mapping[str, Any], label: str) -> dict[str, Any]:
@@ -674,8 +767,22 @@ def _score_private_summary(
     context_p95 = _number(context["p95_nearest_rank"], "context_tokens.p95_nearest_rank", minimum=0.0001)
     latency_median = _number(latency["median"], "latency_ms.median", minimum=0.0001)
     latency_p95 = _number(latency["p95_nearest_rank"], "latency_ms.p95_nearest_rank", minimum=0.0001)
-    if context_median > context_p95 or latency_median > latency_p95:
-        raise EvaluationError("aggregate medians cannot exceed p95")
+    _validate_aggregate_distribution(
+        task_count=task_count,
+        total=context_total,
+        median=context_median,
+        p95=context_p95,
+        integer_samples=True,
+        label="context_tokens",
+    )
+    _validate_aggregate_distribution(
+        task_count=task_count,
+        total=latency_total,
+        median=latency_median,
+        p95=latency_p95,
+        integer_samples=False,
+        label="latency_ms",
+    )
     result = _build_result(
         dataset_id=pilot_id,
         mode="private-aggregate",
@@ -696,7 +803,11 @@ def _score_private_summary(
 
 
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise EvaluationError(f"cannot serialize strict JSON output: {exc}") from exc
+    return (serialized + "\n").encode("utf-8")
 
 
 def _report_bytes(result: Mapping[str, Any]) -> bytes:
