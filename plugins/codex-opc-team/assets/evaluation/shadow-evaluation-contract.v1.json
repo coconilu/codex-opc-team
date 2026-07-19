@@ -1,0 +1,45 @@
+{
+  "contract_version": "opc-shadow-evaluation-contract-v1",
+  "schema_version": "opc-shadow-replay-v1",
+  "result_schema_version": "opc-shadow-result-v1",
+  "metric_contract": "opc-evaluation-contract-v1",
+  "metric_contract_sha256": "f7eda22695e25f91f15031d6a94d0183e399fc3b52b34a21130b7f567180444d",
+  "feedback_contract": "opc-structured-feedback-contract-v1",
+  "preflight": {
+    "required_status": "candidate",
+    "require_current_git_head_blob": true,
+    "require_exact_content_hash": true,
+    "project_scope_must_match": true,
+    "reject_before_arm_measurement": ["cross_project_scope", "stale_provenance", "obsolete_or_non_candidate"]
+  },
+  "arm_contract": {
+    "quality_metrics": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate"],
+    "safety_metrics": ["scope_leakage_acceptances", "stale_obsolete_acceptances"],
+    "telemetry_metrics": ["context_tokens_per_task", "latency_ms"],
+    "same_dependency_identity_required": true,
+    "control_candidate_applied": false,
+    "treatment_candidate_applied": true
+  },
+  "decision_policy": {
+    "safety_gates_are_mandatory": true,
+    "single_metric_is_sufficient": false,
+    "model_inference_is_independent_qa": false,
+    "positive_recommendation_requires_measured_improvement": true,
+    "neutral_is_not_positive": true,
+    "timeout_or_provider_failure": "inconclusive_degraded",
+    "conflicting_quality_deltas": "inconclusive",
+    "confidence_formula": "beta-v1",
+    "confidence_prior": {"support": 1, "counterevidence": 1},
+    "confidence_weights": {"measured": 3, "human_judgment": 1, "model_inference": 0, "unverified": 0}
+  },
+  "forbidden_side_effects": ["candidate_status_change", "canonical_knowledge_write", "git_write", "provider_index_write", "project_source_write", "automatic_promotion"],
+  "limits": {
+    "replay_bytes": 524288,
+    "feedback_bytes": 524288,
+    "result_bytes": 1048576,
+    "cases": 20,
+    "evidence_items": 200,
+    "identifier_characters": 128,
+    "portable_reference_characters": 240
+  }
+}

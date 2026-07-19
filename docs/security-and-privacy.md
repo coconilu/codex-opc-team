@@ -73,6 +73,7 @@ Hook 必须满足：
 | 候选包含凭据或个人数据 | 写入前分类、脱敏和拒绝规则 |
 | 一个角色读取整库 | Context Packet 最小化，按项目/角色过滤 |
 | Mem0 供应链或服务异常 | 隔离依赖、固定版本、可禁用、File/Git 降级 |
+| Shadow replay 越界或诱导自动晋升 | current-HEAD/scope 预检、同契约比较、私有不可覆盖报告、零状态/索引写入 |
 
 Mem0 Adapter 在任何 `mem0` import 之前把 `MEM0_DIR` 指向 OPC 私有 `data_root`，显式关闭 `MEM0_TELEMETRY`，并固定 History DB 与 Qdrant 路径。若当前进程已经用外部目录或开启 Telemetry 导入 Mem0，Adapter 拒绝继续并降级到 File/Git。这些本地路径隔离不等于文本完全本地：进入索引的已批准摘要和正文可能发送给默认 OpenAI-backed 模型/嵌入服务。用户必须在启用前看到这条数据流；返回的召回项仍只是带 canonical 元数据的候选引用，必须回读 File/Git。
 
@@ -108,6 +109,7 @@ Mem0 Adapter 在任何 `mem0` import 之前把 `MEM0_DIR` 指向 OPC 私有 `dat
 | 候选经验 | 复盘 | 到审核或过期 | 可按策略清理 |
 | Hook 运行事件 | 有效 OPC 运行且确有必要 | 短期、轮换 | 自动策略或用户明确清理 |
 | Mem0 索引 | 用户启用并索引 | 可重建 | 可独立删除，不影响知识 |
+| Shadow Evaluation 输入/报告 | 用户批准的私有 pilot 或合成 fixture | 私有派生数据策略 | 用户按私有证据保留策略决定 |
 | 配置备份 | 配置变更前 | 到用户确认稳定 | 明确列出后由用户决定 |
 
 ## 9. 安全事件响应

@@ -347,6 +347,71 @@ def validate_structured_feedback_contract() -> None:
     )
 
 
+def validate_shadow_evaluation_contract() -> None:
+    contract_path = PLUGIN / "assets" / "evaluation" / "shadow-evaluation-contract.v1.json"
+    replay_schema_path = ROOT / "evaluation" / "schemas" / "shadow-replay.v1.schema.json"
+    result_schema_path = ROOT / "evaluation" / "schemas" / "shadow-result.v1.schema.json"
+    script_path = PLUGIN / "scripts" / "opc_shadow.py"
+    skill_path = PLUGIN / "skills" / "opc-shadow-evaluation" / "SKILL.md"
+    for path in (contract_path, replay_schema_path, result_schema_path, script_path, skill_path):
+        require(path.is_file(), f"missing Shadow Evaluation artifact: {path}")
+    contract = load_json(contract_path)
+    replay_schema = load_json(replay_schema_path)
+    result_schema = load_json(result_schema_path)
+    baseline_path = ROOT / "evaluation" / "contracts" / "baseline-contract.v1.json"
+    baseline = load_json(baseline_path)
+    baseline_hash = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
+    require(
+        contract.get("contract_version") == "opc-shadow-evaluation-contract-v1",
+        "unsupported Shadow Evaluation contract",
+    )
+    require(
+        contract.get("metric_contract") == baseline.get("contract_version")
+        and contract.get("metric_contract_sha256") == baseline_hash,
+        "Shadow Evaluation must bind the exact #4 metric contract",
+    )
+    baseline_groups = {
+        "quality_metrics": [
+            metric["id"] for metric in baseline["metrics"] if metric["category"] == "product_outcome"
+        ],
+        "safety_metrics": [
+            metric["id"] for metric in baseline["metrics"] if metric["category"] == "safety_gate"
+        ],
+        "telemetry_metrics": [
+            metric["id"] for metric in baseline["metrics"] if metric["category"] == "diagnostic_telemetry"
+        ],
+    }
+    arm = contract.get("arm_contract") or {}
+    for group, expected in baseline_groups.items():
+        require(arm.get(group) == expected, f"Shadow Evaluation {group} drifted from #4")
+    require(
+        replay_schema.get("additionalProperties") is False
+        and result_schema.get("additionalProperties") is False,
+        "Shadow Evaluation top-level schemas must reject extra fields",
+    )
+    for name in ("dataset", "candidate", "dependency", "ratio", "arm", "case"):
+        require(
+            replay_schema.get("$defs", {}).get(name, {}).get("additionalProperties") is False,
+            f"Shadow replay schema {name} must reject extra fields",
+        )
+    require(
+        set(contract.get("forbidden_side_effects", []))
+        == {
+            "candidate_status_change",
+            "canonical_knowledge_write",
+            "git_write",
+            "provider_index_write",
+            "project_source_write",
+            "automatic_promotion",
+        },
+        "Shadow Evaluation forbidden side effects are incomplete",
+    )
+    require(
+        (ROOT / "docs" / "adr" / "0010-read-only-shadow-evaluation.md").is_file(),
+        "Shadow Evaluation architecture boundary requires ADR-0010",
+    )
+
+
 def main() -> int:
     checks = [
         validate_manifest,
@@ -359,6 +424,7 @@ def main() -> int:
         validate_published_memory_contract,
         validate_evaluation_baseline,
         validate_structured_feedback_contract,
+        validate_shadow_evaluation_contract,
         validate_markdown_links,
     ]
     try:

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:schema:shadow-result:v1",
+  "title": "OPC Shadow Evaluation result",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "metric_contract", "metric_contract_sha256", "contract_sha256", "replay_sha256", "evaluation_id", "dataset", "candidate", "preflight", "status", "degradation_status", "recommendation", "measurements", "evidence", "confidence", "failure_modes", "governance"],
+  "properties": {
+    "schema_version": {"const": "opc-shadow-result-v1"},
+    "contract_version": {"const": "opc-shadow-evaluation-contract-v1"},
+    "metric_contract": {"const": "opc-evaluation-contract-v1"},
+    "metric_contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "replay_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "evaluation_id": {"type": "string"},
+    "dataset": {"type": "object"},
+    "candidate": {"type": "object"},
+    "preflight": {"type": "object"},
+    "status": {"enum": ["conclusive", "inconclusive", "rejected_preflight"]},
+    "degradation_status": {"enum": ["none", "degraded"]},
+    "recommendation": {"enum": ["consider_for_separate_curation", "do_not_promote_on_shadow_evidence", "inconclusive", "preflight_rejected"]},
+    "measurements": {"type": ["object", "null"]},
+    "evidence": {"type": "object"},
+    "confidence": {"type": "object"},
+    "failure_modes": {"type": "array"},
+    "governance": {"type": "object"}
+  },
+  "additionalProperties": false
+}

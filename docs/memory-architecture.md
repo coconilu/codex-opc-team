@@ -117,6 +117,8 @@ stateDiagram-v2
 
 持久状态统一为 `candidate / approved / rejected / obsolete`；验证过程、Published 条件和 Mem0 索引状态是流程或派生状态，不另造权威事实。候选经验和未能由当前 Git HEAD 验证的 approved 条目不能被正常召回为规则。只有 `approved`、当前 HEAD 中 canonical blob 与内容哈希一致、且适用范围匹配的知识可以注入执行上下文；`obsolete` 通过原因和 `superseded_by` 关系保留历史解释。
 
+`opc_shadow.py` 提供候选的只读 Shadow Evaluation：先验证 candidate 状态、project scope 与 current-HEAD exact blob，再用 #4 同一指标契约比较 control/treatment，并把 #5 feedback 按 measured、human judgment、model inference、unverified 分类。Shadow confidence 是派生报告字段，不回写候选，也不代表批准；任何 canonical transition、Git commit 和可选 reindex 仍由独立 curator 流程完成。详见[候选经验 Shadow Evaluation](shadow-evaluation.md)。
+
 ## 8. 冲突、失效和回滚
 
 当新候选与现有知识冲突时，不自动覆盖。策展流程需要记录：冲突条目、差异、适用环境、各自证据、建议关系（替代/并存/拒绝）。发布后若发现有害影响，通过新 Commit 将条目标记失效或恢复前一版本，再重建受影响索引。
