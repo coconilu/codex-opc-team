@@ -49,6 +49,7 @@ CONTRACT_VERSION = "opc-capability-evolution-contract-v1"
 PROPOSAL_VERSION = "opc-capability-change-proposal-v1"
 RECORD_VERSION = "opc-capability-evolution-record-v1"
 EVIDENCE_VERSION = "opc-capability-evolution-evidence-v1"
+PILOT_SNAPSHOT_VERSION = "opc-capability-pilot-snapshot-v1"
 METRIC_CONTRACT_VERSION = "opc-evaluation-contract-v1"
 REPORT_CLAIM = "association/evidence only"
 METRIC_CONTRACT_SHA256 = "f7eda22695e25f91f15031d6a94d0183e399fc3b52b34a21130b7f567180444d"
@@ -94,13 +95,19 @@ PROPOSAL_KEYS = {
     "schema_version", "contract_version", "proposal_id", "project_id",
     "sources", "capability", "current_version", "candidate_version",
     "rollback_target", "scope", "owner", "pilot", "created_at",
+    "proposal_core_sha256",
 }
+PROPOSAL_CORE_KEYS = (
+    "schema_version", "contract_version", "proposal_id", "project_id",
+    "capability", "current_version", "candidate_version", "rollback_target",
+    "scope", "owner", "pilot", "created_at",
+)
 SOURCE_KEYS = {"candidate_refs", "feedback_refs", "evaluation_refs", "lineage_refs"}
 SOURCE_REF_KEYS = {"ref", "sha256"}
 CAPABILITY_KEYS = {"kind", "target_path"}
 VERSION_KEYS = {"version", "source_path", "source_commit", "content_sha256"}
 SCOPE_KEYS = {"kind", "project_id"}
-PILOT_KEYS = {"min_cases", "max_cases", "observation_cases"}
+PILOT_KEYS = {"min_cases", "max_cases", "observation_cases", "allowed_project_ids"}
 EVIDENCE_KEYS = {"kind", "ref", "sha256"}
 AUTH_KEYS = {"manager_approval", "independent_qa", "shadow", "recorded_at"}
 CASE_KEYS = {"case_id", "control", "candidate"}
@@ -179,6 +186,7 @@ EVIDENCE_KINDS = {
 EVIDENCE_ENVELOPE_KEYS = {
     "schema_version", "evidence_kind", "proposal_id", "capability",
     "run_binding", "pilot_binding", "decision", "safety", "recorded_at",
+    "proposal_core_sha256", "pilot_snapshot_sha256", "evaluation_result_sha256",
 }
 EVIDENCE_CAPABILITY_KEYS = {
     "kind", "target_path", "current_version", "candidate_version",
@@ -239,6 +247,21 @@ def _json_bytes(value: Mapping[str, Any], *, maximum: int) -> bytes:
     if len(raw) > maximum:
         raise EvolutionError("JSON value exceeds the configured size limit")
     return raw
+
+
+def _proposal_core(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the immutable governance core without circular evidence refs."""
+    if not isinstance(value, Mapping) or any(key not in value for key in PROPOSAL_CORE_KEYS):
+        raise EvolutionError("proposal governance core is incomplete")
+    try:
+        core = {key: value[key] for key in PROPOSAL_CORE_KEYS}
+        return json.loads(_json_bytes(core, maximum=MAX_PROPOSAL_BYTES))
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise EvolutionError("proposal governance core is invalid") from exc
+
+
+def _proposal_core_sha256(value: Mapping[str, Any]) -> str:
+    return _sha(_json_bytes(_proposal_core(value), maximum=MAX_PROPOSAL_BYTES))
 
 
 def _decode_json(raw: bytes, *, maximum: int, label: str) -> dict[str, Any]:
@@ -310,6 +333,7 @@ def _load_contract() -> tuple[dict[str, Any], str]:
         or value.get("proposal_schema_version") != PROPOSAL_VERSION
         or value.get("record_schema_version") != RECORD_VERSION
         or value.get("evidence_schema_version") != EVIDENCE_VERSION
+        or value.get("pilot_snapshot_version") != PILOT_SNAPSHOT_VERSION
         or value.get("authority") != "file-git-only"
         or value.get("report_claim") != REPORT_CLAIM
         or value.get("causal_claim_allowed") is not False
@@ -382,6 +406,11 @@ def validate_proposal(value: Mapping[str, Any]) -> None:
     project_id = _portable(proposal["project_id"], PORTABLE_ID, "project_id")
     _portable(proposal["owner"], PORTABLE_ID, "owner")
     _timestamp(proposal["created_at"], "created_at")
+    if (
+        _hash(proposal["proposal_core_sha256"], "proposal_core_sha256")
+        != _proposal_core_sha256(proposal)
+    ):
+        raise EvolutionError("proposal governance core digest does not match")
 
     sources = _exact(proposal["sources"], SOURCE_KEYS, "sources")
     candidates = sources["candidate_refs"]
@@ -429,6 +458,17 @@ def validate_proposal(value: Mapping[str, Any]) -> None:
         raise EvolutionError("pilot bounds must be integers from 1 to 20")
     if pilot["min_cases"] > pilot["max_cases"]:
         raise EvolutionError("pilot minimum cannot exceed maximum")
+    allowed_projects = pilot["allowed_project_ids"]
+    if not isinstance(allowed_projects, list) or not 1 <= len(allowed_projects) <= MAX_REFS:
+        raise EvolutionError("pilot allowed projects must contain 1..20 portable ids")
+    normalized_projects = [
+        _portable(item, PORTABLE_ID, "pilot.allowed_project_ids")
+        for item in allowed_projects
+    ]
+    if normalized_projects != sorted(set(normalized_projects)) or project_id not in normalized_projects:
+        raise EvolutionError("pilot allowed projects must be sorted, unique, and include project_id")
+    if scope["kind"] == "project" and normalized_projects != [project_id]:
+        raise EvolutionError("project-scoped pilot cannot authorize another project")
     _json_bytes(proposal, maximum=MAX_PROPOSAL_BYTES)
 
 
@@ -538,7 +578,11 @@ def _strict_linear_target_range(root: Path, base: str, head: str, target: str,
             raise EvolutionError(
                 f"{label} rejects add/delete/rename/copy/typechange and non-target paths"
             )
-        _git_blob_info(root, commit_id, target)
+        _, _, target_blob = _git_blob_info(root, commit_id, target)
+        # Inspect every historical target blob in-memory. A later clean commit
+        # cannot erase a credential, private marker, binary, or host path from
+        # the candidate/confirmation range that would be published in Git.
+        _privacy_scan(target_blob)
         expected_parent = commit_id
     return commits
 
@@ -811,6 +855,15 @@ def _validate_evidence_envelope(value: Any, proposal: Mapping[str, Any], label: 
         raise EvolutionError(f"{label}.evidence_kind is unsupported")
     if envelope["proposal_id"] != proposal["proposal_id"]:
         raise EvolutionError(f"{label} belongs to another proposal")
+    if (
+        _hash(envelope["proposal_core_sha256"], f"{label}.proposal_core_sha256")
+        != _proposal_core_sha256(proposal)
+        or envelope["proposal_core_sha256"] != proposal["proposal_core_sha256"]
+    ):
+        raise EvolutionError(f"{label} proposal governance binding is stale")
+    for digest_key in ("pilot_snapshot_sha256", "evaluation_result_sha256"):
+        if envelope[digest_key] is not None:
+            _hash(envelope[digest_key], f"{label}.{digest_key}")
     capability = _exact(envelope["capability"], EVIDENCE_CAPABILITY_KEYS, f"{label}.capability")
     if (
         capability["kind"] != proposal["capability"]["kind"]
@@ -838,6 +891,8 @@ def _private_ref(
     expected_kind: str | None = None,
     expected_run_binding: Any = _UNSET,
     expected_pilot_binding: Any = _UNSET,
+    expected_pilot_snapshot_sha256: Any = _UNSET,
+    expected_evaluation_result_sha256: Any = _UNSET,
     allowed_decisions: set[str] | None = None,
     allowed_safety: set[str] | None = None,
     not_before: str | None = None,
@@ -853,14 +908,13 @@ def _private_ref(
     except FeedbackError as exc:
         raise EvolutionError("evidence escaped the private project boundary") from exc
     try:
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or _is_reparse(path) or metadata.st_nlink != 1:
-            raise EvolutionError("evidence must be a single-link private file")
-        raw = path.read_bytes()
-    except FileNotFoundError as exc:
-        raise EvolutionError("required private evidence is unavailable") from exc
-    except OSError as exc:
-        raise EvolutionError("required private evidence could not be verified") from exc
+        with _BoundDirectory(path.parent, project, create=False) as bound:
+            raw = bound.read_bytes(
+                path.name, max_bytes=MAX_RECORD_BYTES,
+                require_single_link=True, binary=True,
+            )
+    except (FeedbackError, FileNotFoundError, OSError) as exc:
+        raise EvolutionError("required private evidence could not be verified safely") from exc
     if len(raw) > MAX_RECORD_BYTES or _sha(raw) != reference["sha256"]:
         raise EvolutionError("private evidence hash or size does not match")
     envelope = _decode_json(raw, maximum=MAX_RECORD_BYTES, label="private evidence envelope")
@@ -871,6 +925,16 @@ def _private_ref(
         raise EvolutionError("evidence run binding is missing or stale")
     if expected_pilot_binding is not _UNSET and envelope["pilot_binding"] != expected_pilot_binding:
         raise EvolutionError("evidence pilot or lineage binding is missing or stale")
+    if (
+        expected_pilot_snapshot_sha256 is not _UNSET
+        and envelope["pilot_snapshot_sha256"] != expected_pilot_snapshot_sha256
+    ):
+        raise EvolutionError("evidence pilot snapshot binding is missing or stale")
+    if (
+        expected_evaluation_result_sha256 is not _UNSET
+        and envelope["evaluation_result_sha256"] != expected_evaluation_result_sha256
+    ):
+        raise EvolutionError("evidence evaluation result binding is missing or stale")
     if allowed_decisions is not None and envelope["decision"] not in allowed_decisions:
         raise EvolutionError("evidence decision does not satisfy the required gate")
     if allowed_safety is not None and envelope["safety"] not in allowed_safety:
@@ -952,6 +1016,8 @@ def _verify_authorization(
     authorization: Mapping[str, Any],
     *,
     pilot_binding: Mapping[str, Any] | None,
+    pilot_snapshot_sha256: str | None,
+    evaluation_result_sha256: str | None,
     now: str,
     not_before: str,
 ) -> None:
@@ -970,6 +1036,8 @@ def _verify_authorization(
         _private_ref(
             project, authorization[key], proposal=proposal, expected_kind=key,
             expected_run_binding=None, expected_pilot_binding=pilot_binding,
+            expected_pilot_snapshot_sha256=pilot_snapshot_sha256,
+            expected_evaluation_result_sha256=evaluation_result_sha256,
             allowed_decisions=decisions, allowed_safety=safety,
             not_before=not_before, not_after=auth_time,
         )
@@ -1039,6 +1107,30 @@ def validate_pilot_case(value: Mapping[str, Any], proposal: Mapping[str, Any]) -
         raise EvolutionError("candidate run did not use the exact candidate capability version")
 
 
+def _pilot_snapshot(cases: Sequence[Mapping[str, Any]], confounders: Sequence[str]) -> dict[str, Any]:
+    if not isinstance(cases, Sequence) or isinstance(cases, (str, bytes)) or len(cases) > MAX_CASES:
+        raise EvolutionError("pilot snapshot cases exceed bounds")
+    if not isinstance(confounders, Sequence) or isinstance(confounders, (str, bytes)):
+        raise EvolutionError("pilot snapshot confounders are invalid")
+    normalized = [_portable(item, PORTABLE_ID, "pilot snapshot confounder") for item in confounders]
+    if not 1 <= len(normalized) <= MAX_REFS or normalized != sorted(set(normalized)):
+        raise EvolutionError("pilot snapshot confounders must be sorted and unique")
+    snapshot = {
+        "snapshot_version": PILOT_SNAPSHOT_VERSION,
+        # Case order is intentional evidence: reordering or replacing any arm
+        # changes the digest even when aggregate metrics happen to be equal.
+        "pilot_cases": list(cases),
+        "confounders": normalized,
+    }
+    return json.loads(_json_bytes(snapshot, maximum=MAX_RECORD_BYTES))
+
+
+def _pilot_snapshot_sha256(
+    cases: Sequence[Mapping[str, Any]], confounders: Sequence[str]
+) -> str:
+    return _sha(_json_bytes(_pilot_snapshot(cases, confounders), maximum=MAX_RECORD_BYTES))
+
+
 def _validate_evaluation(value: Any, label: str) -> None:
     result = _exact(
         value,
@@ -1084,6 +1176,11 @@ def _validate_evaluation(value: Any, label: str) -> None:
     _timestamp(result["evaluated_at"], f"{label}.evaluated_at")
 
 
+def _evaluation_result_sha256(value: Mapping[str, Any]) -> str:
+    _validate_evaluation(value, "evaluation result digest")
+    return _sha(_json_bytes(value, maximum=MAX_RECORD_BYTES))
+
+
 def _history(revision: int, state: str, action: str, timestamp: str,
              refs: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     return {
@@ -1095,7 +1192,8 @@ def _history(revision: int, state: str, action: str, timestamp: str,
 def validate_record(record: Mapping[str, Any]) -> None:
     keys = {
         "schema_version", "contract_version", "contract_sha256", "proposal",
-        "proposal_sha256", "revision", "state", "created_at", "updated_at",
+        "proposal_sha256", "proposal_core_sha256", "pilot_snapshot_sha256",
+        "evaluation_result_sha256", "revision", "state", "created_at", "updated_at",
         "pilot_authorization", "pilot_cases", "evaluation",
         "evaluation_evidence", "promotion_authorization", "pending_transition",
         "active_version", "history",
@@ -1109,6 +1207,15 @@ def validate_record(record: Mapping[str, Any]) -> None:
     validate_proposal(obj["proposal"])
     if obj["proposal_sha256"] != _sha(_json_bytes(obj["proposal"], maximum=MAX_PROPOSAL_BYTES)):
         raise EvolutionError("evolution record proposal hash does not match")
+    if (
+        _hash(obj["proposal_core_sha256"], "record proposal_core_sha256")
+        != _proposal_core_sha256(obj["proposal"])
+        or obj["proposal_core_sha256"] != obj["proposal"]["proposal_core_sha256"]
+    ):
+        raise EvolutionError("evolution record proposal governance digest is stale")
+    for digest_key in ("pilot_snapshot_sha256", "evaluation_result_sha256"):
+        if obj[digest_key] is not None:
+            _hash(obj[digest_key], f"record {digest_key}")
     revision = obj["revision"]
     history = obj["history"]
     if (
@@ -1195,6 +1302,22 @@ def validate_record(record: Mapping[str, Any]) -> None:
         )
         if obj["evaluation"]["measured_case_count"] != measured:
             raise EvolutionError("evaluation measured case count differs from available pilot arms")
+        recomputed_evaluation = evaluate_cases(
+            obj["pilot_cases"], obj["proposal"], obj["evaluation"]["confounders"],
+            now=obj["evaluation"]["evaluated_at"],
+        )
+        if recomputed_evaluation != obj["evaluation"]:
+            raise EvolutionError("evaluation result is not determined by the exact pilot snapshot")
+        expected_snapshot = _pilot_snapshot_sha256(
+            obj["pilot_cases"], obj["evaluation"]["confounders"]
+        )
+        expected_result = _evaluation_result_sha256(obj["evaluation"])
+        if obj["pilot_snapshot_sha256"] != expected_snapshot:
+            raise EvolutionError("pilot snapshot digest does not match the exact pilot cases")
+        if obj["evaluation_result_sha256"] != expected_result:
+            raise EvolutionError("evaluation result digest does not match")
+    elif obj["pilot_snapshot_sha256"] is not None or obj["evaluation_result_sha256"] is not None:
+        raise EvolutionError("unevaluated record cannot retain pilot or evaluation digests")
     if obj["evaluation_evidence"] is not None:
         _validate_evidence(obj["evaluation_evidence"], "evaluation_evidence")
         if obj["evaluation_evidence"]["kind"] != "evaluation":
@@ -1265,6 +1388,7 @@ def _read_record(project: Path, proposal_id: str) -> tuple[dict[str, Any] | None
         return None, None
     record, raw = _read_json_file(path, maximum=MAX_RECORD_BYTES, label="evolution record")
     validate_record(record)
+    _verify_record_evidence_bindings(project, record)
     return record, _sha(raw)
 
 
@@ -1278,6 +1402,8 @@ def _verify_source_refs(project: Path, proposal: Mapping[str, Any]) -> None:
             evidence = _source_ref_to_evidence(kind, ref)
             _private_ref(
                 project, evidence, proposal=proposal, expected_kind=kind,
+                expected_pilot_snapshot_sha256=None,
+                expected_evaluation_result_sha256=None,
                 allowed_decisions=set(decisions), allowed_safety=set(safety),
                 not_after=proposal["created_at"],
             )
@@ -1307,6 +1433,9 @@ def preview_open(project_root: Path, repository_root: Path,
             "contract_sha256": contract_hash,
             "proposal": dict(proposal),
             "proposal_sha256": proposal_hash,
+            "proposal_core_sha256": proposal["proposal_core_sha256"],
+            "pilot_snapshot_sha256": None,
+            "evaluation_result_sha256": None,
             "revision": 1,
             "state": "candidate",
             "created_at": timestamp,
@@ -1421,6 +1550,8 @@ def _verify_pilot_lineage(project: Path, proposal: Mapping[str, Any],
                 project, arm["lineage"], proposal=proposal, expected_kind="lineage",
                 expected_run_binding=_expected_run_binding(case["case_id"], arm_name, arm),
                 expected_pilot_binding=None, allowed_decisions={"verified"},
+                expected_pilot_snapshot_sha256=None,
+                expected_evaluation_result_sha256=None,
                 allowed_safety={"not_applicable"}, not_after=now,
             )
 
@@ -1433,6 +1564,10 @@ def _verify_evaluation_evidence(project: Path, proposal: Mapping[str, Any],
     _private_ref(
         project, evidence, proposal=proposal, expected_kind="evaluation",
         expected_run_binding=None, expected_pilot_binding=_pilot_binding(cases),
+        expected_pilot_snapshot_sha256=_pilot_snapshot_sha256(
+            cases, evaluation["confounders"]
+        ),
+        expected_evaluation_result_sha256=_evaluation_result_sha256(evaluation),
         allowed_decisions={evaluation["conclusion"]}, allowed_safety=safety,
         not_before=not_before, not_after=now,
     )
@@ -1446,6 +1581,7 @@ def _revalidate_cumulative_evidence(project: Path, record: Mapping[str, Any], *,
         raise EvolutionError("pilot authorization evidence is missing")
     _verify_authorization(
         project, proposal, record["pilot_authorization"], pilot_binding=None,
+        pilot_snapshot_sha256=None, evaluation_result_sha256=None,
         now=now, not_before=proposal["created_at"],
     )
     if not record["pilot_cases"]:
@@ -1466,9 +1602,71 @@ def _revalidate_cumulative_evidence(project: Path, record: Mapping[str, Any], *,
             raise EvolutionError("promotion authorization evidence is missing")
         _verify_authorization(
             project, proposal, record["promotion_authorization"],
-            pilot_binding=_pilot_binding(record["pilot_cases"]), now=now,
+            pilot_binding=_pilot_binding(record["pilot_cases"]),
+            pilot_snapshot_sha256=record["pilot_snapshot_sha256"],
+            evaluation_result_sha256=record["evaluation_result_sha256"], now=now,
             not_before=record["evaluation"]["evaluated_at"],
         )
+
+
+def _verify_record_evidence_bindings(project: Path, record: Mapping[str, Any]) -> None:
+    """Re-read every persisted evidence object whenever a record is consumed."""
+    proposal = record["proposal"]
+    now = record["updated_at"]
+    _verify_source_refs(project, proposal)
+    if record["pilot_authorization"] is not None:
+        _verify_authorization(
+            project, proposal, record["pilot_authorization"], pilot_binding=None,
+            pilot_snapshot_sha256=None, evaluation_result_sha256=None,
+            now=now, not_before=proposal["created_at"],
+        )
+    if record["pilot_cases"]:
+        _verify_pilot_lineage(project, proposal, record["pilot_cases"], now=now)
+    if record["evaluation"] is not None:
+        if record["evaluation_evidence"] is None:
+            raise EvolutionError("bound evaluation evidence is missing")
+        pilot_recorded_at = max(
+            entry["recorded_at"] for entry in record["history"]
+            if entry["action"] == "pilot_case_recorded"
+        )
+        _verify_evaluation_evidence(
+            project, proposal, record["evaluation_evidence"], record["evaluation"],
+            record["pilot_cases"], now=now, not_before=pilot_recorded_at,
+        )
+    if record["promotion_authorization"] is not None:
+        _verify_authorization(
+            project, proposal, record["promotion_authorization"],
+            pilot_binding=_pilot_binding(record["pilot_cases"]),
+            pilot_snapshot_sha256=record["pilot_snapshot_sha256"],
+            evaluation_result_sha256=record["evaluation_result_sha256"],
+            now=now, not_before=record["evaluation"]["evaluated_at"],
+        )
+
+    handled = {
+        (item["kind"], item["ref"], item["sha256"])
+        for item in (
+            [record["evaluation_evidence"]] if record["evaluation_evidence"] else []
+        )
+    }
+    for authorization in (record["pilot_authorization"], record["promotion_authorization"]):
+        if authorization is not None:
+            handled.update(
+                (authorization[key]["kind"], authorization[key]["ref"], authorization[key]["sha256"])
+                for key in ("manager_approval", "independent_qa", "shadow")
+            )
+    for case in record["pilot_cases"]:
+        for arm_name in ("control", "candidate"):
+            item = case[arm_name]["lineage"]
+            handled.add((item["kind"], item["ref"], item["sha256"]))
+    for entry in record["history"]:
+        for evidence in entry["evidence_refs"]:
+            identity = (evidence["kind"], evidence["ref"], evidence["sha256"])
+            if identity not in handled:
+                _private_ref(
+                    project, evidence, proposal=proposal,
+                    expected_kind=evidence["kind"], not_after=now,
+                )
+                handled.add(identity)
 
 
 def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: int,
@@ -1504,6 +1702,7 @@ def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: 
             _verify_source_refs(project, record["proposal"])
             _verify_authorization(
                 project, record["proposal"], auth, pilot_binding=None, now=now,
+                pilot_snapshot_sha256=None, evaluation_result_sha256=None,
                 not_before=record["proposal"]["created_at"],
             )
             updated["pilot_authorization"] = dict(auth)
@@ -1514,7 +1713,9 @@ def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: 
             _revalidate_cumulative_evidence(project, record, now=now, include_promotion=False)
             _verify_authorization(
                 project, record["proposal"], auth,
-                pilot_binding=_pilot_binding(record["pilot_cases"]), now=now,
+                pilot_binding=_pilot_binding(record["pilot_cases"]),
+                pilot_snapshot_sha256=record["pilot_snapshot_sha256"],
+                evaluation_result_sha256=record["evaluation_result_sha256"], now=now,
                 not_before=record["evaluation"]["evaluated_at"],
             )
             updated["promotion_authorization"] = dict(auth)
@@ -1528,6 +1729,7 @@ def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: 
         _verify_authorization(
             project, record["proposal"], record["pilot_authorization"],
             pilot_binding=None, now=now, not_before=record["proposal"]["created_at"],
+            pilot_snapshot_sha256=None, evaluation_result_sha256=None,
         )
         _verify_pilot_lineage(project, record["proposal"], record["pilot_cases"], now=now)
         _verify_pilot_lineage(project, record["proposal"], [case], now=now)
@@ -1555,6 +1757,7 @@ def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: 
         _verify_authorization(
             project, record["proposal"], record["pilot_authorization"],
             pilot_binding=None, now=now, not_before=record["proposal"]["created_at"],
+            pilot_snapshot_sha256=None, evaluation_result_sha256=None,
         )
         _verify_pilot_lineage(project, record["proposal"], record["pilot_cases"], now=now)
         confounders = payload.get("confounders")
@@ -1573,6 +1776,10 @@ def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: 
         )
         updated["evaluation"] = evaluation
         updated["evaluation_evidence"] = dict(evidence)
+        updated["pilot_snapshot_sha256"] = _pilot_snapshot_sha256(
+            record["pilot_cases"], evaluation["confounders"]
+        )
+        updated["evaluation_result_sha256"] = _evaluation_result_sha256(evaluation)
         refs = [evidence]
         new_state, history_action = "evaluated", "evaluated"
     elif action == "observe":
@@ -1752,7 +1959,9 @@ def preview_transition(project_root: Path, repository_root: Path, proposal_id: s
             raise EvolutionError("promotion authorization differs from the recorded exact evidence")
         _verify_authorization(
             project, proposal, chosen_authorization,
-            pilot_binding=_pilot_binding(record["pilot_cases"]), now=now,
+            pilot_binding=_pilot_binding(record["pilot_cases"]),
+            pilot_snapshot_sha256=record["pilot_snapshot_sha256"],
+            evaluation_result_sha256=record["evaluation_result_sha256"], now=now,
             not_before=record["evaluation"]["evaluated_at"],
         )
         refs = [
@@ -2243,9 +2452,13 @@ def migration_preview(repository_root: Path, *, kind: str, target_path: str,
         "rollback_target": {"version": "unversioned-v0.1", "source_path": target, "source_commit": head, "content_sha256": _sha(current_raw)},
         "scope": {"kind": scope, "project_id": project_id if scope == "project" else None},
         "owner": owner,
-        "pilot": {"min_cases": 1, "max_cases": 5, "observation_cases": 1},
+        "pilot": {
+            "min_cases": 1, "max_cases": 5, "observation_cases": 1,
+            "allowed_project_ids": [project_id],
+        },
         "created_at": created_at,
     }
+    proposal["proposal_core_sha256"] = _proposal_core_sha256(proposal)
     validate_proposal(proposal)
     _candidate_is_narrow(root, head, candidate_commit, target)
     core = {"operation": "migration_preview", "writes": False, "proposal": proposal}
@@ -2268,10 +2481,13 @@ def render_report(record: Mapping[str, Any]) -> str:
         f"# Capability evolution {record['proposal']['proposal_id']}", "",
         f"- State: `{record['state']}`",
         f"- Capability: `{record['proposal']['capability']['kind']}` / `{record['proposal']['capability']['target_path']}`",
+        f"- Proposal governance digest: `{record['proposal_core_sha256']}`",
         f"- Active version: `{record['active_version']['version']}` @ `{record['active_version']['source_commit']}`",
         f"- Pilot cases: `{len(record['pilot_cases'])}` / `{record['proposal']['pilot']['max_cases']}`",
         f"- Measured paired cases: `{evaluation['measured_case_count']}`; unavailable arms: `{'not measured (' + ', '.join(unavailable) + ')' if unavailable else 'none'}`",
         f"- Evaluation: `{evaluation['status']}` / `{evaluation['conclusion']}`",
+        f"- Pilot snapshot digest: `{record['pilot_snapshot_sha256'] or 'not evaluated'}`",
+        f"- Evaluation result digest: `{record['evaluation_result_sha256'] or 'not evaluated'}`",
         f"- Blocking reasons: `{', '.join(evaluation['blocking_reasons']) or 'none'}`",
         f"- Known confounders: `{', '.join(evaluation['confounders']) or 'not recorded'}`",
         f"- Claim boundary: `{REPORT_CLAIM}`; this record does not prove causality or generalization.",

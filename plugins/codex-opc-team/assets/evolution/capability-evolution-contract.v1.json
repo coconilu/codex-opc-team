@@ -3,6 +3,7 @@
   "proposal_schema_version": "opc-capability-change-proposal-v1",
   "record_schema_version": "opc-capability-evolution-record-v1",
   "evidence_schema_version": "opc-capability-evolution-evidence-v1",
+  "pilot_snapshot_version": "opc-capability-pilot-snapshot-v1",
   "authority": "file-git-only",
   "storage": {
     "project_relative": ".opc/evolution/{proposal_id}.json",
@@ -10,6 +11,7 @@
     "git_ignored_boundary": ".opc/evolution/",
     "preview_writes": false,
     "filesystem_subject_binding": "process-local-project-opc-evolution-directory-objects",
+    "evidence_read_binding": "bound-parent-no-follow-single-link-fd-before-after",
     "filesystem_identity_serialized": false,
     "remote_telemetry": false
   },
@@ -36,7 +38,13 @@
   "history_invariants": ["revision_contiguous", "timestamp_non_decreasing", "timestamp_bounded_by_record", "action_state_exact", "evidence_kind_exact", "single_use_actions_unique"],
   "evidence_envelope": {
     "strict": true,
-    "bindings": ["proposal_id", "capability_kind", "target_path", "current_version", "candidate_version", "run", "pilot", "lineage"],
+    "bindings": ["proposal_id", "proposal_core_sha256", "capability_kind", "target_path", "current_version", "candidate_version", "run", "pilot", "lineage", "pilot_snapshot_sha256", "evaluation_result_sha256"],
+    "proposal_core": {
+      "excludes": ["sources", "evidence_refs", "proposal_core_sha256"],
+      "includes": ["schema_version", "contract_version", "proposal_id", "project_id", "scope", "owner", "pilot", "capability", "current_version", "candidate_version", "rollback_target", "created_at"]
+    },
+    "pilot_snapshot": "ordered-full-cases-and-arms-plus-sorted-confounders",
+    "evaluation_result": "deterministically-recomputed-from-pilot-snapshot",
     "semantic_gates": {"manager_approval": "approved", "independent_qa": "pass", "shadow": "beneficial_and_safe", "evaluation": "matches_computed_conclusion"},
     "cumulative_revalidation_stages": ["evaluate", "promotion", "confirm"]
   },
@@ -75,6 +83,8 @@
     "strict_linear_commit_range": true,
     "merge_commits_allowed": false,
     "every_commit_changes_only_target": true,
+    "every_intermediate_target_blob_privacy_scanned": true,
+    "intermediate_blob_checkout": false,
     "confirm_requires_strict_descendant_commit": true,
     "stage_or_commit": false,
     "automatic_global_config_write": false

@@ -942,6 +942,7 @@ def validate_capability_evolution_contract() -> None:
         and contract.get("proposal_schema_version") == "opc-capability-change-proposal-v1"
         and contract.get("record_schema_version") == "opc-capability-evolution-record-v1"
         and contract.get("evidence_schema_version") == runtime.EVIDENCE_VERSION
+        and contract.get("pilot_snapshot_version") == runtime.PILOT_SNAPSHOT_VERSION
         and contract.get("authority") == "file-git-only"
         and contract.get("causal_claim_allowed") is False
         and contract.get("report_claim") == "association/evidence only",
@@ -958,6 +959,8 @@ def validate_capability_evolution_contract() -> None:
         and storage.get("preview_writes") is False
         and storage.get("filesystem_subject_binding")
         == "process-local-project-opc-evolution-directory-objects"
+        and storage.get("evidence_read_binding")
+        == "bound-parent-no-follow-single-link-fd-before-after"
         and storage.get("filesystem_identity_serialized") is False
         and storage.get("remote_telemetry") is False,
         "capability-evolution private storage boundary is incomplete",
@@ -984,7 +987,24 @@ def validate_capability_evolution_contract() -> None:
         == {"revision_contiguous", "timestamp_non_decreasing", "timestamp_bounded_by_record", "action_state_exact", "evidence_kind_exact", "single_use_actions_unique"}
         and evidence_contract.get("strict") is True
         and set(evidence_contract.get("bindings", []))
-        == {"proposal_id", "capability_kind", "target_path", "current_version", "candidate_version", "run", "pilot", "lineage"}
+        == {
+            "proposal_id", "proposal_core_sha256", "capability_kind", "target_path",
+            "current_version", "candidate_version", "run", "pilot", "lineage",
+            "pilot_snapshot_sha256", "evaluation_result_sha256",
+        }
+        and evidence_contract.get("proposal_core")
+        == {
+            "excludes": ["sources", "evidence_refs", "proposal_core_sha256"],
+            "includes": [
+                "schema_version", "contract_version", "proposal_id", "project_id",
+                "scope", "owner", "pilot", "capability", "current_version",
+                "candidate_version", "rollback_target", "created_at",
+            ],
+        }
+        and evidence_contract.get("pilot_snapshot")
+        == "ordered-full-cases-and-arms-plus-sorted-confounders"
+        and evidence_contract.get("evaluation_result")
+        == "deterministically-recomputed-from-pilot-snapshot"
         and evidence_contract.get("semantic_gates")
         == {"manager_approval": "approved", "independent_qa": "pass", "shadow": "beneficial_and_safe", "evaluation": "matches_computed_conclusion"}
         and evidence_contract.get("cumulative_revalidation_stages") == ["evaluate", "promotion", "confirm"],
@@ -1014,6 +1034,7 @@ def validate_capability_evolution_contract() -> None:
                 "clean_worktree_required", "single_allowlisted_path",
                 "candidate_is_exact_git_blob", "candidate_commit_diff_is_single_target",
                 "strict_linear_commit_range", "every_commit_changes_only_target",
+                "every_intermediate_target_blob_privacy_scanned",
                 "confirm_requires_strict_descendant_commit",
             )
         )
@@ -1025,6 +1046,7 @@ def validate_capability_evolution_contract() -> None:
             for key in (
                 "automatic_self_modification", "model_self_evaluation_can_promote",
                 "stage_or_commit", "automatic_global_config_write",
+                "intermediate_blob_checkout",
             )
         ),
         "capability-evolution approval or Git boundary is incomplete",
@@ -1122,6 +1144,8 @@ def validate_capability_evolution_contract() -> None:
         == runtime.MAX_VERSION
         and proposal_defs.get("pilot", {}).get("properties", {}).get("max_cases", {}).get("maximum")
         == runtime.MAX_CASES
+        and proposal_defs.get("pilot", {}).get("properties", {}).get("allowed_project_ids", {}).get("maxItems")
+        == runtime.MAX_REFS
         and record_schema.get("properties", {}).get("pilot_cases", {}).get("maxItems")
         == runtime.MAX_CASES
         and record_schema.get("properties", {}).get("history", {}).get("maxItems")
@@ -1156,6 +1180,8 @@ def validate_capability_evolution_contract() -> None:
         and set(record_defs.get("evaluation", {}).get("required", []))
         == {"status", "conclusion", "case_count", "measured_case_count", "comparisons", "blocking_reasons", "confounders", "claim", "evaluated_at"}
         and "evaluation_evidence" in set(record_schema.get("required", []))
+        and {"proposal_core_sha256", "pilot_snapshot_sha256", "evaluation_result_sha256"}
+        <= set(record_schema.get("required", []))
         and "source_commit" in set(record_defs.get("transition", {}).get("required", [])),
         "capability-evolution schema/runtime states, refs, or metrics drifted",
     )
@@ -1166,7 +1192,11 @@ def validate_capability_evolution_contract() -> None:
         and "staged=false" in guide
         and "confirm-preview" in guide
         and "migration-preview" in guide
-        and "opc_evolution.py" in guide,
+        and "opc_evolution.py" in guide
+        and "proposal_core_sha256" in guide
+        and "pilot_snapshot_sha256" in guide
+        and "Git object storage" in guide
+        and "without following links" in guide,
         "capability-evolution guide omits claim, Git, compatibility, or CLI boundaries",
     )
     ignore = (

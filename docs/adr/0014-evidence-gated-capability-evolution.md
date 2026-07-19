@@ -35,7 +35,11 @@ Promotion/rollback 只把一个已验证 Git blob 原子写成 **unstaged** work
 
 Evidence is not an untyped file-existence check. Every private reference uses a strict evidence envelope that binds proposal and capability versions, optional exact run, the complete pilot/lineage set, a typed decision, safety verdict, and bounded time. Evaluation, promotion, and confirmation cumulatively revalidate source, pilot authorization, lineage, evaluation, independent-QA, and Shadow evidence. Manager denial, QA failure, harmful/unsafe/inconclusive Shadow evidence, stale bindings, or missing/replaced evidence fails closed.
 
+The immutable governance identity is `proposal_core_sha256`, computed from every proposal field except circular evidence references. The ordered full pilot cases plus confounders form `pilot_snapshot_sha256`; the evaluation is deterministically recomputed from that snapshot and separately digested. Evaluation and promotion evidence bind all three digests. Record reads and report/promotion/confirmation consumers recompute them, so scope, owner, allowed-project, pilot-limit, rollback, case, measurement, status, lineage, order, or confounder changes cannot reuse an older approval.
+
 Only regular Git blobs with mode `100644` or `100755` are eligible. Governed candidate and confirmation ranges are strict, linear descendants; merge commits and every per-commit add/delete/rename/copy/type change, non-target path, empty commit, or reset to pre-existing source history are rejected. Rollback therefore creates and confirms a new rollback commit rather than moving HEAD to an ancestor. Non-completed pilot arms contain no measurements and are excluded from aggregation.
+
+Every intermediate target blob is privacy-scanned directly from Git object storage without checkout. Private evidence is read through a bound parent and one no-follow descriptor with single-link and before/after identity checks; hardlinks, symlinks, Windows reparse points, same-size replacement, and parent rename races fail closed.
 
 ## Consequences
 

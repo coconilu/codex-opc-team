@@ -18,6 +18,7 @@ SCRIPTS = ROOT / "plugins" / "codex-opc-team" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import opc_evolution  # noqa: E402
+import opc_feedback  # noqa: E402
 
 
 STAMP = "2026-07-19T01:00:00Z"
@@ -76,6 +77,9 @@ class CapabilityEvolutionTests(unittest.TestCase):
             "source_commit": self.candidate, "content_sha256": self.candidate_hash,
         }
         self.capability = {"kind": "skill", "target_path": "skills/demo/SKILL.md"}
+        # Proposal governance is digestible before evidence refs exist because
+        # the canonical core deliberately excludes those circular references.
+        self.proposal = self._proposal(placeholder_sources=True)
         self._write_evidence("candidate/source.json", "candidate", "proposed", "not_applicable")
         self._write_evidence("evaluation/source.json", "evaluation", "beneficial", "safe")
         self._write_evidence("lineage/source.json", "lineage", "verified", "not_applicable")
@@ -90,11 +94,16 @@ class CapabilityEvolutionTests(unittest.TestCase):
     def _write_evidence(self, relative: str, kind: str, decision: str, safety: str,
                         *, run_binding: dict | None = None,
                         pilot_binding: dict | None = None,
+                        pilot_snapshot_sha256: str | None = None,
+                        evaluation_result_sha256: str | None = None,
                         recorded_at: str = STAMP) -> dict:
         value = {
             "schema_version": opc_evolution.EVIDENCE_VERSION,
             "evidence_kind": kind,
             "proposal_id": "cap-demo-v1",
+            "proposal_core_sha256": self.proposal["proposal_core_sha256"],
+            "pilot_snapshot_sha256": pilot_snapshot_sha256,
+            "evaluation_result_sha256": evaluation_result_sha256,
             "capability": {
                 "kind": self.capability["kind"],
                 "target_path": self.capability["target_path"],
@@ -160,17 +169,22 @@ class CapabilityEvolutionTests(unittest.TestCase):
             text=True, capture_output=True,
         ).stdout.strip()
 
-    def _proposal(self) -> dict:
-        return {
+    def _proposal(self, *, placeholder_sources: bool = False) -> dict:
+        def source(relative: str) -> dict:
+            if placeholder_sources:
+                return {"ref": f".opc/{relative}", "sha256": "0" * 64}
+            return self._artifact_ref(relative)
+
+        proposal = {
             "schema_version": opc_evolution.PROPOSAL_VERSION,
             "contract_version": opc_evolution.CONTRACT_VERSION,
             "proposal_id": "cap-demo-v1",
             "project_id": "project-alpha",
             "sources": {
-                "candidate_refs": [self._artifact_ref("candidate/source.json")],
+                "candidate_refs": [source("candidate/source.json")],
                 "feedback_refs": [],
-                "evaluation_refs": [self._artifact_ref("evaluation/source.json")],
-                "lineage_refs": [self._artifact_ref("lineage/source.json")],
+                "evaluation_refs": [source("evaluation/source.json")],
+                "lineage_refs": [source("lineage/source.json")],
             },
             "capability": copy.deepcopy(self.capability),
             "current_version": copy.deepcopy(self.current_version),
@@ -178,9 +192,14 @@ class CapabilityEvolutionTests(unittest.TestCase):
             "rollback_target": copy.deepcopy(self.current_version),
             "scope": {"kind": "project", "project_id": "project-alpha"},
             "owner": "manager",
-            "pilot": {"min_cases": 1, "max_cases": 5, "observation_cases": 1},
+            "pilot": {
+                "min_cases": 1, "max_cases": 5, "observation_cases": 1,
+                "allowed_project_ids": ["project-alpha"],
+            },
             "created_at": STAMP,
         }
+        proposal["proposal_core_sha256"] = opc_evolution._proposal_core_sha256(proposal)
+        return proposal
 
     def _artifact_ref(self, relative: str) -> dict:
         path = self.project / ".opc" / relative
@@ -195,17 +214,31 @@ class CapabilityEvolutionTests(unittest.TestCase):
                 record = None
             if record and record["pilot_cases"]:
                 pilot_binding = opc_evolution._pilot_binding(record["pilot_cases"])
+                pilot_snapshot_sha256 = record["pilot_snapshot_sha256"]
+                evaluation_result_sha256 = record["evaluation_result_sha256"]
+            else:
+                pilot_snapshot_sha256 = None
+                evaluation_result_sha256 = None
+        else:
+            pilot_snapshot_sha256 = None
+            evaluation_result_sha256 = None
         manager = self._write_evidence(
             f"approvals/{prefix}-manager.json", "manager_approval", "approved",
             "not_applicable", pilot_binding=pilot_binding,
+            pilot_snapshot_sha256=pilot_snapshot_sha256,
+            evaluation_result_sha256=evaluation_result_sha256,
         )
         qa = self._write_evidence(
             f"qa/{prefix}.json", "independent_qa", "pass", "safe",
             pilot_binding=pilot_binding,
+            pilot_snapshot_sha256=pilot_snapshot_sha256,
+            evaluation_result_sha256=evaluation_result_sha256,
         )
         shadow = self._write_evidence(
             f"shadow/{prefix}.json", "shadow", "beneficial", "safe",
             pilot_binding=pilot_binding,
+            pilot_snapshot_sha256=pilot_snapshot_sha256,
+            evaluation_result_sha256=evaluation_result_sha256,
         )
         return {
             "manager_approval": {"kind": "manager_approval", **manager},
@@ -310,6 +343,10 @@ class CapabilityEvolutionTests(unittest.TestCase):
             "evaluation", evaluation["conclusion"],
             "safe" if evaluation["conclusion"] == "beneficial" else "inconclusive",
             pilot_binding=opc_evolution._pilot_binding(record["pilot_cases"]),
+            pilot_snapshot_sha256=opc_evolution._pilot_snapshot_sha256(
+                record["pilot_cases"], evaluation["confounders"]
+            ),
+            evaluation_result_sha256=opc_evolution._evaluation_result_sha256(evaluation),
         )
         return {
             "confounders": confounders,
@@ -1101,6 +1138,281 @@ class CapabilityEvolutionTests(unittest.TestCase):
         corrupted["active_version"]["content_sha256"] = "bad"
         with self.assertRaises(opc_evolution.EvolutionError):
             opc_evolution.render_report(corrupted)
+
+    def test_proposal_core_blocks_governance_replay_and_same_id_reuse(self) -> None:
+        record = self._open()
+        record_path = self.project / ".opc" / "evolution" / "cap-demo-v1.json"
+        original = record_path.read_bytes()
+
+        def rewrite(attack: dict) -> None:
+            attack["proposal"]["proposal_core_sha256"] = opc_evolution._proposal_core_sha256(
+                attack["proposal"]
+            )
+            attack["proposal_core_sha256"] = attack["proposal"]["proposal_core_sha256"]
+            attack["proposal_sha256"] = hashlib.sha256(
+                opc_evolution._json_bytes(
+                    attack["proposal"], maximum=opc_evolution.MAX_PROPOSAL_BYTES
+                )
+            ).hexdigest()
+            record_path.write_text(json.dumps(attack), encoding="utf-8")
+
+        attacks = []
+        organization = copy.deepcopy(record)
+        organization["proposal"]["scope"] = {"kind": "organization", "project_id": None}
+        attacks.append(organization)
+        expanded = copy.deepcopy(record)
+        expanded["proposal"]["pilot"]["max_cases"] = 20
+        attacks.append(expanded)
+        cross_project = copy.deepcopy(record)
+        cross_project["proposal"]["pilot"]["allowed_project_ids"].append("project-beta")
+        attacks.append(cross_project)
+        changed_owner = copy.deepcopy(record)
+        changed_owner["proposal"]["owner"] = "replacement-manager"
+        attacks.append(changed_owner)
+        changed_rollback = copy.deepcopy(record)
+        changed_rollback["proposal"]["rollback_target"]["version"] = "forged-rollback"
+        attacks.append(changed_rollback)
+
+        try:
+            for index, attack in enumerate(attacks):
+                with self.subTest(index=index):
+                    rewrite(attack)
+                    with self.assertRaises(opc_evolution.EvolutionError):
+                        opc_evolution._read_record(self.project, "cap-demo-v1")
+                    record_path.write_bytes(original)
+
+            reused = copy.deepcopy(self.proposal)
+            reused["owner"] = "replacement-manager"
+            reused["proposal_core_sha256"] = opc_evolution._proposal_core_sha256(reused)
+            with self.assertRaises(opc_evolution.EvolutionError):
+                opc_evolution.preview_open(self.project, self.repo, reused)
+        finally:
+            record_path.write_bytes(original)
+
+    def test_pilot_snapshot_and_evaluation_digest_block_old_evidence_replay(self) -> None:
+        self._open()
+        self._apply_action(1, "authorize_pilot", {"authorization": self._authorization("pilot")})
+        self._apply_action(2, "record_pilot_case", {"case": self._case("case-one")})
+        self._apply_action(3, "record_pilot_case", {"case": self._case("case-two")})
+        evaluated = self._apply_action(
+            4, "evaluate", self._evaluation_payload(["task-difficulty", "tool-variation"])
+        )
+        record_path = self.project / ".opc" / "evolution" / "cap-demo-v1.json"
+        original = record_path.read_bytes()
+
+        attacks: list[dict] = []
+        measurement = copy.deepcopy(evaluated)
+        measurement["pilot_cases"][0]["candidate"]["measurements"]["latency_ms"] += 10
+        attacks.append(measurement)
+        confounder = copy.deepcopy(evaluated)
+        confounder["evaluation"]["confounders"] = ["new-confounder"]
+        attacks.append(confounder)
+        unavailable = copy.deepcopy(evaluated)
+        unavailable["pilot_cases"][0]["candidate"]["execution_status"] = "timeout"
+        unavailable["pilot_cases"][0]["candidate"]["measurements"] = None
+        unavailable["pilot_cases"][0]["candidate"]["unavailable_reason"] = "timeout"
+        attacks.append(unavailable)
+        lineage = copy.deepcopy(evaluated)
+        lineage["pilot_cases"][0]["candidate"]["lineage"]["sha256"] = "b" * 64
+        attacks.append(lineage)
+        reordered = copy.deepcopy(evaluated)
+        reordered["pilot_cases"].reverse()
+        attacks.append(reordered)
+        removed = copy.deepcopy(evaluated)
+        removed["pilot_cases"].pop()
+        attacks.append(removed)
+
+        try:
+            for index, attack in enumerate(attacks):
+                with self.subTest(index=index):
+                    # Model an attacker who updates every derived field but replays
+                    # the previously beneficial evaluation evidence envelope.
+                    evaluation = opc_evolution.evaluate_cases(
+                        attack["pilot_cases"], attack["proposal"],
+                        attack["evaluation"]["confounders"],
+                        now=attack["evaluation"]["evaluated_at"],
+                    )
+                    attack["evaluation"] = evaluation
+                    attack["pilot_snapshot_sha256"] = opc_evolution._pilot_snapshot_sha256(
+                        attack["pilot_cases"], evaluation["confounders"]
+                    )
+                    attack["evaluation_result_sha256"] = (
+                        opc_evolution._evaluation_result_sha256(evaluation)
+                    )
+                    record_path.write_text(json.dumps(attack), encoding="utf-8")
+                    with self.assertRaises(opc_evolution.EvolutionError):
+                        opc_evolution._read_record(self.project, "cap-demo-v1")
+                    record_path.write_bytes(original)
+        finally:
+            record_path.write_bytes(original)
+
+    def test_every_intermediate_target_blob_passes_privacy_and_text_gates(self) -> None:
+        payloads = {
+            "home": (
+                "---\nname: demo\n---\n" + "C:" + "/" + "Users/example/private\n"
+            ).encode(),
+            "credential": (
+                "---\nname: demo\n---\n" + "api_" + "key = '" + "s" +
+                "k-secret-value-1234567890'\n"
+            ).encode(),
+            "private": b"---\nname: demo\n---\nraw conversation payload\n",
+            "binary": b"---\nname: demo\n---\n\xff\xfe\n",
+            "oversize": b"a" * (opc_evolution.MAX_CAPABILITY_BYTES + 1),
+        }
+        clean = b"---\nname: demo\n---\n\nFinal clean behavior.\n"
+        for index, (label, intermediate) in enumerate(payloads.items()):
+            with self.subTest(label=label):
+                subprocess.run(
+                    ["git", "-C", str(self.repo), "switch", "-C", f"privacy-{index}", self.base],
+                    check=True, capture_output=True,
+                )
+                self.target.write_bytes(intermediate)
+                hidden = self._commit(f"hidden {label}")
+                self.assertNotEqual(hidden, self.base)
+                self.target.write_bytes(clean)
+                final = self._commit(f"clean {label}")
+                with self.assertRaises(opc_evolution.EvolutionError):
+                    opc_evolution._strict_linear_target_range(
+                        self.repo, self.base, final, "skills/demo/SKILL.md", label="candidate"
+                    )
+
+        subprocess.run(
+            ["git", "-C", str(self.repo), "switch", "-C", "privacy-clean", self.base],
+            check=True, capture_output=True,
+        )
+        self.target.write_text("---\nname: demo\n---\n\nIntermediate clean.\n", encoding="utf-8")
+        self._commit("clean intermediate")
+        self.target.write_bytes(clean)
+        final = self._commit("clean final")
+        commits = opc_evolution._strict_linear_target_range(
+            self.repo, self.base, final, "skills/demo/SKILL.md", label="candidate"
+        )
+        self.assertEqual(len(commits), 2)
+
+    def test_private_evidence_bound_read_rejects_link_and_replacement_races(self) -> None:
+        source = self.project / ".opc" / "candidate" / "source.json"
+        reference = self.proposal["sources"]["candidate_refs"][0]
+        evidence = {"kind": "candidate", **reference}
+
+        hardlink = source.with_name("hardlink.json")
+        os.link(source, hardlink)
+        try:
+            with self.assertRaises(opc_evolution.EvolutionError):
+                opc_evolution._private_ref(
+                    self.project, evidence, proposal=self.proposal,
+                    expected_kind="candidate", allowed_decisions={"proposed"},
+                    allowed_safety={"not_applicable"},
+                )
+        finally:
+            hardlink.unlink()
+
+        original = source.read_bytes()
+        replacement = source.with_name("replacement.json")
+        replacement.write_bytes(original)
+        original_read = opc_feedback.os.read
+        replaced = False
+
+        def swap_after_fd_read(descriptor: int, maximum: int) -> bytes:
+            nonlocal replaced
+            raw = original_read(descriptor, maximum)
+            if not replaced:
+                replaced = True
+                os.replace(replacement, source)
+            return raw
+
+        try:
+            with patch.object(opc_feedback.os, "read", side_effect=swap_after_fd_read):
+                with self.assertRaises(opc_evolution.EvolutionError):
+                    opc_evolution._private_ref(
+                        self.project, evidence, proposal=self.proposal,
+                        expected_kind="candidate", allowed_decisions={"proposed"},
+                        allowed_safety={"not_applicable"},
+                    )
+        finally:
+            source.write_bytes(original)
+            replacement.unlink(missing_ok=True)
+
+        link_target = source.with_name("link-target.json")
+        link_target.write_bytes(original)
+        source.unlink()
+        try:
+            try:
+                source.symlink_to(link_target.name)
+            except OSError:
+                self.skipTest("symlink creation is unavailable")
+            with self.assertRaises(opc_evolution.EvolutionError):
+                opc_evolution._private_ref(
+                    self.project, evidence, proposal=self.proposal,
+                    expected_kind="candidate", allowed_decisions={"proposed"},
+                    allowed_safety={"not_applicable"},
+                )
+        finally:
+            source.unlink(missing_ok=True)
+            source.write_bytes(original)
+            link_target.unlink(missing_ok=True)
+
+        alias = self._windows_short_alias_or_same(self.project)
+        envelope = opc_evolution._private_ref(
+            alias, evidence, proposal=self.proposal, expected_kind="candidate",
+            allowed_decisions={"proposed"}, allowed_safety={"not_applicable"},
+        )
+        self.assertEqual(envelope["proposal_core_sha256"], self.proposal["proposal_core_sha256"])
+
+        parent = source.parent
+        moved_parent = parent.with_name("candidate-moved")
+        renamed = False
+
+        def rename_parent_after_read(descriptor: int, maximum: int) -> bytes:
+            nonlocal renamed
+            raw = original_read(descriptor, maximum)
+            if not renamed:
+                os.replace(parent, moved_parent)
+                parent.mkdir()
+                renamed = True
+            return raw
+
+        try:
+            with patch.object(opc_feedback.os, "read", side_effect=rename_parent_after_read):
+                with self.assertRaises(opc_evolution.EvolutionError):
+                    opc_evolution._private_ref(
+                        self.project, evidence, proposal=self.proposal,
+                        expected_kind="candidate", allowed_decisions={"proposed"},
+                        allowed_safety={"not_applicable"},
+                    )
+        finally:
+            if renamed:
+                parent.rmdir()
+                os.replace(moved_parent, parent)
+
+        with patch.object(opc_feedback.os, "read", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                opc_evolution._private_ref(
+                    self.project, evidence, proposal=self.proposal,
+                    expected_kind="candidate", allowed_decisions={"proposed"},
+                    allowed_safety={"not_applicable"},
+                )
+        # A Windows directory handle left open by BaseException would block this.
+        os.replace(parent, moved_parent)
+        os.replace(moved_parent, parent)
+
+        if os.name == "nt":
+            junction = parent.with_name("candidate-junction")
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(junction), str(parent)],
+                check=False, capture_output=True,
+            )
+            if created.returncode == 0:
+                junction_evidence = copy.deepcopy(evidence)
+                junction_evidence["ref"] = ".opc/candidate-junction/source.json"
+                try:
+                    with self.assertRaises(opc_evolution.EvolutionError):
+                        opc_evolution._private_ref(
+                            self.project, junction_evidence, proposal=self.proposal,
+                            expected_kind="candidate", allowed_decisions={"proposed"},
+                            allowed_safety={"not_applicable"},
+                        )
+                finally:
+                    os.rmdir(junction)
 
     def test_git_project_requires_directory_ignore_and_rejects_tracked_content(self) -> None:
         subprocess.run(["git", "init", "-b", "main", str(self.project)], check=True, capture_output=True)
