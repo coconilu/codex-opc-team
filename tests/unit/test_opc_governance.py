@@ -534,7 +534,10 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         real_unlink = opc_feedback._BoundDirectory.unlink_owned
 
         def fail_only_source(bound, name, identity):
-            if name == source.name and bound.path == source.parent:
+            if (
+                name == source.name
+                and bound.path.resolve(strict=True) == source.parent.resolve(strict=True)
+            ):
                 return False
             return real_unlink(bound, name, identity)
 
@@ -556,6 +559,70 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         self.assertFalse(
             (self.knowledge / opc_memory.STATUS_DIRS["approved"] / source.name).exists()
         )
+
+    def test_curation_parent_replacement_is_blocked_or_detected_and_rolled_back(self) -> None:
+        import opc_feedback
+
+        candidate = self.record("exp-curation-parent-swap", status="candidate")
+        source = self.write(candidate)
+        original = source.read_bytes()
+        unrelated = self.knowledge / "company" / "unrelated.md"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("preserve\n", encoding="utf-8")
+        preview = self.backend.curation_plan(
+            candidate["id"],
+            manager_approval="manager-approval-parent-swap",
+            set_status="approved",
+            validation="synthetic replay passed",
+        )
+        destination = (
+            self.knowledge / opc_memory.STATUS_DIRS["approved"] / source.name
+        )
+        displaced = source.parent.with_name("candidates-displaced")
+        real_read = opc_feedback._BoundDirectory.read_bytes
+        outcome = {"blocked": False, "swapped": False}
+
+        def replace_parent_at_source_read(bound, name, **kwargs):
+            if (
+                name == source.name
+                and destination.exists()
+                and os.path.samefile(bound.path, source.parent)
+            ):
+                try:
+                    source.parent.rename(displaced)
+                    source.parent.mkdir()
+                    outcome["swapped"] = True
+                except OSError as exc:
+                    outcome["blocked"] = True
+                    raise opc_feedback.FeedbackError(
+                        "source parent mutation was blocked"
+                    ) from exc
+            return real_read(bound, name, **kwargs)
+
+        try:
+            with mock.patch.object(
+                opc_feedback._BoundDirectory,
+                "read_bytes",
+                autospec=True,
+                side_effect=replace_parent_at_source_read,
+            ):
+                with self.assertRaises(opc_memory.OpcMemoryError):
+                    self.backend.apply_curation(
+                        candidate["id"],
+                        plan_token=preview["plan_token"],
+                        manager_approval="manager-approval-parent-swap",
+                        set_status="approved",
+                        validation="synthetic replay passed",
+                    )
+        finally:
+            if outcome["swapped"]:
+                source.parent.rmdir()
+                displaced.rename(source.parent)
+
+        self.assertTrue(outcome["blocked"] or outcome["swapped"])
+        self.assertEqual(original, source.read_bytes())
+        self.assertFalse(destination.exists())
+        self.assertEqual("preserve\n", unrelated.read_text(encoding="utf-8"))
 
     def test_nonfinite_oversized_hardlink_and_linked_roots_fail_closed(self) -> None:
         invalid = self.record("exp-nonfinite", status="candidate")
@@ -630,7 +697,8 @@ class KnowledgeGovernanceTests(unittest.TestCase):
     def test_windows_short_normal_directory_alias_keeps_identity(self) -> None:
         import ctypes
 
-        self.knowledge.mkdir(exist_ok=True)
+        record = self.record("exp-windows-short-alias", status="candidate")
+        self.write(record)
         get_short = ctypes.windll.kernel32.GetShortPathNameW
         get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
         get_short.restype = ctypes.c_uint
@@ -644,6 +712,12 @@ class KnowledgeGovernanceTests(unittest.TestCase):
             self.skipTest("this volume did not produce a distinct 8.3 alias")
         alias_backend = opc_memory.FileGitBackend(Path(buffer.value))
         self.assertTrue(os.path.samefile(alias_backend.root, self.backend.root))
+        alias_record = (
+            Path(buffer.value)
+            / opc_memory.STATUS_DIRS["candidate"]
+            / f"{record['id']}.json"
+        )
+        self.assertEqual(record["id"], alias_backend._load_record(alias_record)["id"])
 
 
 if __name__ == "__main__":

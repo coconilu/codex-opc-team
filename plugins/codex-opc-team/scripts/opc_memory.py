@@ -601,10 +601,21 @@ class FileGitBackend:
         validate_private_root_against_plugin(self.root, label="knowledge_root")
 
     def _load_record(self, path: Path) -> dict[str, Any]:
-        try:
-            path.relative_to(self.root)
-        except ValueError as exc:
-            raise OpcMemoryError("knowledge record escaped the canonical root") from exc
+        # Compare parent directory objects, not path spellings.  This accepts a
+        # normal Windows 8.3 alias of an authorized status directory without
+        # allowing an arbitrary descendant or relying on case folding.  The
+        # actual read still uses the lexical path and rejects symlink/reparse
+        # ancestors before following anything.
+        authorized_parent = False
+        for status in MEMORY_STATUSES:
+            try:
+                if os.path.samefile(path.parent, self._folder(status)):
+                    authorized_parent = True
+                    break
+            except OSError:
+                continue
+        if not authorized_parent:
+            raise OpcMemoryError("knowledge record escaped the canonical root")
         return _read_bounded_record(path, label="canonical knowledge record")
 
     def ensure_layout(self) -> None:
