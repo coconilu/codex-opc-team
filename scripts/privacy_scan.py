@@ -62,9 +62,15 @@ def forbidden_filename(path: Path) -> bool:
 
 
 def iter_files(root: Path):
+    root = root.resolve()
     for current, dirs, files in os.walk(root):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         for name in sorted(files):
+            # A linked Git worktree stores a machine-local ``gitdir`` pointer
+            # in a root .git control file. It is Git metadata, not publishable
+            # repository content; history is scanned separately below.
+            if Path(current) == root and name == ".git":
+                continue
             yield Path(current) / name
 
 

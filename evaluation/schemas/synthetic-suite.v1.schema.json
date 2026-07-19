@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:evaluation:synthetic-suite:v1",
+  "title": "OPC public synthetic File/Git evaluation suite",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "dataset_id", "mode", "records", "provenance_probes", "cases"],
+  "properties": {
+    "schema_version": {"const": "opc-synthetic-suite-v1"},
+    "contract_version": {"const": "opc-evaluation-contract-v1"},
+    "dataset_id": {"type": "string", "pattern": "^dataset-syn-[a-z0-9-]+$"},
+    "mode": {"const": "public-synthetic"},
+    "records": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/recordWrapper"}},
+    "provenance_probes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/probe"}},
+    "cases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}}
+  },
+  "$defs": {
+    "recordWrapper": {
+      "type": "object",
+      "required": ["record", "post_commit"],
+      "properties": {
+        "record": {"$ref": "#/$defs/record"},
+        "post_commit": {"enum": ["none", "change_content"]}
+      },
+      "additionalProperties": false
+    },
+    "record": {
+      "type": "object",
+      "required": ["schema_version", "id", "type", "summary", "content", "keywords", "metadata", "scope", "owner", "evidence", "confidence", "status", "created_at", "updated_at"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "id": {"type": "string", "pattern": "^exp-syn-[a-z0-9-]+$"},
+        "type": {"enum": ["decision", "preference", "procedure", "lesson"]},
+        "summary": {"type": "string", "minLength": 1},
+        "content": {"type": "string", "minLength": 1},
+        "keywords": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "metadata": {
+          "type": "object",
+          "required": ["role", "conflict_group"],
+          "properties": {
+            "role": {"enum": ["all", "manager", "developer", "qa", "curator"]},
+            "conflict_group": {"type": ["string", "null"], "pattern": "^conflict-syn-[a-z0-9-]+$"}
+          },
+          "additionalProperties": false
+        },
+        "scope": {"enum": ["global", "project"]},
+        "owner": {"const": "evaluation-fixture"},
+        "evidence": {"type": "object"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "status": {"enum": ["candidate", "approved", "rejected", "obsolete"]},
+        "project_id": {"type": "string", "pattern": "^project-syn-[a-z0-9-]+$"},
+        "approved_by": {"type": "string"},
+        "approved_at": {"type": "string", "format": "date-time"},
+        "validation": {"type": "string"},
+        "rejected_by": {"type": "string"},
+        "rejected_at": {"type": "string", "format": "date-time"},
+        "rejection_reason": {"type": "string"},
+        "obsolete_at": {"type": "string", "format": "date-time"},
+        "obsolete_reason": {"type": "string"},
+        "superseded_by": {"type": "string"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "probe": {
+      "type": "object",
+      "required": ["probe_id", "record_id", "failure"],
+      "properties": {
+        "probe_id": {"type": "string", "pattern": "^probe-syn-[a-z0-9-]+$"},
+        "record_id": {"type": "string", "pattern": "^exp-syn-[a-z0-9-]+$"},
+        "failure": {"enum": ["stale_hash", "stale_commit"]}
+      },
+      "additionalProperties": false
+    },
+    "case": {
+      "type": "object",
+      "required": ["case_id", "query", "observed"],
+      "properties": {
+        "case_id": {"type": "string", "pattern": "^case-syn-[a-z0-9-]+$"},
+        "query": {"$ref": "#/$defs/query"},
+        "observed": {"$ref": "#/$defs/observed"}
+      },
+      "additionalProperties": false
+    },
+    "query": {
+      "type": "object",
+      "required": ["text", "project_id", "role", "knowledge_type"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "project_id": {"type": "string", "pattern": "^project-syn-[a-z0-9-]+$"},
+        "role": {"enum": ["manager", "developer", "qa", "curator"]},
+        "knowledge_type": {"enum": ["decision", "preference", "procedure", "lesson"]}
+      },
+      "additionalProperties": false
+    },
+    "observed": {
+      "type": "object",
+      "required": ["manager_interventions", "eligible_manager_decisions", "known_defects", "qa_caught_defects", "rework_loops", "context_tokens", "latency_ms"],
+      "properties": {
+        "manager_interventions": {"type": "integer", "minimum": 0},
+        "eligible_manager_decisions": {"type": "integer", "minimum": 0},
+        "known_defects": {"type": "integer", "minimum": 0},
+        "qa_caught_defects": {"type": "integer", "minimum": 0},
+        "rework_loops": {"type": "integer", "minimum": 0},
+        "context_tokens": {"type": "integer", "minimum": 1},
+        "latency_ms": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:evaluation:result:v1",
+  "title": "OPC evaluation result",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "contract_sha256", "baseline_id", "dataset_id", "mode", "source_sha256", "task_count", "quality_interpretation", "metrics", "safety_gates", "file_git_evidence", "overall_safety_status"],
+  "properties": {
+    "schema_version": {"const": "opc-evaluation-result-v1"},
+    "contract_version": {"const": "opc-evaluation-contract-v1"},
+    "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "baseline_id": {"const": "file-git-no-enhancement-v1"},
+    "dataset_id": {"type": "string", "pattern": "^(?:dataset-syn-[a-z0-9-]+|pilot-[0-9a-f]{12})$"},
+    "mode": {"enum": ["public-synthetic", "private-aggregate"]},
+    "source_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "task_count": {"type": "integer", "minimum": 1},
+    "quality_interpretation": {"const": "baseline_only"},
+    "metrics": {
+      "type": "object",
+      "required": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate", "context_tokens_per_task", "latency_ms"],
+      "properties": {
+        "manager_intervention_rate": {"$ref": "#/$defs/rate"},
+        "qa_catch_rate": {"$ref": "#/$defs/rate"},
+        "rework_loops_per_task": {"$ref": "#/$defs/rate"},
+        "valid_knowledge_reuse_rate": {"$ref": "#/$defs/rate"},
+        "false_recall_rate": {"$ref": "#/$defs/rate"},
+        "context_tokens_per_task": {"$ref": "#/$defs/context"},
+        "latency_ms": {"$ref": "#/$defs/latency"}
+      },
+      "additionalProperties": false
+    },
+    "safety_gates": {
+      "type": "object",
+      "required": ["scope_leakage_acceptances", "stale_obsolete_acceptances", "provenance_probes"],
+      "properties": {
+        "scope_leakage_acceptances": {"$ref": "#/$defs/countGate"},
+        "stale_obsolete_acceptances": {"$ref": "#/$defs/countGate"},
+        "provenance_probes": {
+          "type": "object",
+          "required": ["value", "required", "status"],
+          "properties": {
+            "value": {"type": "object", "additionalProperties": {"const": "rejected"}},
+            "required": {"enum": ["all_rejected", "not_applicable_private_aggregate"]},
+            "status": {"enum": ["pass", "fail", "not_applicable"]}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "file_git_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["case_id", "file_git_hit_ids"],
+        "properties": {
+          "case_id": {"type": "string", "pattern": "^case-syn-[a-z0-9-]+$"},
+          "file_git_hit_ids": {"type": "array", "items": {"type": "string", "pattern": "^exp-syn-[a-z0-9-]+$"}, "uniqueItems": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "overall_safety_status": {"enum": ["pass", "fail"]}
+  },
+  "$defs": {
+    "rate": {
+      "type": "object",
+      "required": ["numerator", "denominator", "value", "unit"],
+      "properties": {
+        "numerator": {"type": "integer", "minimum": 0},
+        "denominator": {"type": "integer", "minimum": 1},
+        "value": {"type": "number", "minimum": 0},
+        "unit": {"enum": ["ratio", "loops_per_task"]}
+      },
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "required": ["total", "denominator", "mean", "median", "p95_nearest_rank", "unit"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 1},
+        "denominator": {"type": "integer", "minimum": 1},
+        "mean": {"type": "number", "exclusiveMinimum": 0},
+        "median": {"type": "number", "exclusiveMinimum": 0},
+        "p95_nearest_rank": {"type": "number", "exclusiveMinimum": 0},
+        "unit": {"const": "tokens"}
+      },
+      "additionalProperties": false
+    },
+    "latency": {
+      "type": "object",
+      "required": ["count", "mean", "median", "p95_nearest_rank", "unit", "tolerance_percent"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 1},
+        "mean": {"type": "number", "exclusiveMinimum": 0},
+        "median": {"type": "number", "exclusiveMinimum": 0},
+        "p95_nearest_rank": {"type": "number", "exclusiveMinimum": 0},
+        "unit": {"const": "milliseconds"},
+        "tolerance_percent": {"const": 25}
+      },
+      "additionalProperties": false
+    },
+    "countGate": {
+      "type": "object",
+      "required": ["value", "threshold", "status"],
+      "properties": {
+        "value": {"type": "integer", "minimum": 0},
+        "threshold": {"const": 0},
+        "status": {"enum": ["pass", "fail"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

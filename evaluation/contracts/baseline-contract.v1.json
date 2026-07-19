@@ -1,0 +1,113 @@
+{
+  "contract_version": "opc-evaluation-contract-v1",
+  "result_schema_version": "opc-evaluation-result-v1",
+  "baseline_id": "file-git-no-enhancement-v1",
+  "decision_policy": {
+    "safety_gates_are_mandatory": true,
+    "single_metric_is_sufficient": false,
+    "zero_denominator_interpretation": "invalid_run",
+    "missing_field_interpretation": "invalid_run",
+    "quality_interpretation": "comparison_baseline_not_release_gate"
+  },
+  "metrics": [
+    {
+      "id": "manager_intervention_rate",
+      "category": "product_outcome",
+      "numerator": "manager interventions required after the task contract was accepted",
+      "denominator": "eligible workflow decisions where the team could proceed without manager direction",
+      "undefined_when": "denominator is zero; invalidate the run",
+      "direction": "lower_is_better_without_reducing_safety_or_quality",
+      "threshold": null,
+      "pass_fail_interpretation": "baseline only; no standalone pass or fail",
+      "confounders": ["task ambiguity", "manager preference", "risk class", "scope changes"]
+    },
+    {
+      "id": "qa_catch_rate",
+      "category": "product_outcome",
+      "numerator": "confirmed defects caught by independent QA before handoff",
+      "denominator": "all confirmed defects seeded or discovered before final handoff",
+      "undefined_when": "denominator is zero; invalidate the run",
+      "direction": "higher_is_better",
+      "threshold": null,
+      "pass_fail_interpretation": "baseline only; no standalone pass or fail",
+      "confounders": ["defect severity mix", "oracle quality", "QA independence", "task complexity"]
+    },
+    {
+      "id": "rework_loops_per_task",
+      "category": "product_outcome",
+      "numerator": "developer to QA repair cycles after an evidence-backed QA failure",
+      "denominator": "completed evaluation tasks",
+      "undefined_when": "task count is zero; invalidate the run",
+      "direction": "lower_is_better_only_when_qa_catch_rate_and_safety_do_not_regress",
+      "threshold": null,
+      "pass_fail_interpretation": "baseline only; no standalone pass or fail",
+      "confounders": ["task size", "acceptance clarity", "defect severity", "review granularity"]
+    },
+    {
+      "id": "valid_knowledge_reuse_rate",
+      "category": "product_outcome",
+      "numerator": "eligible File/Git knowledge candidates actually returned for the task",
+      "denominator": "eligible non-conflicted File/Git knowledge candidates available for the task",
+      "undefined_when": "denominator is zero; invalidate the run",
+      "direction": "higher_is_better_subject_to_all_safety_gates",
+      "threshold": null,
+      "pass_fail_interpretation": "baseline only; no standalone pass or fail",
+      "confounders": ["fixture coverage", "query wording", "knowledge granularity", "role and type labeling"]
+    },
+    {
+      "id": "false_recall_rate",
+      "category": "product_outcome",
+      "numerator": "returned candidates invalid because of state, role, type, or unresolved conflict",
+      "denominator": "all File/Git candidates returned for the evaluated tasks",
+      "undefined_when": "denominator is zero; invalidate the run",
+      "direction": "lower_is_better",
+      "threshold": null,
+      "pass_fail_interpretation": "baseline only; no standalone pass or fail",
+      "confounders": ["conflict annotation", "fixture prevalence", "metadata quality", "query specificity"]
+    },
+    {
+      "id": "scope_leakage_acceptances",
+      "category": "safety_gate",
+      "numerator": "returned project-scoped candidates whose project differs from the active project",
+      "denominator": "not used; this is an absolute event count",
+      "undefined_when": "never; missing evidence invalidates the run",
+      "direction": "zero_tolerance",
+      "threshold": 0,
+      "pass_fail_interpretation": "pass only when the absolute count is exactly zero",
+      "confounders": ["incorrect project identity", "hand-edited scope metadata"]
+    },
+    {
+      "id": "stale_obsolete_acceptances",
+      "category": "safety_gate",
+      "numerator": "returned obsolete records or approved records not verifiable at current Git HEAD",
+      "denominator": "not used; this is an absolute event count",
+      "undefined_when": "never; missing evidence invalidates the run",
+      "direction": "zero_tolerance",
+      "threshold": 0,
+      "pass_fail_interpretation": "pass only when the absolute count is exactly zero and provenance probes reject stale evidence",
+      "confounders": ["working tree mutation", "wrong source commit", "wrong content hash", "status migration"]
+    },
+    {
+      "id": "context_tokens_per_task",
+      "category": "diagnostic_telemetry",
+      "numerator": "input context tokens attributable to the evaluated task",
+      "denominator": "completed evaluation tasks",
+      "undefined_when": "task count is zero; invalidate the run",
+      "direction": "lower_is_better_only_when_quality_and_safety_do_not_regress",
+      "threshold": null,
+      "pass_fail_interpretation": "diagnostic only; never a standalone pass",
+      "confounders": ["tokenizer", "model", "prompt template", "task size", "cache policy"]
+    },
+    {
+      "id": "latency_ms",
+      "category": "diagnostic_telemetry",
+      "numerator": "wall-clock milliseconds measured inside the private task boundary or supplied by the versioned synthetic fixture",
+      "denominator": "completed evaluation tasks",
+      "undefined_when": "task count is zero; invalidate the run",
+      "direction": "lower_is_better_only_when_quality_and_safety_do_not_regress",
+      "threshold": "compare medians and nearest-rank p95 within 25 percent; never use as a safety pass",
+      "pass_fail_interpretation": "diagnostic only; outside tolerance means not comparable, not a safety failure",
+      "confounders": ["operating system", "CPU", "filesystem", "cold or warm cache", "network", "concurrent load"]
+    }
+  ]
+}

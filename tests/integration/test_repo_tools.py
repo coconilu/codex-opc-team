@@ -125,6 +125,14 @@ class PrivacyScanTests(unittest.TestCase):
             findings = privacy_scan.scan(root)
             self.assertTrue(any("OpenAI-style secret" in item for item in findings))
 
+    def test_linked_worktree_git_control_file_is_not_public_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            private_pointer = "gitdir: C:" + r"\Users\fixture\repo\.git\worktrees\trial"
+            (root / ".git").write_text(private_pointer, encoding="utf-8")
+            (root / "README.md").write_text("portable example", encoding="utf-8")
+            self.assertEqual([], privacy_scan.scan(root))
+
     @mock.patch.object(privacy_scan.subprocess, "run")
     def test_git_history_scan_fails_closed_when_git_is_unavailable(self, run):
         run.side_effect = FileNotFoundError("git")

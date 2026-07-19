@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:evaluation:private-pilot-summary:v1",
+  "title": "OPC private pilot aggregate summary",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "pilot_id", "mode", "task_count", "counts", "context_tokens", "latency_ms"],
+  "properties": {
+    "schema_version": {"const": "opc-private-pilot-summary-v1"},
+    "contract_version": {"const": "opc-evaluation-contract-v1"},
+    "pilot_id": {"type": "string", "pattern": "^pilot-[0-9a-f]{12}$"},
+    "mode": {"const": "private-aggregate"},
+    "task_count": {"type": "integer", "minimum": 3, "maximum": 5},
+    "counts": {
+      "type": "object",
+      "required": ["manager_interventions", "eligible_manager_decisions", "known_defects", "qa_caught_defects", "rework_loops", "valid_reuse_opportunities", "valid_reuses", "accepted_recalls", "false_recall_acceptances", "scope_leakage_acceptances", "stale_obsolete_acceptances"],
+      "properties": {
+        "manager_interventions": {"type": "integer", "minimum": 0},
+        "eligible_manager_decisions": {"type": "integer", "minimum": 1},
+        "known_defects": {"type": "integer", "minimum": 1},
+        "qa_caught_defects": {"type": "integer", "minimum": 0},
+        "rework_loops": {"type": "integer", "minimum": 0},
+        "valid_reuse_opportunities": {"type": "integer", "minimum": 1},
+        "valid_reuses": {"type": "integer", "minimum": 0},
+        "accepted_recalls": {"type": "integer", "minimum": 1},
+        "false_recall_acceptances": {"type": "integer", "minimum": 0},
+        "scope_leakage_acceptances": {"type": "integer", "minimum": 0},
+        "stale_obsolete_acceptances": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "context_tokens": {"$ref": "#/$defs/integerDistribution"},
+    "latency_ms": {"$ref": "#/$defs/numberDistribution"}
+  },
+  "$defs": {
+    "integerDistribution": {
+      "type": "object",
+      "required": ["total", "median", "p95_nearest_rank"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 1},
+        "median": {"type": "number", "exclusiveMinimum": 0},
+        "p95_nearest_rank": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "numberDistribution": {
+      "type": "object",
+      "required": ["total", "median", "p95_nearest_rank"],
+      "properties": {
+        "total": {"type": "number", "exclusiveMinimum": 0},
+        "median": {"type": "number", "exclusiveMinimum": 0},
+        "p95_nearest_rank": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
