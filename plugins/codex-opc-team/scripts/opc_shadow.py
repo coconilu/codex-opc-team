@@ -14,6 +14,7 @@ import secrets
 import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -22,6 +23,7 @@ from opc_feedback import (
     FeedbackError,
     MAX_SIDECAR_BYTES,
     _BoundDirectory,
+    _directory_identity,
     _existing_object_is_within,
     _file_identity,
     _is_reparse,
@@ -35,14 +37,25 @@ from opc_sensitive import SENSITIVE_PATTERNS
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = PLUGIN_ROOT / "assets" / "evaluation" / "shadow-evaluation-contract.v1.json"
 BASELINE_CONTRACT_VERSION = "opc-evaluation-contract-v1"
+BASELINE_CONTRACT_SHA256 = "f7eda22695e25f91f15031d6a94d0183e399fc3b52b34a21130b7f567180444d"
 CONTRACT_VERSION = "opc-shadow-evaluation-contract-v1"
 REPLAY_VERSION = "opc-shadow-replay-v1"
 RESULT_VERSION = "opc-shadow-result-v1"
 MAX_REPLAY_BYTES = 512 * 1024
 MAX_RESULT_BYTES = 1024 * 1024
 MAX_CASES = 20
+MAX_EVIDENCE_ITEMS = 200
+MAX_FAILURE_MODES = 64
 MAX_ID = 128
 MAX_REF = 240
+MAX_RATIO_COMPONENT = 1_000_000
+MAX_SAFETY_COUNT = 1_000_000
+MAX_CONTEXT_TOKENS = 10_000_000
+MAX_LATENCY_MS = 86_400_000
+MAX_AGGREGATE_RATIO_COMPONENT = MAX_RATIO_COMPONENT * MAX_CASES
+MAX_AGGREGATE_SAFETY_COUNT = MAX_SAFETY_COUNT * MAX_CASES
+MAX_AGGREGATE_CONTEXT_TOKENS = MAX_CONTEXT_TOKENS * MAX_CASES
+MAX_AGGREGATE_LATENCY_MS = MAX_LATENCY_MS * MAX_CASES
 PORTABLE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 PORTABLE_CANDIDATE = re.compile(r"^exp-[A-Za-z0-9._-]+$")
 PORTABLE_REF = re.compile(
@@ -96,12 +109,111 @@ def _portable(value: Any, pattern: re.Pattern[str], label: str, *, maximum: int 
     return value
 
 
-def _strict_number(value: Any, label: str, *, integer: bool = False, positive: bool = False) -> int | float:
+def _strict_number(
+    value: Any,
+    label: str,
+    *,
+    integer: bool = False,
+    positive: bool = False,
+    maximum: int | float,
+) -> int | float:
     if isinstance(value, bool) or not isinstance(value, int if integer else (int, float)):
         raise ShadowError(f"{label} must be a finite {'integer' if integer else 'number'}")
-    if not math.isfinite(float(value)) or value < (1 if positive else 0):
+    # Python integers are arbitrary precision.  Never convert them to float:
+    # conversion itself can overflow before the v1 bound is checked.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ShadowError(f"{label} is outside the v1 bounds")
+    if value < (1 if positive else 0) or value > maximum:
         raise ShadowError(f"{label} is outside the v1 bounds")
     return value
+
+
+def _lexical_absolute(path: Path) -> Path:
+    expanded = path.expanduser()
+    return expanded if expanded.is_absolute() else Path.cwd() / expanded
+
+
+def _assert_unlinked_path(path: Path, *, label: str) -> Path:
+    """Reject linked/reparse components before any resolve or file access."""
+
+    candidate = _lexical_absolute(path)
+    current = candidate
+    while True:
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ShadowError(f"{label} boundary could not be inspected") from exc
+        else:
+            if stat.S_ISLNK(metadata.st_mode) or _is_reparse(current):
+                raise ShadowError(f"{label} crosses a symlink or reparse boundary")
+        parent = current.parent
+        if parent == current:
+            return candidate
+        current = parent
+
+
+def _assert_existing_directory(path: Path, *, label: str) -> Path:
+    candidate = _assert_unlinked_path(path, label=label)
+    try:
+        metadata = candidate.lstat()
+    except OSError as exc:
+        raise ShadowError(f"{label} must be an existing stable directory") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(candidate):
+        raise ShadowError(f"{label} must be an existing stable directory")
+    return candidate
+
+
+def _read_bound_bytes(path: Path, *, maximum: int, label: str) -> bytes:
+    candidate = _assert_unlinked_path(path, label=label)
+    try:
+        metadata = candidate.lstat()
+    except OSError as exc:
+        raise ShadowError(f"{label} is unavailable") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ShadowError(f"{label} must be a regular non-linked file")
+    if metadata.st_size > maximum:
+        raise ShadowError(f"{label} exceeds the configured size limit")
+    try:
+        with _BoundDirectory(candidate.parent, candidate.parent) as bound:
+            return bound.read_bytes(
+                candidate.name,
+                max_bytes=maximum,
+                require_single_link=True,
+            )
+    except (FeedbackError, OSError) as exc:
+        raise ShadowError(f"{label} could not be read as one stable, uniquely linked file") from exc
+
+
+def _read_trusted_bytes(path: Path, *, maximum: int, label: str) -> bytes:
+    """Read an installed immutable file without applying private-project policy."""
+
+    candidate = _assert_unlinked_path(path, label=label)
+    try:
+        before = candidate.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > maximum
+        ):
+            raise ShadowError(f"{label} is not one bounded immutable file")
+        descriptor = os.open(candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            if _file_identity(opened) != _file_identity(before):
+                raise ShadowError(f"{label} identity changed while being opened")
+            raw = os.read(descriptor, maximum + 1)
+            if len(raw) > maximum:
+                raise ShadowError(f"{label} exceeds the configured size limit")
+            after = candidate.lstat()
+            if _file_identity(after) != _file_identity(before) or after.st_nlink != 1:
+                raise ShadowError(f"{label} identity changed while being read")
+            return raw
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ShadowError(f"{label} could not be read safely") from exc
 
 
 def _reject_sensitive(value: Any) -> None:
@@ -117,35 +229,18 @@ def _reject_sensitive(value: Any) -> None:
                 raise ShadowError("input contains a credential-like value; matched content is not displayed")
 
 
-def _read_json(path: Path, *, maximum: int, label: str) -> tuple[dict[str, Any], bytes]:
-    candidate = path.expanduser()
-    try:
-        before = candidate.lstat()
-    except OSError as exc:
-        raise ShadowError(f"{label} is unavailable") from exc
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or before.st_nlink != 1
-        or candidate.is_symlink()
-        or _is_reparse(candidate)
-    ):
-        raise ShadowError(f"{label} must be a regular non-linked file")
-    if before.st_size > maximum:
-        raise ShadowError(f"{label} exceeds the configured size limit")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(candidate, flags)
-        try:
-            opened = os.fstat(descriptor)
-            if _file_identity(opened) != _file_identity(before) or not stat.S_ISREG(opened.st_mode):
-                raise ShadowError(f"{label} changed while being opened")
-            raw = os.read(descriptor, maximum + 1)
-        finally:
-            os.close(descriptor)
-    except OSError as exc:
-        raise ShadowError(f"{label} could not be read safely") from exc
-    if len(raw) > maximum:
-        raise ShadowError(f"{label} exceeds the configured size limit")
+def _read_json(
+    path: Path,
+    *,
+    maximum: int,
+    label: str,
+    trusted_installed_file: bool = False,
+) -> tuple[dict[str, Any], bytes]:
+    raw = (
+        _read_trusted_bytes(path, maximum=maximum, label=label)
+        if trusted_installed_file
+        else _read_bound_bytes(path, maximum=maximum, label=label)
+    )
     try:
         value = json.loads(
             raw.decode("utf-8"),
@@ -161,8 +256,18 @@ def _read_json(path: Path, *, maximum: int, label: str) -> tuple[dict[str, Any],
 
 def _validate_ratio(value: Any, label: str) -> None:
     _exact(value, {"numerator", "denominator"}, label)
-    numerator = _strict_number(value["numerator"], f"{label}.numerator", integer=True)
-    denominator = _strict_number(value["denominator"], f"{label}.denominator", integer=True)
+    numerator = _strict_number(
+        value["numerator"],
+        f"{label}.numerator",
+        integer=True,
+        maximum=MAX_RATIO_COMPONENT,
+    )
+    denominator = _strict_number(
+        value["denominator"],
+        f"{label}.denominator",
+        integer=True,
+        maximum=MAX_RATIO_COMPONENT,
+    )
     if numerator > denominator and label.rsplit(".", 1)[-1] != "rework_loops_per_task":
         raise ShadowError(f"{label} numerator cannot exceed denominator")
 
@@ -184,9 +289,25 @@ def _validate_arm(value: Any, label: str, *, candidate_applied: bool) -> None:
     for metric in QUALITY_METRICS:
         _validate_ratio(metrics[metric], f"{label}.metrics.{metric}")
     for metric in SAFETY_METRICS:
-        _strict_number(metrics[metric], f"{label}.metrics.{metric}", integer=True)
-    _strict_number(metrics["context_tokens_per_task"], f"{label}.metrics.context_tokens_per_task", integer=True, positive=True)
-    _strict_number(metrics["latency_ms"], f"{label}.metrics.latency_ms", positive=True)
+        _strict_number(
+            metrics[metric],
+            f"{label}.metrics.{metric}",
+            integer=True,
+            maximum=MAX_SAFETY_COUNT,
+        )
+    _strict_number(
+        metrics["context_tokens_per_task"],
+        f"{label}.metrics.context_tokens_per_task",
+        integer=True,
+        positive=True,
+        maximum=MAX_CONTEXT_TOKENS,
+    )
+    _strict_number(
+        metrics["latency_ms"],
+        f"{label}.metrics.latency_ms",
+        positive=True,
+        maximum=MAX_LATENCY_MS,
+    )
 
 
 def validate_replay(value: Mapping[str, Any]) -> None:
@@ -246,7 +367,7 @@ def _git_head(root: Path) -> str | None:
 
 
 def _preflight(knowledge_root: Path, replay: Mapping[str, Any]) -> dict[str, Any]:
-    backend = FileGitBackend(knowledge_root)
+    backend = FileGitBackend(_assert_existing_directory(knowledge_root, label="knowledge root"))
     candidate_id = replay["candidate"]["candidate_id"]
     found: list[dict[str, Any]] = []
     for status in MEMORY_STATUSES:
@@ -270,8 +391,15 @@ def _preflight(knowledge_root: Path, replay: Mapping[str, Any]) -> dict[str, Any
         reasons.append("cross_project_scope")
     source_path = str(record.get("_source_path", ""))
     expected = replay["candidate"]
+    canonical_raw = _read_bound_bytes(
+        backend.root / source_path,
+        maximum=MAX_REPLAY_BYTES,
+        label="candidate canonical record",
+    )
     try:
         metadata = backend.source_metadata(source_path)
+        if hashlib.sha256(canonical_raw).hexdigest() != metadata.get("content_hash"):
+            raise ShadowError("candidate canonical identity changed during provenance verification")
     except (OpcMemoryError, OSError):
         metadata = {"source_path": source_path, "content_hash": None, "source_commit": None}
     head = _git_head(backend.root)
@@ -304,7 +432,9 @@ def _project_feedback(project_root: Path | None, replay: Mapping[str, Any]) -> d
         return None
     if project_root is None:
         raise ShadowError("approved_private_pilot requires --project-root")
-    project = project_root.expanduser().resolve(strict=True)
+    project = _assert_existing_directory(project_root, label="private pilot project").resolve(
+        strict=True
+    )
     if _existing_object_is_within(project, PLUGIN_ROOT) or _existing_object_is_within(PLUGIN_ROOT, project):
         raise ShadowError("private pilot project must not overlap the installed/public plugin tree")
     project_record = load_json(project / ".opc" / "project.json")
@@ -331,7 +461,12 @@ def _json_bytes(value: Mapping[str, Any]) -> bytes:
 
 
 def _load_contract() -> tuple[dict[str, Any], bytes]:
-    contract, raw = _read_json(CONTRACT_PATH, maximum=64 * 1024, label="Shadow Evaluation contract")
+    contract, raw = _read_json(
+        CONTRACT_PATH,
+        maximum=64 * 1024,
+        label="Shadow Evaluation contract",
+        trusted_installed_file=True,
+    )
     if contract.get("contract_version") != CONTRACT_VERSION:
         raise ShadowError("unsupported Shadow Evaluation contract version")
     if contract.get("metric_contract") != BASELINE_CONTRACT_VERSION:
@@ -344,8 +479,29 @@ def _load_contract() -> tuple[dict[str, Any], bytes]:
     ):
         raise ShadowError("Shadow Evaluation arm metrics drifted from the runtime contract")
     metric_hash = contract.get("metric_contract_sha256")
-    if not isinstance(metric_hash, str) or not SHA256.fullmatch(metric_hash):
-        raise ShadowError("Shadow Evaluation metric contract hash is invalid")
+    if metric_hash != BASELINE_CONTRACT_SHA256:
+        raise ShadowError("Shadow Evaluation metric contract hash is unsupported")
+    limits = contract.get("limits")
+    expected_limits = {
+        "replay_bytes": MAX_REPLAY_BYTES,
+        "feedback_bytes": MAX_SIDECAR_BYTES,
+        "result_bytes": MAX_RESULT_BYTES,
+        "cases": MAX_CASES,
+        "evidence_items": MAX_EVIDENCE_ITEMS,
+        "failure_modes": MAX_FAILURE_MODES,
+        "identifier_characters": MAX_ID,
+        "portable_reference_characters": MAX_REF,
+        "ratio_component": MAX_RATIO_COMPONENT,
+        "safety_count": MAX_SAFETY_COUNT,
+        "context_tokens_per_task": MAX_CONTEXT_TOKENS,
+        "latency_ms": MAX_LATENCY_MS,
+        "aggregate_ratio_component": MAX_AGGREGATE_RATIO_COMPONENT,
+        "aggregate_safety_count": MAX_AGGREGATE_SAFETY_COUNT,
+        "aggregate_context_tokens": MAX_AGGREGATE_CONTEXT_TOKENS,
+        "aggregate_latency_ms": MAX_AGGREGATE_LATENCY_MS,
+    }
+    if limits != expected_limits:
+        raise ShadowError("Shadow Evaluation limits drifted from the runtime contract")
     return contract, raw
 
 
@@ -387,7 +543,74 @@ def build_preview(
     return preview, feedback
 
 
+def _checked_integer_sum(
+    values: Sequence[Any],
+    *,
+    label: str,
+    item_maximum: int,
+    aggregate_maximum: int,
+) -> int:
+    total = 0
+    for index, value in enumerate(values):
+        checked = _strict_number(
+            value,
+            f"{label}[{index}]",
+            integer=True,
+            maximum=item_maximum,
+        )
+        total += int(checked)
+        if total > aggregate_maximum:
+            raise ShadowError(f"{label} aggregate exceeds the v1 bounds")
+    return total
+
+
+def _checked_number_sum(
+    values: Sequence[Any],
+    *,
+    label: str,
+    item_maximum: int | float,
+    aggregate_maximum: int | float,
+) -> int | float:
+    total: int | float = 0
+    try:
+        for index, value in enumerate(values):
+            checked = _strict_number(
+                value,
+                f"{label}[{index}]",
+                maximum=item_maximum,
+            )
+            total += checked
+            if (
+                isinstance(total, float)
+                and not math.isfinite(total)
+            ) or total > aggregate_maximum:
+                raise ShadowError(f"{label} aggregate exceeds the v1 bounds")
+    except ArithmeticError as exc:
+        raise ShadowError(f"{label} aggregate exceeds the v1 bounds") from exc
+    return total
+
+
+def _bounded_median(
+    values: Sequence[int | float],
+    *,
+    label: str,
+    item_maximum: int | float,
+) -> int | float:
+    middle = len(values) // 2
+    if len(values) % 2:
+        return values[middle]
+    pair = _checked_number_sum(
+        [values[middle - 1], values[middle]],
+        label=f"{label}.median_pair",
+        item_maximum=item_maximum,
+        aggregate_maximum=item_maximum * 2,
+    )
+    return pair / 2
+
+
 def _aggregate_arm(cases: Sequence[Mapping[str, Any]], arm: str) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    if not 1 <= len(cases) <= MAX_CASES:
+        raise ShadowError("aggregation case count exceeds the v1 bounds")
     aggregate: dict[str, Any] = {}
     failures: list[dict[str, str]] = []
     for case in cases:
@@ -402,8 +625,18 @@ def _aggregate_arm(cases: Sequence[Mapping[str, Any]], arm: str) -> tuple[dict[s
                 }
             )
     for metric in QUALITY_METRICS:
-        numerator = sum(case[arm]["metrics"][metric]["numerator"] for case in cases)
-        denominator = sum(case[arm]["metrics"][metric]["denominator"] for case in cases)
+        numerator = _checked_integer_sum(
+            [case[arm]["metrics"][metric]["numerator"] for case in cases],
+            label=f"{arm}.{metric}.numerator",
+            item_maximum=MAX_RATIO_COMPONENT,
+            aggregate_maximum=MAX_AGGREGATE_RATIO_COMPONENT,
+        )
+        denominator = _checked_integer_sum(
+            [case[arm]["metrics"][metric]["denominator"] for case in cases],
+            label=f"{arm}.{metric}.denominator",
+            item_maximum=MAX_RATIO_COMPONENT,
+            aggregate_maximum=MAX_AGGREGATE_RATIO_COMPONENT,
+        )
         aggregate[metric] = {
             "numerator": numerator,
             "denominator": denominator,
@@ -412,16 +645,53 @@ def _aggregate_arm(cases: Sequence[Mapping[str, Any]], arm: str) -> tuple[dict[s
         if denominator == 0:
             failures.append({"arm": arm, "case_id": "aggregate", "code": "zero_denominator", "failure_ref": metric})
     for metric in SAFETY_METRICS:
-        aggregate[metric] = sum(case[arm]["metrics"][metric] for case in cases)
-    for metric in TELEMETRY_METRICS:
-        values = sorted(float(case[arm]["metrics"][metric]) for case in cases)
-        middle = len(values) // 2
-        median = values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
-        aggregate[metric] = {
-            "total": round(sum(values), 6),
-            "median": round(median, 6),
-            "p95_nearest_rank": round(values[math.ceil(0.95 * len(values)) - 1], 6),
-        }
+        aggregate[metric] = _checked_integer_sum(
+            [case[arm]["metrics"][metric] for case in cases],
+            label=f"{arm}.{metric}",
+            item_maximum=MAX_SAFETY_COUNT,
+            aggregate_maximum=MAX_AGGREGATE_SAFETY_COUNT,
+        )
+    token_values = sorted(case[arm]["metrics"]["context_tokens_per_task"] for case in cases)
+    token_total = _checked_integer_sum(
+        token_values,
+        label=f"{arm}.context_tokens_per_task",
+        item_maximum=MAX_CONTEXT_TOKENS,
+        aggregate_maximum=MAX_AGGREGATE_CONTEXT_TOKENS,
+    )
+    aggregate["context_tokens_per_task"] = {
+        "total": token_total,
+        "median": round(
+            _bounded_median(
+                token_values,
+                label=f"{arm}.context_tokens_per_task",
+                item_maximum=MAX_CONTEXT_TOKENS,
+            ),
+            6,
+        ),
+        "p95_nearest_rank": token_values[math.ceil(0.95 * len(token_values)) - 1],
+    }
+    latency_values = sorted(case[arm]["metrics"]["latency_ms"] for case in cases)
+    latency_total = _checked_number_sum(
+        latency_values,
+        label=f"{arm}.latency_ms",
+        item_maximum=MAX_LATENCY_MS,
+        aggregate_maximum=MAX_AGGREGATE_LATENCY_MS,
+    )
+    aggregate["latency_ms"] = {
+        "total": round(latency_total, 6),
+        "median": round(
+            _bounded_median(
+                latency_values,
+                label=f"{arm}.latency_ms",
+                item_maximum=MAX_LATENCY_MS,
+            ),
+            6,
+        ),
+        "p95_nearest_rank": round(
+            latency_values[math.ceil(0.95 * len(latency_values)) - 1],
+            6,
+        ),
+    }
     return aggregate, failures
 
 
@@ -606,6 +876,7 @@ def evaluate(
             "failure_modes": [{"arm": "preflight", "case_id": "none", "code": reason, "failure_ref": "candidate"} for reason in preflight["reasons"]],
             "governance": governance,
         }
+        validate_result(result)
         _json_bytes(result)
         return result
 
@@ -663,13 +934,533 @@ def evaluate(
     final_preflight = _preflight(knowledge_root, replay)
     if final_preflight != {"passed": True, "reasons": [], "candidate_snapshot": candidate}:
         raise ShadowError("candidate provenance changed during evaluation; no artifact was written")
+    validate_result(result)
     _json_bytes(result)
     return result
 
 
-def render_report(result: Mapping[str, Any]) -> str:
-    if result.get("schema_version") != RESULT_VERSION or result.get("contract_version") != CONTRACT_VERSION:
+RESULT_FIELDS = {
+    "schema_version",
+    "contract_version",
+    "metric_contract",
+    "metric_contract_sha256",
+    "contract_sha256",
+    "replay_sha256",
+    "evaluation_id",
+    "dataset",
+    "candidate",
+    "preflight",
+    "status",
+    "degradation_status",
+    "recommendation",
+    "measurements",
+    "evidence",
+    "confidence",
+    "failure_modes",
+    "governance",
+}
+PREFLIGHT_REASONS = {
+    "candidate_missing_or_duplicate",
+    "obsolete_or_non_candidate",
+    "cross_project_scope",
+    "stale_provenance",
+}
+GOVERNANCE_STEPS = (
+    "manager_preview",
+    "manager_approval",
+    "exact_git_commit",
+    "optional_reindex_preview_and_approval",
+)
+
+
+def _validate_result_dataset(value: Any) -> None:
+    _exact(value, {"kind", "dataset_id", "project_id", "approval_ref"}, "result.dataset")
+    if value["kind"] not in {"synthetic", "approved_private_pilot"}:
+        raise ShadowError("result dataset kind is unsupported")
+    _portable(value["dataset_id"], PORTABLE_ID, "result.dataset.dataset_id")
+    _portable(value["project_id"], PORTABLE_ID, "result.dataset.project_id")
+    if value["kind"] == "synthetic":
+        if value["approval_ref"] is not None:
+            raise ShadowError("synthetic result must not claim a private approval")
+    else:
+        _portable(
+            value["approval_ref"],
+            PORTABLE_REF,
+            "result.dataset.approval_ref",
+            maximum=MAX_REF,
+        )
+
+
+def _validate_candidate_snapshot(value: Any) -> None:
+    if value is None:
+        return
+    _exact(
+        value,
+        {
+            "candidate_id",
+            "status",
+            "scope",
+            "project_id",
+            "source_path",
+            "source_commit",
+            "content_sha256",
+            "declared_confidence",
+        },
+        "result.candidate",
+    )
+    _portable(value["candidate_id"], PORTABLE_CANDIDATE, "result.candidate.candidate_id")
+    if value["status"] not in MEMORY_STATUSES:
+        raise ShadowError("result candidate status is unsupported")
+    if value["scope"] not in {"global", "project"}:
+        raise ShadowError("result candidate scope is unsupported")
+    if value["project_id"] is not None:
+        _portable(value["project_id"], PORTABLE_ID, "result.candidate.project_id")
+    if value["scope"] == "project" and value["project_id"] is None:
+        raise ShadowError("project candidate result requires project_id")
+    if value["scope"] == "global" and value["project_id"] is not None:
+        raise ShadowError("global candidate result cannot contain project_id")
+    _portable(
+        value["source_path"],
+        PORTABLE_REF,
+        "result.candidate.source_path",
+        maximum=MAX_REF,
+    )
+    if value["source_commit"] is not None and (
+        not isinstance(value["source_commit"], str)
+        or not GIT_COMMIT.fullmatch(value["source_commit"])
+    ):
+        raise ShadowError("result candidate source_commit is invalid")
+    if value["content_sha256"] is not None and (
+        not isinstance(value["content_sha256"], str)
+        or not SHA256.fullmatch(value["content_sha256"])
+    ):
+        raise ShadowError("result candidate content_sha256 is invalid")
+    if value["declared_confidence"] is not None:
+        _strict_number(
+            value["declared_confidence"],
+            "result.candidate.declared_confidence",
+            maximum=1,
+        )
+
+
+def _validate_preflight_result(value: Any) -> None:
+    _exact(value, {"passed", "reasons"}, "result.preflight")
+    if not isinstance(value["passed"], bool):
+        raise ShadowError("result preflight.passed must be boolean")
+    reasons = value["reasons"]
+    if (
+        not isinstance(reasons, list)
+        or len(reasons) > len(PREFLIGHT_REASONS)
+        or len(reasons) != len(set(reasons))
+        or any(reason not in PREFLIGHT_REASONS for reason in reasons)
+    ):
+        raise ShadowError("result preflight reasons are invalid")
+    if value["passed"] == bool(reasons):
+        raise ShadowError("result preflight passed/reasons are inconsistent")
+
+
+def _validate_aggregate_ratio(value: Any, label: str) -> None:
+    _exact(value, {"numerator", "denominator", "value"}, label)
+    numerator = _strict_number(
+        value["numerator"],
+        f"{label}.numerator",
+        integer=True,
+        maximum=MAX_AGGREGATE_RATIO_COMPONENT,
+    )
+    denominator = _strict_number(
+        value["denominator"],
+        f"{label}.denominator",
+        integer=True,
+        maximum=MAX_AGGREGATE_RATIO_COMPONENT,
+    )
+    expected = round(numerator / denominator, 6) if denominator else None
+    if value["value"] != expected:
+        raise ShadowError(f"{label}.value does not match its exact aggregate")
+
+
+def _validate_telemetry_aggregate(
+    value: Any,
+    label: str,
+    *,
+    item_maximum: int,
+    aggregate_maximum: int,
+    integer_total: bool,
+) -> None:
+    _exact(value, {"total", "median", "p95_nearest_rank"}, label)
+    _strict_number(
+        value["total"],
+        f"{label}.total",
+        integer=integer_total,
+        positive=True,
+        maximum=aggregate_maximum,
+    )
+    for field in ("median", "p95_nearest_rank"):
+        _strict_number(
+            value[field],
+            f"{label}.{field}",
+            positive=True,
+            maximum=item_maximum,
+        )
+
+
+def _validate_arm_aggregate(value: Any, label: str) -> None:
+    _exact(value, set(ALL_METRICS), label)
+    for metric in QUALITY_METRICS:
+        _validate_aggregate_ratio(value[metric], f"{label}.{metric}")
+    for metric in SAFETY_METRICS:
+        _strict_number(
+            value[metric],
+            f"{label}.{metric}",
+            integer=True,
+            maximum=MAX_AGGREGATE_SAFETY_COUNT,
+        )
+    _validate_telemetry_aggregate(
+        value["context_tokens_per_task"],
+        f"{label}.context_tokens_per_task",
+        item_maximum=MAX_CONTEXT_TOKENS,
+        aggregate_maximum=MAX_AGGREGATE_CONTEXT_TOKENS,
+        integer_total=True,
+    )
+    _validate_telemetry_aggregate(
+        value["latency_ms"],
+        f"{label}.latency_ms",
+        item_maximum=MAX_LATENCY_MS,
+        aggregate_maximum=MAX_AGGREGATE_LATENCY_MS,
+        integer_total=False,
+    )
+
+
+def _metric_value_from_aggregate(aggregate: Mapping[str, Any], metric: str) -> Any:
+    if metric in QUALITY_METRICS:
+        return aggregate[metric]["value"]
+    if metric in SAFETY_METRICS:
+        return aggregate[metric]
+    return aggregate[metric]["median"]
+
+
+def _validate_metric_comparison(value: Any, label: str) -> None:
+    _exact(value, {"metric_id", "control", "treatment", "direction", "source_kind"}, label)
+    metric = value["metric_id"]
+    if metric not in ALL_METRICS:
+        raise ShadowError(f"{label}.metric_id is unsupported")
+    if value["source_kind"] != "measured" or value["direction"] not in {
+        "supporting",
+        "counterevidence",
+        "neutral",
+        "unknown",
+    }:
+        raise ShadowError(f"{label} evidence classification is invalid")
+    for field in ("control", "treatment"):
+        observed = value[field]
+        if observed is None:
+            if metric not in QUALITY_METRICS:
+                raise ShadowError(f"{label}.{field} cannot be null")
+            continue
+        maximum = (
+            MAX_AGGREGATE_RATIO_COMPONENT
+            if metric in QUALITY_METRICS
+            else MAX_AGGREGATE_SAFETY_COUNT
+            if metric in SAFETY_METRICS
+            else MAX_CONTEXT_TOKENS
+            if metric == "context_tokens_per_task"
+            else MAX_LATENCY_MS
+        )
+        _strict_number(
+            observed,
+            f"{label}.{field}",
+            integer=metric in SAFETY_METRICS,
+            maximum=maximum,
+        )
+
+
+def _validate_feedback_evidence(value: Any, label: str) -> None:
+    _exact(
+        value,
+        {
+            "evidence_id",
+            "source_kind",
+            "evidence_class",
+            "direction",
+            "metric_refs",
+            "artifact_refs",
+        },
+        label,
+    )
+    _portable(value["evidence_id"], PORTABLE_ID, f"{label}.evidence_id")
+    evidence_class = value["evidence_class"]
+    if evidence_class not in FEEDBACK_KINDS or value["source_kind"] != FEEDBACK_KINDS[evidence_class]:
+        raise ShadowError(f"{label} feedback class/source_kind is invalid")
+    if value["direction"] not in {"supporting", "counterevidence", "neutral", "unknown"}:
+        raise ShadowError(f"{label}.direction is invalid")
+    metric_refs = value["metric_refs"]
+    artifact_refs = value["artifact_refs"]
+    if not isinstance(metric_refs, list) or len(metric_refs) > 20:
+        raise ShadowError(f"{label}.metric_refs exceeds the v1 bounds")
+    for index, item in enumerate(metric_refs):
+        _exact(
+            item,
+            {"metric_id", "aggregate_ref", "aggregate_sha256", "interpretation"},
+            f"{label}.metric_refs[{index}]",
+        )
+        if item["metric_id"] not in ALL_METRICS or item["interpretation"] not in {
+            "supporting",
+            "conflicting",
+            "unknown",
+        }:
+            raise ShadowError(f"{label}.metric_refs[{index}] is invalid")
+        _portable(
+            item["aggregate_ref"],
+            PORTABLE_REF,
+            f"{label}.metric_refs[{index}].aggregate_ref",
+            maximum=MAX_REF,
+        )
+        if not isinstance(item["aggregate_sha256"], str) or not SHA256.fullmatch(
+            item["aggregate_sha256"]
+        ):
+            raise ShadowError(f"{label}.metric_refs[{index}].aggregate_sha256 is invalid")
+    if (
+        not isinstance(artifact_refs, list)
+        or len(artifact_refs) > 20
+        or len(artifact_refs) != len(set(artifact_refs))
+    ):
+        raise ShadowError(f"{label}.artifact_refs exceeds the v1 bounds")
+    for index, item in enumerate(artifact_refs):
+        _portable(item, PORTABLE_REF, f"{label}.artifact_refs[{index}]", maximum=MAX_REF)
+
+
+def _validate_evidence_result(
+    value: Any,
+    comparisons: Sequence[Mapping[str, Any]] | None,
+) -> list[Mapping[str, Any]]:
+    _exact(value, {"support", "counterevidence", "neutral_or_unknown"}, "result.evidence")
+    all_items: list[Mapping[str, Any]] = []
+    expected_direction = {
+        "support": {"supporting"},
+        "counterevidence": {"counterevidence"},
+        "neutral_or_unknown": {"neutral", "unknown"},
+    }
+    metric_items: dict[str, Mapping[str, Any]] = {}
+    evidence_ids: set[str] = set()
+    for bucket, directions in expected_direction.items():
+        items = value[bucket]
+        if not isinstance(items, list):
+            raise ShadowError(f"result.evidence.{bucket} must be an array")
+        for index, item in enumerate(items):
+            label = f"result.evidence.{bucket}[{index}]"
+            if not isinstance(item, dict) or item.get("direction") not in directions:
+                raise ShadowError(f"{label} is in the wrong evidence bucket")
+            if "metric_id" in item:
+                _validate_metric_comparison(item, label)
+                metric_id = item["metric_id"]
+                if metric_id in metric_items:
+                    raise ShadowError("result evidence repeats a measured metric")
+                metric_items[metric_id] = item
+            else:
+                _validate_feedback_evidence(item, label)
+                evidence_id = item["evidence_id"]
+                if evidence_id in evidence_ids:
+                    raise ShadowError("result evidence repeats a feedback event")
+                evidence_ids.add(evidence_id)
+            all_items.append(item)
+    if len(all_items) > MAX_EVIDENCE_ITEMS:
+        raise ShadowError("result evidence exceeds the v1 bounds")
+    if comparisons is None:
+        if metric_items:
+            raise ShadowError("rejected result cannot contain measured comparisons")
+    else:
+        expected = {item["metric_id"]: item for item in comparisons}
+        if metric_items != expected:
+            raise ShadowError("result evidence does not exactly match measured comparisons")
+    return all_items
+
+
+def _validate_result_confidence(
+    value: Any,
+    evidence: Sequence[Mapping[str, Any]],
+    declared: Any,
+) -> None:
+    _exact(
+        value,
+        {
+            "formula_version",
+            "evidence_derived",
+            "declared_candidate_confidence",
+            "weighted_support",
+            "weighted_counterevidence",
+            "evaluated_confidence",
+            "approval_permission",
+        },
+        "result.confidence",
+    )
+    if value != _confidence(evidence, declared):
+        raise ShadowError("result confidence does not match the governed evidence formula")
+
+
+def _validate_failure_modes(value: Any) -> None:
+    if not isinstance(value, list) or len(value) > MAX_FAILURE_MODES:
+        raise ShadowError("result failure modes exceed the v1 bounds")
+    for index, item in enumerate(value):
+        _exact(item, {"arm", "case_id", "code", "failure_ref"}, f"result.failure_modes[{index}]")
+        if item["arm"] not in {"control", "treatment", "preflight", "comparison"}:
+            raise ShadowError(f"result.failure_modes[{index}].arm is invalid")
+        for field in ("case_id", "code", "failure_ref"):
+            _portable(item[field], PORTABLE_ID, f"result.failure_modes[{index}].{field}")
+
+
+def _validate_governance(value: Any) -> None:
+    fields = {
+        "automatic_promotion",
+        "candidate_status_changed",
+        "canonical_knowledge_written",
+        "git_written",
+        "provider_index_written",
+        "project_source_written",
+        "next_required_steps",
+    }
+    _exact(value, fields, "result.governance")
+    for field in fields - {"next_required_steps"}:
+        if value[field] is not False:
+            raise ShadowError("result governance write permissions must all be false")
+    steps = value["next_required_steps"]
+    if not isinstance(steps, list) or tuple(steps) != GOVERNANCE_STEPS:
+        raise ShadowError("result governance steps are invalid")
+
+
+def validate_result(value: Mapping[str, Any]) -> None:
+    _exact(value, RESULT_FIELDS, "result")
+    if (
+        value["schema_version"] != RESULT_VERSION
+        or value["contract_version"] != CONTRACT_VERSION
+        or value["metric_contract"] != BASELINE_CONTRACT_VERSION
+    ):
         raise ShadowError("unsupported Shadow Evaluation result")
+    contract, contract_raw = _load_contract()
+    if (
+        value["metric_contract_sha256"] != BASELINE_CONTRACT_SHA256
+        or value["metric_contract_sha256"] != contract["metric_contract_sha256"]
+        or value["contract_sha256"] != hashlib.sha256(contract_raw).hexdigest()
+        or not isinstance(value["replay_sha256"], str)
+        or not SHA256.fullmatch(value["replay_sha256"])
+    ):
+        raise ShadowError("Shadow Evaluation result contract hashes are invalid")
+    _portable(value["evaluation_id"], PORTABLE_ID, "result.evaluation_id")
+    _validate_result_dataset(value["dataset"])
+    _validate_candidate_snapshot(value["candidate"])
+    _validate_preflight_result(value["preflight"])
+    if value["status"] not in {"conclusive", "inconclusive", "rejected_preflight"}:
+        raise ShadowError("result status is invalid")
+    if value["degradation_status"] not in {"none", "degraded"}:
+        raise ShadowError("result degradation status is invalid")
+    if value["recommendation"] not in {
+        "consider_for_separate_curation",
+        "do_not_promote_on_shadow_evidence",
+        "inconclusive",
+        "preflight_rejected",
+    }:
+        raise ShadowError("result recommendation is invalid")
+
+    comparisons: list[Mapping[str, Any]] | None = None
+    measurements = value["measurements"]
+    if measurements is not None:
+        _exact(
+            measurements,
+            {"control", "treatment", "comparisons", "context_cost_and_latency_are_diagnostic_only"},
+            "result.measurements",
+        )
+        if measurements["context_cost_and_latency_are_diagnostic_only"] is not True:
+            raise ShadowError("result telemetry governance marker is invalid")
+        _validate_arm_aggregate(measurements["control"], "result.measurements.control")
+        _validate_arm_aggregate(measurements["treatment"], "result.measurements.treatment")
+        comparisons = measurements["comparisons"]
+        if not isinstance(comparisons, list) or len(comparisons) != len(ALL_METRICS):
+            raise ShadowError("result measurements must contain every exact metric comparison")
+        seen: set[str] = set()
+        for index, item in enumerate(comparisons):
+            _validate_metric_comparison(item, f"result.measurements.comparisons[{index}]")
+            metric = item["metric_id"]
+            if metric in seen or item["control"] != _metric_value_from_aggregate(
+                measurements["control"], metric
+            ) or item["treatment"] != _metric_value_from_aggregate(
+                measurements["treatment"], metric
+            ):
+                raise ShadowError("result comparison does not match its exact aggregate")
+            seen.add(metric)
+        if seen != set(ALL_METRICS):
+            raise ShadowError("result comparison metric set is incomplete")
+        expected_comparisons = {
+            item["metric_id"]: item
+            for item in _metric_comparison(
+                measurements["control"], measurements["treatment"]
+            )
+        }
+        if {item["metric_id"]: item for item in comparisons} != expected_comparisons:
+            raise ShadowError("result comparison direction is not derived from its aggregates")
+
+    evidence = _validate_evidence_result(value["evidence"], comparisons)
+    declared = value["candidate"].get("declared_confidence") if value["candidate"] else None
+    _validate_result_confidence(value["confidence"], evidence, declared)
+    _validate_failure_modes(value["failure_modes"])
+    _validate_governance(value["governance"])
+
+    passed = value["preflight"]["passed"]
+    if not passed:
+        if (
+            value["status"] != "rejected_preflight"
+            or value["recommendation"] != "preflight_rejected"
+            or value["degradation_status"] != "none"
+            or measurements is not None
+        ):
+            raise ShadowError("rejected result violates the preflight governance invariant")
+    else:
+        candidate = value["candidate"]
+        if (
+            candidate is None
+            or candidate["status"] != "candidate"
+            or candidate["source_commit"] is None
+            or candidate["content_sha256"] is None
+            or measurements is None
+            or value["status"] == "rejected_preflight"
+            or value["recommendation"] == "preflight_rejected"
+        ):
+            raise ShadowError("passed result lacks exact candidate measurements")
+        if candidate["scope"] == "project" and candidate["project_id"] != value["dataset"]["project_id"]:
+            raise ShadowError("passed result candidate scope does not match the dataset")
+
+    failures = value["failure_modes"]
+    recommendation = value["recommendation"]
+    if recommendation == "consider_for_separate_curation":
+        measured_support = [
+            item
+            for item in value["evidence"]["support"]
+            if item.get("source_kind") == "measured"
+            and item.get("metric_id") in (*QUALITY_METRICS, *SAFETY_METRICS)
+            and item.get("direction") == "supporting"
+        ]
+        if (
+            not passed
+            or value["status"] != "conclusive"
+            or value["degradation_status"] != "none"
+            or failures
+            or not measured_support
+        ):
+            raise ShadowError("positive result lacks governed measured support")
+    if value["status"] == "conclusive" and (
+        value["degradation_status"] != "none"
+        or recommendation not in {
+            "consider_for_separate_curation",
+            "do_not_promote_on_shadow_evidence",
+        }
+        or failures
+    ):
+        raise ShadowError("conclusive result has inconsistent failures or recommendation")
+    if value["status"] == "inconclusive" and (
+        recommendation != "inconclusive" or not failures
+    ):
+        raise ShadowError("inconclusive result must preserve its failure evidence")
+
+
+def render_report(result: Mapping[str, Any]) -> str:
+    validate_result(result)
     lines = [
         "# Shadow Evaluation report",
         "",
@@ -720,25 +1511,46 @@ def render_report(result: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class _ArtifactRootPlan:
+    path: Path
+    identity: tuple[int, int, int, int]
+
+
+def _artifact_root_plan(path: Path) -> _ArtifactRootPlan:
+    root = _assert_existing_directory(path, label="artifact root")
+    return _ArtifactRootPlan(root, _directory_identity(root.lstat()))
+
+
 def _assert_artifact_root(
     artifact_root: Path,
     *,
     knowledge_root: Path,
     project_root: Path | None,
-) -> Path:
-    root = artifact_root.expanduser().resolve(strict=False)
-    boundaries = [PLUGIN_ROOT, knowledge_root.expanduser().resolve(strict=True)]
+) -> _ArtifactRootPlan:
+    plan = _artifact_root_plan(artifact_root)
+    resolved_root = plan.path.resolve(strict=True)
+    boundaries = [PLUGIN_ROOT, _assert_existing_directory(knowledge_root, label="knowledge root").resolve(strict=True)]
     if project_root is not None:
-        boundaries.append(project_root.expanduser().resolve(strict=True))
+        boundaries.append(
+            _assert_existing_directory(project_root, label="private pilot project").resolve(
+                strict=True
+            )
+        )
     for boundary in boundaries:
-        if _existing_object_is_within(root, boundary) or (
-            root.exists() and _existing_object_is_within(boundary, root)
+        if _existing_object_is_within(resolved_root, boundary) or (
+            _existing_object_is_within(boundary, resolved_root)
         ):
             raise ShadowError("artifact root overlaps plugin, canonical knowledge, or project source")
-    return root
+    return plan
 
 
-def _publish_artifacts(root: Path, evaluation_id: str, result: Mapping[str, Any]) -> tuple[Path, Path]:
+def _publish_artifacts(
+    root: _ArtifactRootPlan | Path,
+    evaluation_id: str,
+    result: Mapping[str, Any],
+) -> tuple[Path, Path]:
+    plan = root if isinstance(root, _ArtifactRootPlan) else _artifact_root_plan(root)
     result_name = f"{evaluation_id}.json"
     report_name = f"{evaluation_id}.md"
     payloads = {result_name: _json_bytes(result), report_name: render_report(result).encode("utf-8")}
@@ -748,47 +1560,55 @@ def _publish_artifacts(root: Path, evaluation_id: str, result: Mapping[str, Any]
     pending: list[tuple[str, tuple[int, int, int, int, int]]] = []
     nonce = secrets.token_hex(24)
     try:
-        with _BoundDirectory(root, root) as bound:
-            for name in payloads:
-                if bound.child_identity(name) is not None:
-                    raise ShadowError("an immutable Shadow Evaluation artifact already exists")
-            for index, (name, payload) in enumerate(payloads.items()):
-                pending_name = f".{name}.pending-{nonce}-{index}"
-                descriptor = bound.open_exclusive(pending_name)
-                try:
-                    with os.fdopen(descriptor, "wb") as handle:
-                        descriptor = -1
-                        handle.write(payload)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                        identity = _file_identity(os.fstat(handle.fileno()))
-                finally:
-                    if descriptor >= 0:
-                        os.close(descriptor)
-                pending.append((pending_name, identity))
-            for (name, _), (pending_name, identity) in zip(payloads.items(), pending):
-                linked_identity = bound.link(pending_name, name)
-                if linked_identity != identity:
-                    raise ShadowError("artifact identity changed during publication")
-                published.append((name, linked_identity))
-            bound.verify_current()
-            for pending_name, identity in pending:
-                if not bound.unlink_owned(pending_name, identity):
-                    raise ShadowError("artifact pending identity changed during cleanup")
-            pending.clear()
-    except (FeedbackError, OSError) as exc:
-        raise ShadowError("artifact root could not be bound or written safely") from exc
-    except Exception:
-        try:
-            with _BoundDirectory(root, root) as bound:
+        with _BoundDirectory(plan.path, plan.path) as bound:
+            if bound.token != plan.identity:
+                raise ShadowError("artifact root identity changed after validation")
+            try:
+                for name in payloads:
+                    if bound.child_identity(name) is not None:
+                        raise ShadowError("an immutable Shadow Evaluation artifact already exists")
+                for index, (name, payload) in enumerate(payloads.items()):
+                    pending_name = f".{name}.pending-{nonce}-{index}"
+                    descriptor = bound.open_exclusive(pending_name)
+                    try:
+                        with os.fdopen(descriptor, "wb") as handle:
+                            descriptor = -1
+                            handle.write(payload)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                            identity = _file_identity(os.fstat(handle.fileno()))
+                    finally:
+                        if descriptor >= 0:
+                            os.close(descriptor)
+                    pending.append((pending_name, identity))
+                for (name, _), (pending_name, identity) in zip(payloads.items(), pending):
+                    linked_identity = bound.link(pending_name, name)
+                    if linked_identity != identity:
+                        raise ShadowError("artifact identity changed during publication")
+                    published.append((name, linked_identity))
+                bound.verify_current()
+                for pending_name, identity in pending:
+                    if not bound.unlink_owned(pending_name, identity):
+                        raise ShadowError("artifact pending identity changed during cleanup")
+                pending.clear()
+                for name, identity in published:
+                    metadata = bound.child_stat(name)
+                    if (
+                        not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_nlink != 1
+                        or _file_identity(metadata) != identity
+                    ):
+                        raise ShadowError("published artifact is not one uniquely linked file")
+                bound.verify_current()
+            except Exception:
                 for name, identity in published:
                     bound.unlink_owned(name, identity)
                 for name, identity in pending:
                     bound.unlink_owned(name, identity)
-        except Exception:
-            pass
-        raise
-    return root / result_name, root / report_name
+                raise
+    except (FeedbackError, OSError) as exc:
+        raise ShadowError("artifact root could not be bound or written safely") from exc
+    return plan.path / result_name, plan.path / report_name
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -846,6 +1666,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0
+    except ArithmeticError:
+        print("OPC_SHADOW_ERROR: numeric computation exceeded the v1 bounds", file=sys.stderr)
+        return 2
     except (ShadowError, OpcMemoryError, FeedbackError, OSError) as exc:
         print(f"OPC_SHADOW_ERROR: {exc}", file=sys.stderr)
         return 2

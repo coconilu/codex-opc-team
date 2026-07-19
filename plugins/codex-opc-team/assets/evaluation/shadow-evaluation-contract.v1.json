@@ -39,7 +39,16 @@
     "result_bytes": 1048576,
     "cases": 20,
     "evidence_items": 200,
+    "failure_modes": 64,
     "identifier_characters": 128,
-    "portable_reference_characters": 240
+    "portable_reference_characters": 240,
+    "ratio_component": 1000000,
+    "safety_count": 1000000,
+    "context_tokens_per_task": 10000000,
+    "latency_ms": 86400000,
+    "aggregate_ratio_component": 20000000,
+    "aggregate_safety_count": 20000000,
+    "aggregate_context_tokens": 200000000,
+    "aggregate_latency_ms": 1728000000
   }
 }

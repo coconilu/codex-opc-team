@@ -108,6 +108,46 @@ class ShadowContractValidationTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, message):
                         validate_repo.validate_shadow_evaluation_contract()
 
+    def test_shadow_result_hash_and_numeric_limit_drift_fail_closed(self):
+        original = validate_repo.load_json
+        contract_path = (
+            validate_repo.PLUGIN
+            / "assets"
+            / "evaluation"
+            / "shadow-evaluation-contract.v1.json"
+        )
+        result_schema_path = (
+            validate_repo.ROOT
+            / "evaluation"
+            / "schemas"
+            / "shadow-result.v1.schema.json"
+        )
+        cases = (
+            (
+                contract_path,
+                lambda value: value["limits"].update(ratio_component=1000001),
+                "numeric and artifact limits drifted",
+            ),
+            (
+                result_schema_path,
+                lambda value: value["properties"]["contract_sha256"].update(
+                    const="0" * 64
+                ),
+                "exact baseline and Shadow contract hashes",
+            ),
+        )
+        for target, mutation, message in cases:
+            with self.subTest(message=message):
+                def altered(path):
+                    value = original(path)
+                    if path == target:
+                        mutation(value)
+                    return value
+
+                with mock.patch.object(validate_repo, "load_json", side_effect=altered):
+                    with self.assertRaisesRegex(ValueError, message):
+                        validate_repo.validate_shadow_evaluation_contract()
+
 
 class PrivacyScanTests(unittest.TestCase):
     def test_reparse_attribute_is_python_310_compatible_junction_fallback(self):

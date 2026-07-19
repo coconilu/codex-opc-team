@@ -23,8 +23,15 @@
         "kind": {"enum": ["synthetic", "approved_private_pilot"]},
         "dataset_id": {"$ref": "#/$defs/portableId"},
         "project_id": {"$ref": "#/$defs/portableId"},
-        "approval_ref": {"type": ["string", "null"], "maxLength": 240}
+        "approval_ref": {"anyOf": [{"$ref": "#/$defs/portableRef"}, {"type": "null"}]}
       },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "synthetic"}}},
+          "then": {"properties": {"approval_ref": {"type": "null"}}},
+          "else": {"properties": {"approval_ref": {"$ref": "#/$defs/portableRef"}}}
+        }
+      ],
       "additionalProperties": false
     },
     "candidate": {
@@ -45,7 +52,7 @@
         "engine": {"$ref": "#/$defs/portableId"},
         "version": {"$ref": "#/$defs/portableId"},
         "determinism": {"enum": ["deterministic", "versioned_nondeterministic"]},
-        "seed": {"type": ["string", "null"], "maxLength": 128}
+        "seed": {"anyOf": [{"$ref": "#/$defs/portableId"}, {"type": "null"}]}
       },
       "additionalProperties": false
     },
@@ -53,8 +60,8 @@
       "type": "object",
       "required": ["numerator", "denominator"],
       "properties": {
-        "numerator": {"type": "integer", "minimum": 0},
-        "denominator": {"type": "integer", "minimum": 0}
+        "numerator": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "denominator": {"type": "integer", "minimum": 0, "maximum": 1000000}
       },
       "additionalProperties": false
     },
@@ -74,10 +81,10 @@
             "rework_loops_per_task": {"$ref": "#/$defs/ratio"},
             "valid_knowledge_reuse_rate": {"$ref": "#/$defs/ratio"},
             "false_recall_rate": {"$ref": "#/$defs/ratio"},
-            "scope_leakage_acceptances": {"type": "integer", "minimum": 0},
-            "stale_obsolete_acceptances": {"type": "integer", "minimum": 0},
-            "context_tokens_per_task": {"type": "integer", "minimum": 1},
-            "latency_ms": {"type": "number", "exclusiveMinimum": 0}
+            "scope_leakage_acceptances": {"type": "integer", "minimum": 0, "maximum": 1000000},
+            "stale_obsolete_acceptances": {"type": "integer", "minimum": 0, "maximum": 1000000},
+            "context_tokens_per_task": {"type": "integer", "minimum": 1, "maximum": 10000000},
+            "latency_ms": {"type": "number", "exclusiveMinimum": 0, "maximum": 86400000}
           },
           "additionalProperties": false
         }

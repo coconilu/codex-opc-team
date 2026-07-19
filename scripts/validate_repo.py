@@ -358,6 +358,7 @@ def validate_shadow_evaluation_contract() -> None:
     contract = load_json(contract_path)
     replay_schema = load_json(replay_schema_path)
     result_schema = load_json(result_schema_path)
+    contract_hash = hashlib.sha256(contract_path.read_bytes()).hexdigest()
     baseline_path = ROOT / "evaluation" / "contracts" / "baseline-contract.v1.json"
     baseline = load_json(baseline_path)
     baseline_hash = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
@@ -394,6 +395,95 @@ def validate_shadow_evaluation_contract() -> None:
             replay_schema.get("$defs", {}).get(name, {}).get("additionalProperties") is False,
             f"Shadow replay schema {name} must reject extra fields",
         )
+    result_objects = (
+        "dataset",
+        "candidateSnapshot",
+        "preflight",
+        "aggregateRatio",
+        "contextAggregate",
+        "latencyAggregate",
+        "armAggregate",
+        "metricComparison",
+        "positiveMetricComparison",
+        "metricRef",
+        "feedbackEvidence",
+        "evidenceBuckets",
+        "confidence",
+        "failureMode",
+        "governance",
+        "measurements",
+    )
+    for name in result_objects:
+        require(
+            result_schema.get("$defs", {}).get(name, {}).get("additionalProperties") is False,
+            f"Shadow result schema {name} must reject extra fields",
+        )
+    result_properties = result_schema.get("properties", {})
+    require(
+        result_properties.get("metric_contract_sha256", {}).get("const") == baseline_hash
+        and result_properties.get("contract_sha256", {}).get("const") == contract_hash,
+        "Shadow result schema must bind exact baseline and Shadow contract hashes",
+    )
+    limits = contract.get("limits") or {}
+    require(
+        limits
+        == {
+            "replay_bytes": 524288,
+            "feedback_bytes": 524288,
+            "result_bytes": 1048576,
+            "cases": 20,
+            "evidence_items": 200,
+            "failure_modes": 64,
+            "identifier_characters": 128,
+            "portable_reference_characters": 240,
+            "ratio_component": 1000000,
+            "safety_count": 1000000,
+            "context_tokens_per_task": 10000000,
+            "latency_ms": 86400000,
+            "aggregate_ratio_component": 20000000,
+            "aggregate_safety_count": 20000000,
+            "aggregate_context_tokens": 200000000,
+            "aggregate_latency_ms": 1728000000,
+        },
+        "Shadow Evaluation numeric and artifact limits drifted",
+    )
+    replay_defs = replay_schema.get("$defs", {})
+    replay_metrics = replay_defs.get("arm", {}).get("properties", {}).get("metrics", {}).get("properties", {})
+    require(
+        replay_defs.get("ratio", {}).get("properties", {}).get("numerator", {}).get("maximum")
+        == limits["ratio_component"]
+        and replay_defs.get("ratio", {}).get("properties", {}).get("denominator", {}).get("maximum")
+        == limits["ratio_component"]
+        and replay_metrics.get("scope_leakage_acceptances", {}).get("maximum")
+        == limits["safety_count"]
+        and replay_metrics.get("stale_obsolete_acceptances", {}).get("maximum")
+        == limits["safety_count"]
+        and replay_metrics.get("context_tokens_per_task", {}).get("maximum")
+        == limits["context_tokens_per_task"]
+        and replay_metrics.get("latency_ms", {}).get("maximum") == limits["latency_ms"],
+        "Shadow replay schema numeric limits drifted from the contract",
+    )
+    governance = result_schema.get("$defs", {}).get("governance", {}).get("properties", {})
+    require(
+        all(
+            governance.get(name, {}).get("const") is False
+            for name in (
+                "automatic_promotion",
+                "candidate_status_changed",
+                "canonical_knowledge_written",
+                "git_written",
+                "provider_index_written",
+                "project_source_written",
+            )
+        ),
+        "Shadow result governance write permissions must be schema-constant false",
+    )
+    positive = result_schema.get("$defs", {}).get("positiveMetricComparison", {})
+    require(
+        positive.get("properties", {}).get("direction", {}).get("const") == "supporting"
+        and positive.get("properties", {}).get("source_kind", {}).get("const") == "measured",
+        "Shadow positive result schema must require measured supporting evidence",
+    )
     require(
         set(contract.get("forbidden_side_effects", []))
         == {

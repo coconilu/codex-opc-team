@@ -538,6 +538,11 @@ class _BoundDirectory:
             return os.stat(name, dir_fd=self.fd, follow_symlinks=False)
         return self._operation_path(name).lstat()
 
+    def child_stat(self, name: str) -> os.stat_result:
+        """Return no-follow metadata for a child of the bound directory object."""
+
+        return self._child_stat(name)
+
     def child_identity(self, name: str) -> tuple[int, int, int, int, int] | None:
         try:
             metadata = self._child_stat(name)
@@ -566,8 +571,20 @@ class _BoundDirectory:
             raise
         return descriptor
 
-    def read_bytes(self, name: str, *, max_bytes: int) -> bytes:
+    def read_bytes(
+        self,
+        name: str,
+        *,
+        max_bytes: int,
+        require_single_link: bool = False,
+    ) -> bytes:
         self.verify_current()
+        expected = self.child_identity(name)
+        if expected is None:
+            raise FeedbackError("feedback sidecar is unavailable")
+        before = self._child_stat(name)
+        if require_single_link and before.st_nlink != 1:
+            raise FeedbackError("feedback child must have one filesystem link")
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         descriptor = (
             os.open(name, flags, dir_fd=self.fd)
@@ -576,12 +593,22 @@ class _BoundDirectory:
         )
         try:
             metadata = os.fstat(descriptor)
-            if metadata.st_size > max_bytes or not stat.S_ISREG(metadata.st_mode):
+            if (
+                _file_identity(metadata) != expected
+                or metadata.st_size > max_bytes
+                or not stat.S_ISREG(metadata.st_mode)
+                or (require_single_link and metadata.st_nlink != 1)
+            ):
                 raise FeedbackError("feedback sidecar exceeds the configured size limit")
             raw = os.read(descriptor, max_bytes + 1)
             if len(raw) > max_bytes:
                 raise FeedbackError("feedback sidecar exceeds the configured size limit")
             self.verify_current()
+            after = self.child_identity(name)
+            if after != expected:
+                raise FeedbackError("feedback child identity changed while being read")
+            if require_single_link and self._child_stat(name).st_nlink != 1:
+                raise FeedbackError("feedback child must have one filesystem link")
             return raw
         finally:
             os.close(descriptor)

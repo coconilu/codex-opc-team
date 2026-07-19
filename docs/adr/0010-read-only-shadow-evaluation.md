@@ -17,6 +17,12 @@ ADR-0009/#5 的结构化反馈可以作为输入，但必须保留 confirmed out
 
 默认 `preview` 零写入；`evaluate` 只有在 exact preview fingerprint 被确认后，才可向用户明确选择的私有派生数据根创建不可覆盖的 JSON/Markdown。该根不得与公开插件、canonical knowledge 或项目源码重叠。读取和写入有大小上限、敏感值拒绝、symlink/reparse/hard-link 与父目录 identity 门禁，错误不回显匹配内容。
 
+v1 对每个 ratio component、安全计数、context token 和 latency 都规定显式数值上限，并分别规定最多 20 个 case 的聚合上限。Schema、runtime 与仓库 validator 共享这些常量；整数在检查上限前不得转换为浮点数，聚合加法与中位数也必须 fail closed。越界、非有限值或算术异常统一成为脱敏 `OPC_SHADOW_ERROR`，不能产生 traceback 或部分产物。
+
+机器结果不是可任意编辑后重渲染的展示缓存。Result Schema 的每个嵌套对象都必须 strict；runtime 在序列化与 `report` 渲染前重新核对当前 Shadow contract hash、#4 baseline hash、preflight/status/measurement/evidence/confidence/failure/governance 跨字段不变量。正向建议必须由通过的 preflight、零 failure、质量或安全指标的 measured support 与全部为 `false` 的写权限共同证明。
+
+所有用户提供的 replay、result、knowledge/project root 与 artifact root 都在 `resolve` 前逐级检查现存祖先，拒绝 symlink、junction 或其他 reparse point；8.3 等指向同一普通目录对象的 Windows 路径别名不因此被拒绝。replay、result、canonical candidate 与最终 artifact 必须各自只有一个 filesystem link。读取绑定输入父目录对象并复核文件 identity；artifact root 必须由用户预先创建，assert 与 publish 绑定同一目录 identity，整个发布和回滚都在同一目录 handle 内完成。
+
 Shadow Evaluation 不提供候选状态变更、canonical 写入、Git 写入、Provider 索引或自动晋升能力。即使建议为 beneficial，经理/curator 仍必须独立 preview 和批准 canonical transition，提交 exact blob，再对可选 reindex 单独 preview 和批准。
 
 ## Consequences
@@ -24,6 +30,7 @@ Shadow Evaluation 不提供候选状态变更、canonical 写入、Git 写入、
 - 有益、中性、有害、冲突和降级结果可比较且可追溯，不把 persuasive prose 当事实。
 - 私有 pilot 可以复用结构化反馈，但真实输入和逐项报告不会进入公开仓库或组织知识。
 - exact HEAD 门禁意味着未提交候选不能参与正式 shadow replay；需要先以候选状态提交到私人知识 Git。
+- 预先创建 artifact root 增加一个显式准备步骤，但消除了检查后跟随新建路径或目录替换的歧义。
 - 小样本 Shadow Evaluation 只能提供策展证据，不能证明统计普适性或替代经理判断。
 
 ## Rejected Alternatives
