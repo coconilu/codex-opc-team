@@ -10,7 +10,6 @@ private gates.
 from __future__ import annotations
 
 import argparse
-import errno
 import hashlib
 import json
 import os
@@ -205,6 +204,14 @@ def _load_contract() -> tuple[dict[str, Any], bytes]:
         )
     ) or claims.get("required_qualifier") != "association/evidence only":
         raise ReleaseEvidenceError("release non-claim boundary drifted")
+    output = (contract.get("private_pilot") or {}).get("verdict_output") or {}
+    if output != {
+        "windows": "optional --output inside the approved private root",
+        "posix": "stdout-only; --output is unsupported",
+        "stdout_capture": "caller-managed inside an approved private boundary only",
+        "public_repository_capture": "forbidden",
+    }:
+        raise ReleaseEvidenceError("private verdict output boundary drifted")
     return contract, raw
 
 
@@ -590,9 +597,6 @@ def _private_input_bytes(
 
 
 def _write_all_and_verify(descriptor: int, raw: bytes) -> os.stat_result:
-    expected_links = int(getattr(os.fstat(descriptor), "st_nlink", 1))
-    if expected_links not in {0, 1}:
-        raise ReleaseEvidenceError("private verdict output link count is invalid")
     view = memoryview(raw)
     while view:
         written = os.write(descriptor, view)
@@ -610,232 +614,12 @@ def _write_all_and_verify(descriptor: int, raw: bytes) -> os.stat_result:
         verified += chunk
     if (
         not stat.S_ISREG(info.st_mode)
-        or getattr(info, "st_nlink", 1) != expected_links
+        or getattr(info, "st_nlink", 1) != 1
         or info.st_size != len(raw)
         or verified != raw
     ):
         raise ReleaseEvidenceError("private verdict output verification failed")
     return info
-
-
-def _posix_publish_unnamed(
-    descriptor: int,
-    parent_fd: int,
-    name: str,
-) -> None:
-    import ctypes
-
-    if not sys.platform.startswith("linux"):
-        raise ReleaseEvidenceError(
-            "unnamed private verdict publication requires Linux O_TMPFILE"
-        )
-    library = ctypes.CDLL(None, use_errno=True)
-    link = getattr(library, "linkat", None)
-    if link is None:
-        raise ReleaseEvidenceError(
-            "atomic private verdict publication is unavailable"
-        )
-    link.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-    ]
-    link.restype = ctypes.c_int
-    encoded_name = os.fsencode(name)
-    if link(descriptor, b"", parent_fd, encoded_name, 0x1000) == 0:
-        return
-    error = ctypes.get_errno()
-    if error in {errno.ENOENT, errno.EPERM}:
-        proc_fd = os.fsencode(f"/proc/self/fd/{descriptor}")
-        if link(-100, proc_fd, parent_fd, encoded_name, 0x400) == 0:
-            return
-        error = ctypes.get_errno()
-    raise OSError(error, os.strerror(error))
-
-
-def _open_posix_unnamed_output(parent_fd: int) -> int:
-    temporary = getattr(os, "O_TMPFILE", 0)
-    if not sys.platform.startswith("linux") or not temporary:
-        raise ReleaseEvidenceError(
-            "unnamed private verdict publication requires Linux O_TMPFILE"
-        )
-    flags = os.O_RDWR | temporary | getattr(os, "O_CLOEXEC", 0)
-    try:
-        return os.open(".", flags, 0o600, dir_fd=parent_fd)
-    except OSError as exc:
-        raise ReleaseEvidenceError(
-            "private verdict filesystem does not support unnamed publication"
-        ) from exc
-
-
-def _posix_verdict_chain_is_bound(
-    root: Path,
-    resolved_root: Path,
-    root_tokens: tuple[tuple[int, int], ...],
-    ancestor_paths: Sequence[Path],
-    ancestor_fds: Sequence[int],
-    relative: Path,
-    parent_tokens: tuple[tuple[int, int], ...],
-    directory_fds: Sequence[int],
-) -> None:
-    try:
-        _assert_private_root_binding(root, resolved_root, root_tokens)
-    except ReleaseEvidenceError as exc:
-        raise ReleaseEvidenceError(
-            "private verdict output boundary changed during write"
-        ) from exc
-    for index, fd in enumerate(ancestor_fds):
-        current = os.fstat(fd)
-        if (
-            not stat.S_ISDIR(current.st_mode)
-            or _file_identity(current) != root_tokens[index]
-        ):
-            raise ReleaseEvidenceError(
-                "private verdict output boundary changed during write"
-            )
-        if index:
-            try:
-                linked = os.stat(
-                    ancestor_paths[index].name,
-                    dir_fd=ancestor_fds[index - 1],
-                    follow_symlinks=False,
-                )
-            except OSError as exc:
-                raise ReleaseEvidenceError(
-                    "private verdict output boundary changed during write"
-                ) from exc
-            if (
-                not stat.S_ISDIR(linked.st_mode)
-                or _is_reparse(linked)
-                or _file_identity(linked) != _file_identity(current)
-            ):
-                raise ReleaseEvidenceError(
-                    "private verdict output boundary changed during write"
-                )
-    for index, fd in enumerate(directory_fds):
-        current = os.fstat(fd)
-        if (
-            not stat.S_ISDIR(current.st_mode)
-            or _file_identity(current) != parent_tokens[index]
-        ):
-            raise ReleaseEvidenceError(
-                "private verdict output boundary changed during write"
-            )
-        if index:
-            try:
-                linked = os.stat(
-                    relative.parts[index - 1],
-                    dir_fd=directory_fds[index - 1],
-                    follow_symlinks=False,
-                )
-            except OSError as exc:
-                raise ReleaseEvidenceError(
-                    "private verdict output boundary changed during write"
-                ) from exc
-            if (
-                not stat.S_ISDIR(linked.st_mode)
-                or _file_identity(linked) != _file_identity(current)
-            ):
-                raise ReleaseEvidenceError(
-                    "private verdict output boundary changed during write"
-                )
-
-
-def _write_private_output_posix(
-    root: Path,
-    resolved_root: Path,
-    relative: Path,
-    raw: bytes,
-    root_tokens: tuple[tuple[int, int], ...],
-    parent_tokens: tuple[tuple[int, int], ...],
-    pre_publish: Callable[[], None] | None,
-) -> None:
-    directory_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    ancestor_paths = _absolute_directory_chain(root)
-    opened_fds: list[int] = []
-    ancestor_fds: list[int] = []
-    directory_fds: list[int] = []
-    descriptor = -1
-    parent_fd = -1
-    try:
-        for index, path in enumerate(ancestor_paths):
-            ancestor_fd = os.open(path, directory_flags)
-            opened_fds.append(ancestor_fd)
-            ancestor_fds.append(ancestor_fd)
-            current = os.fstat(ancestor_fd)
-            if _file_identity(current) != root_tokens[index]:
-                raise ReleaseEvidenceError("private root changed before binding")
-            if index:
-                linked = os.stat(
-                    path.name,
-                    dir_fd=ancestor_fds[index - 1],
-                    follow_symlinks=False,
-                )
-                if (
-                    not stat.S_ISDIR(linked.st_mode)
-                    or _is_reparse(linked)
-                    or _file_identity(linked) != _file_identity(current)
-                ):
-                    raise ReleaseEvidenceError("private root ancestor changed before binding")
-        directory_fds.append(ancestor_fds[-1])
-        if _file_identity(os.fstat(directory_fds[0])) != parent_tokens[0]:
-            raise ReleaseEvidenceError("private verdict root changed before binding")
-        for index, part in enumerate(relative.parts[:-1], start=1):
-            child_fd = os.open(part, directory_flags, dir_fd=directory_fds[-1])
-            opened_fds.append(child_fd)
-            directory_fds.append(child_fd)
-            if _file_identity(os.fstat(child_fd)) != parent_tokens[index]:
-                raise ReleaseEvidenceError("private verdict parent changed before binding")
-        _assert_private_root_binding(root, resolved_root, root_tokens)
-        parent_fd = directory_fds[-1]
-        descriptor = _open_posix_unnamed_output(parent_fd)
-        _write_all_and_verify(descriptor, raw)
-        _posix_verdict_chain_is_bound(
-            root,
-            resolved_root,
-            root_tokens,
-            ancestor_paths,
-            ancestor_fds,
-            relative,
-            parent_tokens,
-            directory_fds,
-        )
-        if pre_publish is not None:
-            pre_publish()
-        _posix_verdict_chain_is_bound(
-            root,
-            resolved_root,
-            root_tokens,
-            ancestor_paths,
-            ancestor_fds,
-            relative,
-            parent_tokens,
-            directory_fds,
-        )
-        try:
-            _posix_publish_unnamed(descriptor, parent_fd, relative.name)
-        except FileExistsError as exc:
-            raise ReleaseEvidenceError(
-                "private verdict output already exists; choose a new path"
-            ) from exc
-    finally:
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        for fd in reversed(opened_fds):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
 
 
 def _write_private_output_windows(
@@ -959,6 +743,11 @@ def _write_private_output(
     *,
     pre_publish: Callable[[], None] | None = None,
 ) -> None:
+    if os.name != "nt":
+        raise ReleaseEvidenceError(
+            "POSIX private verdict output is unsupported; omit --output and capture stdout "
+            "only within an approved private boundary"
+        )
     root_absolute, resolved_root, root_tokens = _canonical_private_root(root)
     absolute = Path(os.path.abspath(path))
     try:
@@ -975,26 +764,15 @@ def _write_private_output(
         raise ReleaseEvidenceError("private verdict parent must already exist") from exc
     raw = _json_bytes(value)
     try:
-        if os.name == "nt":
-            _write_private_output_windows(
-                root_absolute,
-                resolved_root,
-                absolute,
-                relative,
-                raw,
-                root_tokens,
-                pre_publish,
-            )
-        else:
-            _write_private_output_posix(
-                root_absolute,
-                resolved_root,
-                relative,
-                raw,
-                root_tokens,
-                parent_tokens,
-                pre_publish,
-            )
+        _write_private_output_windows(
+            root_absolute,
+            resolved_root,
+            absolute,
+            relative,
+            raw,
+            root_tokens,
+            pre_publish,
+        )
     except BaseException as exc:
         if isinstance(exc, ReleaseEvidenceError):
             raise
@@ -1435,12 +1213,20 @@ def _parser() -> argparse.ArgumentParser:
     private = commands.add_parser("private-pilot")
     private.add_argument("--private-root", type=Path, required=True)
     private.add_argument("--summary", type=Path, required=True)
-    private.add_argument("--output", type=Path)
+    private.add_argument(
+        "--output",
+        type=Path,
+        help="Windows only: write the verdict inside the approved private root; POSIX is stdout-only",
+    )
     release = commands.add_parser("release")
     release.add_argument("--private-root", type=Path, required=True)
     release.add_argument("--summary", type=Path, required=True)
     release.add_argument("--gates", type=Path, required=True)
-    release.add_argument("--output", type=Path)
+    release.add_argument(
+        "--output",
+        type=Path,
+        help="Windows only: write the verdict inside the approved private root; POSIX is stdout-only",
+    )
     return parser
 
 

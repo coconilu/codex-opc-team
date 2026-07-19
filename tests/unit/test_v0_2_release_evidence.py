@@ -3,11 +3,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -171,6 +173,53 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
         self.assertTrue(all(value in {"improved", "equal"} for value in verdict["quality_comparison"].values()))
         self.assertIn("improved", verdict["quality_comparison"].values())
 
+    def test_private_pilot_cli_emits_verdict_to_stdout_without_output(self) -> None:
+        summary, _ = self.write_pilot()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = release.main(
+                [
+                    "private-pilot",
+                    "--private-root",
+                    str(self.private),
+                    "--summary",
+                    str(summary),
+                ]
+            )
+        self.assertEqual(0, code)
+        self.assertEqual("pass", json.loads(stdout.getvalue())["private_pilot_status"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX stdout-only contract")
+    def test_private_pilot_cli_rejects_output_and_help_declares_boundary(self) -> None:
+        summary, _ = self.write_pilot()
+        output = self.private / "evidence" / "cli-verdict.json"
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = release.main(
+                [
+                    "private-pilot",
+                    "--private-root",
+                    str(self.private),
+                    "--summary",
+                    str(summary),
+                    "--output",
+                    str(output),
+                ]
+            )
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("POSIX private verdict output is unsupported", stderr.getvalue())
+        self.assertFalse(output.exists())
+
+        parser = release._parser()
+        subparsers = next(
+            action for action in parser._actions if hasattr(action, "choices") and action.choices
+        )
+        for command in ("private-pilot", "release"):
+            help_text = subparsers.choices[command].format_help()
+            self.assertIn("Windows only", help_text)
+            self.assertIn("POSIX is stdout-only", help_text)
+
     def test_public_template_and_quality_regression_fail_closed(self) -> None:
         private_template = self.private / ".opc" / "release-evidence" / "template.json"
         private_template.write_bytes(
@@ -240,6 +289,18 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
 
     def test_private_verdict_output_cannot_escape_or_overwrite(self) -> None:
         value = {"private_pilot_status": "pass"}
+        if os.name != "nt":
+            for output in (
+                Path(self.temporary.name) / "outside.json",
+                self.private / "evidence" / "verdict.json",
+            ):
+                with self.assertRaisesRegex(
+                    release.ReleaseEvidenceError,
+                    "POSIX private verdict output is unsupported",
+                ):
+                    release._write_private_output(self.private, output, value)
+                self.assertFalse(output.exists())
+            return
         with self.assertRaisesRegex(release.ReleaseEvidenceError, "inside the private root"):
             release._write_private_output(
                 self.private, Path(self.temporary.name) / "outside.json", value
@@ -356,31 +417,6 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
                 release._canonical_private_root(junction / self.private.name)
 
     @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
-    def test_posix_output_removes_owned_file_if_bound_parent_moves_outside(self) -> None:
-        output = self.private / "evidence" / "race-verdict.json"
-        escaped_parent = self.temporary_canonical / "escaped-evidence"
-        original = release._write_all_and_verify
-        fd_root = Path("/proc/self/fd")
-        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
-
-        def race(descriptor, raw):
-            (self.private / "evidence").rename(escaped_parent)
-            return original(descriptor, raw)
-
-        with mock.patch.object(release, "_write_all_and_verify", side_effect=race):
-            with self.assertRaisesRegex(
-                release.ReleaseEvidenceError, "boundary changed|missing"
-            ):
-                release._write_private_output(
-                    self.private, output, {"private_pilot_status": "pass"}
-                )
-        self.assertFalse(output.exists())
-        self.assertFalse((escaped_parent / output.name).exists())
-        escaped_parent.rename(self.private / "evidence")
-        if before_fds is not None:
-            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
-
-    @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
     def test_posix_private_read_rejects_ancestor_move_during_read(self) -> None:
         container = self.temporary_canonical / "read-container"
         private = container / "private"
@@ -407,172 +443,46 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
                 )
         escaped.rename(container)
 
-    @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
-    def test_posix_private_write_rejects_ancestor_move_and_cleans_owned_output(self) -> None:
-        container = self.temporary_canonical / "write-container"
-        private = container / "private"
-        output = private / "evidence" / "ancestor-race-verdict.json"
-        output.parent.mkdir(parents=True)
-        escaped = self.temporary_canonical / "escaped-write-container"
-        original = release._write_all_and_verify
+    @unittest.skipIf(os.name == "nt", "POSIX stdout-only contract")
+    def test_posix_output_rejects_before_write_or_publish_callback(self) -> None:
+        output = self.private / "evidence" / "unsupported-verdict.json"
+        before = set(output.parent.iterdir())
         fd_root = Path("/proc/self/fd")
         before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
+        callback = mock.Mock()
 
-        def race(descriptor, raw):
-            container.rename(escaped)
-            return original(descriptor, raw)
-
-        with mock.patch.object(release, "_write_all_and_verify", side_effect=race):
+        with mock.patch.object(release, "_write_all_and_verify") as write:
             with self.assertRaisesRegex(
-                release.ReleaseEvidenceError, "boundary changed"
+                release.ReleaseEvidenceError, "POSIX private verdict output is unsupported"
             ):
                 release._write_private_output(
-                    private, output, {"private_pilot_status": "pass"}
+                    self.private,
+                    output,
+                    {"private_pilot_status": "pass"},
+                    pre_publish=callback,
                 )
+
+        write.assert_not_called()
+        callback.assert_not_called()
+        self.assertEqual(before, set(output.parent.iterdir()))
         self.assertFalse(output.exists())
-        self.assertFalse(
-            (escaped / "private" / "evidence" / output.name).exists()
-        )
-        escaped.rename(container)
         if before_fds is not None:
             self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
 
-    @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
-    def test_posix_output_rejects_whole_root_move_and_removes_escaped_owned_file(self) -> None:
-        output = self.private / "evidence" / "root-race-verdict.json"
-        escaped_root = self.temporary_canonical / "escaped-private"
-        original = release._write_all_and_verify
-        fd_root = Path("/proc/self/fd")
-        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
-
-        def race(descriptor, raw):
-            self.private.rename(escaped_root)
-            return original(descriptor, raw)
-
-        with mock.patch.object(release, "_write_all_and_verify", side_effect=race):
-            with self.assertRaisesRegex(
-                release.ReleaseEvidenceError, "boundary changed"
-            ):
-                release._write_private_output(
-                    self.private, output, {"private_pilot_status": "pass"}
-                )
-        self.assertFalse(output.exists())
-        self.assertFalse((escaped_root / "evidence" / output.name).exists())
-        escaped_root.rename(self.private)
-        if before_fds is not None:
-            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
-
-    @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
-    def test_posix_unnamed_publish_collision_preserves_competitor(self) -> None:
+    @unittest.skipIf(os.name == "nt", "POSIX stdout-only contract")
+    def test_posix_output_rejection_preserves_existing_file(self) -> None:
         output = self.private / "evidence" / "competitor-verdict.json"
         competitor = b"competitor-owned\n"
-        original = release._write_all_and_verify
-        fd_root = Path("/proc/self/fd")
-        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
+        output.write_bytes(competitor)
 
-        def race(descriptor, raw):
-            output.write_bytes(competitor)
-            return original(descriptor, raw)
-
-        with mock.patch.object(release, "_write_all_and_verify", side_effect=race):
-            with self.assertRaisesRegex(
-                release.ReleaseEvidenceError, "already exists"
-            ):
-                release._write_private_output(
-                    self.private, output, {"private_pilot_status": "pass"}
-                )
-        self.assertEqual(competitor, output.read_bytes())
-        if before_fds is not None:
-            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
-
-    @unittest.skipIf(os.name == "nt", "POSIX unnamed inode publication only")
-    def test_posix_unnamed_write_failure_leaves_no_directory_entry(self) -> None:
-        output = self.private / "evidence" / "unnamed-failure-verdict.json"
-        original = release._write_all_and_verify
-        fd_root = Path("/proc/self/fd")
-        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
-
-        def fail_after_write(descriptor, raw):
-            original(descriptor, raw)
-            raise release.ReleaseEvidenceError("simulated pre-publication failure")
-
-        with mock.patch.object(
-            release, "_write_all_and_verify", side_effect=fail_after_write
+        with self.assertRaisesRegex(
+            release.ReleaseEvidenceError, "POSIX private verdict output is unsupported"
         ):
-            with self.assertRaisesRegex(
-                release.ReleaseEvidenceError, "pre-publication failure"
-            ):
-                release._write_private_output(
-                    self.private, output, {"private_pilot_status": "pass"}
-                )
-        self.assertFalse(output.exists())
-        self.assertEqual([], list(output.parent.iterdir()))
-        if before_fds is not None:
-            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
-
-    @unittest.skipIf(os.name == "nt", "POSIX unnamed inode publication only")
-    def test_posix_unnamed_link_failure_leaves_no_directory_entry(self) -> None:
-        output = self.private / "evidence" / "link-failure-verdict.json"
-        with mock.patch.object(
-            release,
-            "_posix_publish_unnamed",
-            side_effect=OSError("simulated link failure"),
-        ):
-            with self.assertRaisesRegex(
-                release.ReleaseEvidenceError, "could not be published safely"
-            ):
-                release._write_private_output(
-                    self.private, output, {"private_pilot_status": "pass"}
-                )
-        self.assertFalse(output.exists())
-        self.assertEqual([], list(output.parent.iterdir()))
-
-    @unittest.skipIf(os.name == "nt", "POSIX unnamed inode publication only")
-    def test_posix_pre_publish_collision_is_no_overwrite_and_releases_fds(self) -> None:
-        output = self.private / "evidence" / "pre-publish-collision.json"
-        competitor = b"pre-publish-competitor\n"
-        fd_root = Path("/proc/self/fd")
-        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
-
-        def create_competitor() -> None:
-            output.write_bytes(competitor)
-
-        with self.assertRaisesRegex(release.ReleaseEvidenceError, "already exists"):
             release._write_private_output(
-                self.private,
-                output,
-                {"private_pilot_status": "pass"},
-                pre_publish=create_competitor,
+                self.private, output, {"private_pilot_status": "pass"}
             )
+
         self.assertEqual(competitor, output.read_bytes())
-        if before_fds is not None:
-            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
-
-    @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
-    def test_posix_output_closes_anchor_if_root_open_fails(self) -> None:
-        output = self.private / "evidence" / "open-failure-verdict.json"
-        original = release.os.open
-        calls = 0
-        fd_root = Path("/proc/self/fd")
-        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
-
-        def fail_root_open(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise OSError("simulated root open failure")
-            return original(*args, **kwargs)
-
-        with mock.patch.object(release.os, "open", side_effect=fail_root_open):
-            with self.assertRaisesRegex(
-                release.ReleaseEvidenceError, "could not be published safely"
-            ):
-                release._write_private_output(
-                    self.private, output, {"private_pilot_status": "pass"}
-                )
-        self.assertFalse(output.exists())
-        if before_fds is not None:
-            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
 
     @unittest.skipUnless(os.name == "nt", "Windows directory handle locking only")
     def test_windows_output_holds_parent_chain_and_releases_every_handle(self) -> None:

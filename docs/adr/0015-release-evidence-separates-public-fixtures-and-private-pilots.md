@@ -46,3 +46,9 @@ flowchart LR
 - **只保存 CI URL 或任意日志 Hash：** 没有 typed subject/decision 绑定，旧证据可被错配。
 - **仅凭一项 token、latency 或 manager intervention 改善发布：** 可能掩盖质量或安全回退。
 - **让 runner 自动 stage、commit、tag 或发布：** 超出证据验证职责，并破坏显式经理授权边界。
+
+## POSIX verdict output boundary
+
+Private verdict path output is supported only on Windows, where the runner binds native directory handles across the approved private-root chain and publishes with no-overwrite semantics. On POSIX, `private-pilot` and `release` remain fully usable for validation but are stdout-only: supplying `--output` fails before any directory entry is created. A caller may capture stdout only into an approved private boundary; capture into this public repository or a public CI artifact is forbidden.
+
+This boundary is intentional. Linux does not provide one primitive that both links a prevalidated anonymous inode and applies constrained no-symlink target resolution (`RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS`) atomically. Combining `openat2` validation with `linkat`, or validating after publication, reintroduces a rename race and would require forbidden best-effort cleanup. The runner therefore rejects POSIX path publication instead of claiming safety it cannot prove.

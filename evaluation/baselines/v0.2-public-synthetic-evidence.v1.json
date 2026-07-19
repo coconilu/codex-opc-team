@@ -1,7 +1,7 @@
 {
   "schema_version": "opc-v0.2-public-release-evidence-v1",
   "contract_version": "opc-v0.2-release-contract-v1",
-  "contract_sha256": "c716a11790a1f9f7e83b1b299ed0b63f787a9151a72b44cf5e6216e682d59479",
+  "contract_sha256": "ccfbb49b0c647df7645d263a48137c9a08357694ade6228b9c090f511f9412af",
   "mode": "public-synthetic",
   "delivery_artifacts": [
     {

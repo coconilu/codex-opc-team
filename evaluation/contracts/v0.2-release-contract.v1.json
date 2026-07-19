@@ -49,7 +49,13 @@
       "capability_evolution"
     ],
     "raw_data_boundary": "approved-private-project-only",
-    "public_export": "none"
+    "public_export": "none",
+    "verdict_output": {
+      "windows": "optional --output inside the approved private root",
+      "posix": "stdout-only; --output is unsupported",
+      "stdout_capture": "caller-managed inside an approved private boundary only",
+      "public_repository_capture": "forbidden"
+    }
   },
   "release_gates": [
     "public_synthetic_evidence_pass",
