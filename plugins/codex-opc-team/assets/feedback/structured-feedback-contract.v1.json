@@ -1,0 +1,49 @@
+{
+  "contract_version": "opc-structured-feedback-contract-v1",
+  "schema_version": "opc-structured-feedback-v1",
+  "storage": {
+    "boundary": "private-project-runtime",
+    "relative_path": ".opc/feedback/<run_id>.json",
+    "canonical_knowledge": false,
+    "public_repository_data": false,
+    "raw_chat_or_hook_payload": false
+  },
+  "evidence_classes": [
+    "confirmed_outcome",
+    "manager_judgment",
+    "independent_qa_evidence",
+    "hypothesis",
+    "unverified"
+  ],
+  "outcome_statuses": ["pass", "fail", "partial", "unknown", "not_applicable"],
+  "manager_judgments": ["accepted", "changes_requested", "mixed", "neutral", "unknown", "not_applicable"],
+  "qa_statuses": ["pass", "fail", "partial", "unknown", "not_applicable"],
+  "metric_contract": "opc-evaluation-contract-v1",
+  "metric_ids": [
+    "manager_intervention_rate",
+    "qa_catch_rate",
+    "rework_loops_per_task",
+    "valid_knowledge_reuse_rate",
+    "false_recall_rate",
+    "scope_leakage_acceptances",
+    "stale_obsolete_acceptances",
+    "context_tokens_per_task",
+    "latency_ms"
+  ],
+  "update_policy": {
+    "events_are_immutable": true,
+    "event_id_replay_is_idempotent_only_for_identical_content": true,
+    "expected_revision_is_required": true,
+    "stale_or_concurrent_updates_fail_closed": true,
+    "unsupported_versions_require_explicit_migration": true,
+    "absent_feedback_means_not_recorded": true
+  },
+  "forbidden_side_effects": [
+    "candidate_approval",
+    "git_commit",
+    "indexing",
+    "publishing",
+    "payment",
+    "external_communication"
+  ]
+}

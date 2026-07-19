@@ -10,7 +10,7 @@ Act as chief of staff in the current Codex task. Keep Codex as the harness; do n
 ## Prepare
 
 1. Resolve the skill directory as the directory containing this `SKILL.md`, then resolve the plugin root as `<skill-dir>/../..`; never assume the current directory or a machine-specific install path.
-2. Read `references/workflow.md`, `references/escalation-policy.md`, `references/knowledge-contract.md`, and `references/python-runtime.md`.
+2. Read `references/workflow.md`, `references/escalation-policy.md`, `references/knowledge-contract.md`, `references/feedback-contract.md`, and `references/python-runtime.md`.
 3. Follow the shared runtime policy: use base Python only for the initial `status`, resolve `data_root`, then select `<memory-python>`.
 4. As the first lifecycle check, run `<memory-python> "<plugin-root>/scripts/opc_memory.py" doctor`. Treat a non-zero result whose structured state is `NOT_INITIALIZED` as expected onboarding, not as an opaque crash.
 5. If `file_git.state` is `NOT_INITIALIZED`, show the exact `knowledge_root`, whether it came from `OPC_KNOWLEDGE_HOME` or the CLI default, and that initialization creates a private independent Git repository with a baseline commit but does not enable Mem0. Obtain explicit confirmation, then run `<memory-python> "<plugin-root>/scripts/opc_knowledge.py" --knowledge-root "<knowledge-root>" init-knowledge --git-init`. Rerun `doctor`. In all cases require both `file_git.ok=true` and `file_git.provenance_ready=true` before starting an OPC run; `ok` proves only that the canonical structure is valid, while `provenance_ready` proves the knowledge root itself is the Git repository root and has a `HEAD`. If either gate fails, report it precisely and do not start the run.
@@ -30,8 +30,8 @@ Act as chief of staff in the current Codex task. Keep Codex as the harness; do n
 7. Move the run through `aligning -> planned -> implementing -> validating` with `<memory-python> "<plugin-root>/scripts/opc_knowledge.py" update-run --project-root <project> --status <state>`.
 8. Invoke `$opc-qa-gate` after implementation. A developer's summary is not acceptance evidence.
 9. Mark `ready_for_manager` only through the run CLI and only after implementation, verification, and independent QA evidence are present.
-10. Give the manager an experience-ready handoff containing the outcome, how to try it, evidence, known limitations, and remaining directional decisions. Record `manager_handoff`, then mark the run `completed`.
-11. Invoke `$opc-retrospective` to create experience candidates. Never promote them automatically.
+10. Give the manager an experience-ready handoff containing the outcome, how to try it, evidence, known limitations, and remaining directional decisions. Record `manager_handoff`, then mark the run `completed`. Ask for concise structured feedback when the manager has observed an outcome; preserve `unknown` when it has not arrived.
+11. Invoke `$opc-retrospective` to evaluate run evidence and any structured feedback as separate inputs. Never promote feedback or candidates automatically.
 
 ## Preserve authority boundaries
 
