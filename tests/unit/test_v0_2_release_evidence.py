@@ -486,6 +486,119 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
         if before_fds is not None:
             self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
 
+    @unittest.skipIf(os.name == "nt", "POSIX atomic quarantine cleanup only")
+    def test_posix_cleanup_does_not_delete_replacement_after_atomic_claim(self) -> None:
+        output = self.private / "evidence" / "claim-window-verdict.json"
+        competitor = b"replacement-after-claim\n"
+        original_write = release._write_all_and_verify
+        original_rename = release._posix_rename_noreplace
+
+        def fail_after_write(descriptor, raw):
+            original_write(descriptor, raw)
+            raise release.ReleaseEvidenceError("simulated publish failure")
+
+        def replace_original_after_claim(source, target, parent_fd):
+            original_rename(source, target, parent_fd)
+            if source == output.name and target.startswith(".opc-verdict-cleanup-"):
+                output.write_bytes(competitor)
+
+        with (
+            mock.patch.object(
+                release, "_write_all_and_verify", side_effect=fail_after_write
+            ),
+            mock.patch.object(
+                release,
+                "_posix_rename_noreplace",
+                side_effect=replace_original_after_claim,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "simulated publish failure"
+            ):
+                release._write_private_output(
+                    self.private, output, {"private_pilot_status": "pass"}
+                )
+        self.assertEqual(competitor, output.read_bytes())
+        self.assertEqual([], list(output.parent.glob(".opc-verdict-cleanup-*")))
+
+    @unittest.skipIf(os.name == "nt", "POSIX atomic quarantine cleanup only")
+    def test_posix_cleanup_retries_quarantine_collision_without_overwrite(self) -> None:
+        output = self.private / "evidence" / "collision-verdict.json"
+        collision_name = ".opc-verdict-cleanup-collision"
+        collision = output.parent / collision_name
+        collision_bytes = b"preexisting-quarantine\n"
+        collision.write_bytes(collision_bytes)
+        original = release._write_all_and_verify
+
+        def fail_after_write(descriptor, raw):
+            original(descriptor, raw)
+            raise release.ReleaseEvidenceError("simulated publish failure")
+
+        with (
+            mock.patch.object(
+                release, "_write_all_and_verify", side_effect=fail_after_write
+            ),
+            mock.patch.object(
+                release,
+                "_posix_cleanup_name",
+                side_effect=[collision_name, ".opc-verdict-cleanup-unused"],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "simulated publish failure"
+            ):
+                release._write_private_output(
+                    self.private, output, {"private_pilot_status": "pass"}
+                )
+        self.assertFalse(output.exists())
+        self.assertEqual(collision_bytes, collision.read_bytes())
+        self.assertFalse((output.parent / ".opc-verdict-cleanup-unused").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX atomic quarantine cleanup only")
+    def test_posix_cleanup_preserves_both_entries_on_restoration_conflict(self) -> None:
+        output = self.private / "evidence" / "restore-conflict-verdict.json"
+        first_competitor = b"first-competitor\n"
+        second_competitor = b"second-competitor\n"
+        original_write = release._write_all_and_verify
+        original_rename = release._posix_rename_noreplace
+        fd_root = Path("/proc/self/fd")
+        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
+
+        def replace_owned_before_failure(descriptor, raw):
+            output.unlink()
+            output.write_bytes(first_competitor)
+            return original_write(descriptor, raw)
+
+        def conflict_after_claim(source, target, parent_fd):
+            original_rename(source, target, parent_fd)
+            if source == output.name and target.startswith(".opc-verdict-cleanup-"):
+                output.write_bytes(second_competitor)
+
+        with (
+            mock.patch.object(
+                release,
+                "_write_all_and_verify",
+                side_effect=replace_owned_before_failure,
+            ),
+            mock.patch.object(
+                release,
+                "_posix_rename_noreplace",
+                side_effect=conflict_after_claim,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "restoration conflicted"
+            ):
+                release._write_private_output(
+                    self.private, output, {"private_pilot_status": "pass"}
+                )
+        self.assertEqual(second_competitor, output.read_bytes())
+        quarantines = list(output.parent.glob(".opc-verdict-cleanup-*"))
+        self.assertEqual(1, len(quarantines))
+        self.assertEqual(first_competitor, quarantines[0].read_bytes())
+        if before_fds is not None:
+            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
+
     @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
     def test_posix_output_closes_anchor_if_root_open_fails(self) -> None:
         output = self.private / "evidence" / "open-failure-verdict.json"

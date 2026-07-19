@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -614,6 +615,94 @@ def _write_all_and_verify(descriptor: int, raw: bytes) -> os.stat_result:
     return info
 
 
+def _posix_cleanup_name() -> str:
+    return f".opc-verdict-cleanup-{secrets.token_hex(16)}"
+
+
+def _posix_rename_noreplace(source: str, target: str, parent_fd: int) -> None:
+    import ctypes
+
+    encoded_source = os.fsencode(source)
+    encoded_target = os.fsencode(target)
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        rename = getattr(library, "renameat2", None)
+        flag = 1  # RENAME_NOREPLACE
+    elif sys.platform == "darwin":
+        rename = getattr(library, "renameatx_np", None)
+        flag = 0x00000004  # RENAME_EXCL
+    else:
+        rename = None
+        flag = 0
+    if rename is None:
+        raise ReleaseEvidenceError(
+            "atomic private verdict cleanup is unavailable on this platform"
+        )
+    rename.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    rename.restype = ctypes.c_int
+    if rename(parent_fd, encoded_source, parent_fd, encoded_target, flag) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def _cleanup_private_output_posix(
+    parent_fd: int,
+    name: str,
+    created_identity: tuple[int, int],
+) -> None:
+    quarantine: str | None = None
+    for _ in range(8):
+        candidate = _posix_cleanup_name()
+        try:
+            _posix_rename_noreplace(name, candidate, parent_fd)
+        except FileExistsError:
+            continue
+        except FileNotFoundError:
+            return
+        quarantine = candidate
+        break
+    if quarantine is None:
+        raise ReleaseEvidenceError(
+            "private verdict cleanup quarantine names are unavailable"
+        )
+
+    try:
+        claimed = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise ReleaseEvidenceError(
+            "private verdict cleanup quarantine changed after claim"
+        ) from exc
+    if stat.S_ISREG(claimed.st_mode) and _file_identity(claimed) == created_identity:
+        try:
+            current = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or _file_identity(current) != created_identity
+            ):
+                raise ReleaseEvidenceError(
+                    "private verdict cleanup quarantine ownership changed"
+                )
+            os.unlink(quarantine, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ReleaseEvidenceError(
+                "owned private verdict quarantine could not be removed"
+            ) from exc
+        return
+
+    try:
+        _posix_rename_noreplace(quarantine, name, parent_fd)
+    except OSError as exc:
+        raise ReleaseEvidenceError(
+            "private verdict competitor restoration conflicted; quarantine preserved"
+        ) from exc
+
+
 def _write_private_output_posix(
     root: Path,
     resolved_root: Path,
@@ -736,22 +825,17 @@ def _write_private_output_posix(
             raise ReleaseEvidenceError("private verdict output boundary changed during write")
         os.close(descriptor)
         descriptor = -1
-    except BaseException:
+    except BaseException as write_error:
         if descriptor >= 0:
             os.close(descriptor)
             descriptor = -1
         if created and created_identity is not None and parent_fd >= 0:
             try:
-                current = os.stat(
-                    relative.name, dir_fd=parent_fd, follow_symlinks=False
+                _cleanup_private_output_posix(
+                    parent_fd, relative.name, created_identity
                 )
-                if (
-                    stat.S_ISREG(current.st_mode)
-                    and _file_identity(current) == created_identity
-                ):
-                    os.unlink(relative.name, dir_fd=parent_fd)
-            except OSError:
-                pass
+            except ReleaseEvidenceError as cleanup_error:
+                raise cleanup_error from write_error
         raise
     finally:
         if descriptor >= 0:
