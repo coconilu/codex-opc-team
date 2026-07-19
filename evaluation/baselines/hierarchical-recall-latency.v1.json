@@ -1,0 +1,31 @@
+{
+  "contract_version": "opc-hierarchical-recall-evaluation-v1",
+  "fixture_sha256": "79844ed1a11036ea0aac0cb355d26a528b1a5259f28292179e4a3e579b74030d",
+  "flat_ms": {
+    "median": 16736.5701,
+    "p95_nearest_rank": 22223.0894,
+    "sample_count": 5,
+    "samples": [
+      16736.5701,
+      14843.2956,
+      16964.646,
+      16012.4592,
+      22223.0894
+    ]
+  },
+  "hierarchical_ms": {
+    "median": 4297.0033,
+    "p95_nearest_rank": 5660.6363,
+    "sample_count": 5,
+    "samples": [
+      4078.9322,
+      4297.0033,
+      4222.8012,
+      5660.6363,
+      5157.833
+    ]
+  },
+  "method": "local-wall-clock-all-synthetic-queries-warm-process",
+  "repeat_count": 5,
+  "schema_version": "opc-hierarchical-latency-v1"
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:context-packet:v1",
+  "type": "object",
+  "required": ["schema_version", "query_sha256", "mode", "facts", "decisions", "experiences", "procedures", "citations", "conflicts", "budget", "omitted_summary"],
+  "properties": {
+    "schema_version": {"const": "opc-context-packet-v1"},
+    "query_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "mode": {"enum": ["hierarchical-file-git", "flat-file-git-fallback"]},
+    "facts": {"$ref": "#/$defs/items"},
+    "decisions": {"$ref": "#/$defs/items"},
+    "experiences": {"$ref": "#/$defs/items"},
+    "procedures": {"$ref": "#/$defs/items"},
+    "citations": {"type": "array", "items": {"$ref": "#/$defs/citation"}},
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["reason_code", "citations"],
+        "properties": {
+          "reason_code": {"const": "unresolved_conflict"},
+          "citations": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/citation"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "budget": {
+      "type": "object",
+      "required": ["limit_tokens", "used_tokens", "remaining_tokens"],
+      "properties": {
+        "limit_tokens": {"type": "integer", "minimum": 1, "maximum": 200000},
+        "used_tokens": {"type": "integer", "minimum": 0},
+        "remaining_tokens": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "omitted_summary": {
+      "type": "object",
+      "required": ["count", "reason_codes"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 0},
+        "reason_codes": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "citation": {
+      "type": "object",
+      "required": ["record_id", "source_path", "source_commit", "content_sha256", "scope", "project_id", "knowledge_type", "status", "sensitivity"],
+      "properties": {
+        "record_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128},
+        "source_path": {"type": "string", "pattern": "^[A-Za-z0-9._/-]+$", "maxLength": 240},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "scope": {"enum": ["global", "project"]},
+        "project_id": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128},
+        "knowledge_type": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128},
+        "status": {"const": "approved"},
+        "sensitivity": {"enum": ["public", "internal", "restricted"]}
+      },
+      "additionalProperties": false
+    },
+    "item": {
+      "type": "object",
+      "required": ["record_id", "content", "citation", "token_cost"],
+      "properties": {
+        "record_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128},
+        "content": {"type": "string"},
+        "citation": {"$ref": "#/$defs/citation"},
+        "token_cost": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "items": {"type": "array", "items": {"$ref": "#/$defs/item"}}
+  },
+  "additionalProperties": false
+}

@@ -203,9 +203,10 @@ def validate_architecture_api_contract() -> None:
     ):
         require(token in architecture, f"architecture must map the v0.1 API: {token}")
     require(
-        "当前仍未发布独立 `ContextPacket` 类" in memory
-        and "`FileGitBackend.query_context(...)`" in memory,
-        "memory architecture must map the governed ContextPacket surface",
+        "`opc-context-packet-v1`" in memory
+        and "`FileGitBackend.query_context(...)`" in memory
+        and "`opc-recall-trace-v1`" in memory,
+        "memory architecture must map flat and hierarchical context surfaces",
     )
     require(
         "health=unavailable-file-fallback" in memory and "`not_installed`" not in memory,
@@ -625,6 +626,107 @@ def validate_knowledge_governance_contract() -> None:
     )
 
 
+def validate_hierarchical_recall_contract() -> None:
+    context_contract_path = PLUGIN / "assets" / "context" / "hierarchical-context-contract.v1.json"
+    packet_schema_path = PLUGIN / "assets" / "context" / "context-packet.v1.schema.json"
+    trace_schema_path = PLUGIN / "assets" / "context" / "recall-trace.v1.schema.json"
+    evaluation_contract_path = ROOT / "evaluation" / "contracts" / "hierarchical-recall-contract.v1.json"
+    fixture_path = ROOT / "evaluation" / "fixtures" / "hierarchical-synthetic-suite.v1.json"
+    result_path = ROOT / "evaluation" / "baselines" / "hierarchical-recall-comparison.v1.json"
+    report_path = ROOT / "evaluation" / "baselines" / "hierarchical-recall-comparison.v1.md"
+    latency_path = ROOT / "evaluation" / "baselines" / "hierarchical-recall-latency.v1.json"
+    script_path = PLUGIN / "scripts" / "opc_hierarchical.py"
+    runner_path = ROOT / "scripts" / "hierarchical_evaluation.py"
+    for path in (
+        context_contract_path, packet_schema_path, trace_schema_path,
+        evaluation_contract_path, fixture_path, result_path,
+        report_path, latency_path, script_path, runner_path,
+    ):
+        require(path.is_file(), f"missing hierarchical recall artifact: {path}")
+    context_contract = load_json(context_contract_path)
+    packet_schema = load_json(packet_schema_path)
+    trace_schema = load_json(trace_schema_path)
+    require(
+        context_contract.get("contract_version") == "opc-hierarchical-context-contract-v1"
+        and context_contract.get("authority") == "file-git-only"
+        and context_contract.get("derived_data_authoritative") is False
+        and context_contract.get("provider_authoritative") is False
+        and context_contract.get("preview_writes") is False
+        and context_contract.get("hard_filter_before_navigation") is True
+        and context_contract.get("l2_revalidation_required") is True,
+        "hierarchical context authority boundary is incomplete",
+    )
+    derived = context_contract.get("derived_storage", {})
+    require(
+        derived.get("relative_to_explicit_private_data_root")
+        == ".opc/derived/hierarchical-recall-v1/index.json"
+        and all(
+            derived.get(key) is False
+            for key in ("canonical_write", "provider_write", "project_source_write", "automatic_approval")
+        ),
+        "hierarchical derived storage boundary is incomplete",
+    )
+    require(
+        packet_schema.get("additionalProperties") is False
+        and trace_schema.get("additionalProperties") is False
+        and set(packet_schema.get("required", []))
+        == {
+            "schema_version", "query_sha256", "mode", "facts", "decisions",
+            "experiences", "procedures", "citations", "conflicts", "budget",
+            "omitted_summary",
+        }
+        and set(trace_schema.get("required", []))
+        == {
+            "schema_version", "query_sha256", "mode", "root_selection", "expansions",
+            "discards", "fallbacks", "final_leaves", "canonical_read_count",
+            "injected_token_cost",
+        },
+        "ContextPacket or RecallTrace schema drifted from runtime",
+    )
+    fixture = load_json(fixture_path)
+    result = load_json(result_path)
+    latency = load_json(latency_path)
+    contract = load_json(evaluation_contract_path)
+    require(
+        fixture.get("contract_version") == contract.get("contract_version")
+        == result.get("contract_version")
+        == latency.get("contract_version")
+        == "opc-hierarchical-recall-evaluation-v1",
+        "hierarchical evaluation versions are inconsistent",
+    )
+    require(
+        result.get("contract_sha256")
+        == hashlib.sha256(evaluation_contract_path.read_bytes()).hexdigest()
+        and result.get("fixture_sha256") == hashlib.sha256(fixture_path.read_bytes()).hexdigest()
+        and latency.get("fixture_sha256") == result.get("fixture_sha256"),
+        "hierarchical result is not bound to contract and fixture bytes",
+    )
+    require(
+        result.get("latency_sha256")
+        == hashlib.sha256(
+            (json.dumps(latency, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
+        ).hexdigest(),
+        "hierarchical result is not bound to the separate latency artifact",
+    )
+    safety = result.get("aggregate", {}).get("safety", {})
+    require(
+        safety.get("scope_leakage_acceptances") == 0
+        and safety.get("stale_obsolete_acceptances") == 0,
+        "hierarchical committed evaluation must have zero safety acceptance",
+    )
+    require(
+        result.get("comparison_status") in {"superior", "not_superior"}
+        and (
+            result.get("comparison_status") != "not_superior"
+            or "not superior" in str(result.get("claim", ""))
+        ),
+        "hierarchical evaluation claim does not match measured status",
+    )
+    report = report_path.read_text(encoding="utf-8")
+    for token in ("support precision@5", "canonical leaf recall@5", "injected token median", "p95 latency"):
+        require(token in report, f"hierarchical report is missing {token}")
+
+
 def main() -> int:
     checks = [
         validate_manifest,
@@ -639,6 +741,7 @@ def main() -> int:
         validate_structured_feedback_contract,
         validate_shadow_evaluation_contract,
         validate_knowledge_governance_contract,
+        validate_hierarchical_recall_contract,
         validate_markdown_links,
     ]
     try:

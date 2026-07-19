@@ -93,5 +93,7 @@ python <plugin-root>/scripts/opc_memory.py curate <id> --dry-run \
 | Mem0/其他 Provider | 建议候选 ID | 决定 authority、过滤或排序 |
 | Shadow Evaluation | 对 current-HEAD candidate 生成只读证据 | curation、关系消解、自动批准 |
 | Curator | preview/apply 精确迁移与关系/状态变更 | 批量隐式迁移、宽路径 commit、Provider 写入 |
+| Hierarchical recall | 在完整 hard filter 后用 derived L0/L1 导航，并对少量 L2 重复 current-HEAD 验证 | 把目录摘要当事实、用分数覆盖冲突/失效、自动批准或写 Provider |
 
 完整架构决策见 [ADR-0011](adr/0011-deterministic-knowledge-governance.md)，记忆层总体边界见[记忆架构](memory-architecture.md)。
+分层 consumer 的 virtual namespace、ContextPacket、RecallTrace 与 fallback 见 [ADR-0012](adr/0012-hierarchical-file-recall-context-packet.md)。

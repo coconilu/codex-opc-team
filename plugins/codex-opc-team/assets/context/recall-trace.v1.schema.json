@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:recall-trace:v1",
+  "type": "object",
+  "required": ["schema_version", "query_sha256", "mode", "root_selection", "expansions", "discards", "fallbacks", "final_leaves", "canonical_read_count", "injected_token_cost"],
+  "properties": {
+    "schema_version": {"const": "opc-recall-trace-v1"},
+    "query_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "mode": {"enum": ["hierarchical-file-git", "flat-file-git-fallback"]},
+    "root_selection": {"type": "array", "items": {"$ref": "#/$defs/root"}},
+    "expansions": {"type": "array", "items": {"oneOf": [{"$ref": "#/$defs/nodeExpansion"}, {"$ref": "#/$defs/leafExpansion"}]}},
+    "discards": {"type": "array", "items": {"oneOf": [{"$ref": "#/$defs/discard"}, {"$ref": "#/$defs/genericDiscard"}]}},
+    "fallbacks": {"type": "array", "items": {"enum": ["flat-file-git", "provider-error-file-hierarchy"]}},
+    "final_leaves": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}, "uniqueItems": true},
+    "canonical_read_count": {"type": "integer", "minimum": 0, "maximum": 64},
+    "injected_token_cost": {"type": "integer", "minimum": 0, "maximum": 200000}
+  },
+  "$defs": {
+    "root": {
+      "type": "object",
+      "required": ["uri", "score"],
+      "properties": {"uri": {"type": "string", "pattern": "^opc://"}, "score": {"type": "integer", "minimum": 0}},
+      "additionalProperties": false
+    },
+    "nodeExpansion": {
+      "type": "object",
+      "required": ["uri", "score", "action"],
+      "properties": {"uri": {"type": "string", "pattern": "^opc://"}, "score": {"type": "integer", "minimum": 0}, "action": {"const": "expanded"}},
+      "additionalProperties": false
+    },
+    "leafExpansion": {
+      "type": "object",
+      "required": ["uri", "leaf_id", "score", "action"],
+      "properties": {
+        "uri": {"type": "string", "pattern": "^opc://"},
+        "leaf_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128},
+        "score": {"type": "integer", "minimum": 0},
+        "action": {"enum": ["selected", "discarded"]}
+      },
+      "additionalProperties": false
+    },
+    "discard": {
+      "type": "object",
+      "required": ["record_id", "reason_codes"],
+      "properties": {
+        "record_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128},
+        "reason_codes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    },
+    "genericDiscard": {
+      "type": "object",
+      "required": ["reason_codes"],
+      "properties": {"reason_codes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true}},
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
