@@ -1,0 +1,79 @@
+{
+  "contract_version": "opc-knowledge-governance-v1",
+  "record_schema_current": 2,
+  "readable_record_schemas": [1, 2],
+  "context_version": "opc-knowledge-context-v1",
+  "migration_version": "opc-knowledge-schema-migration-v1",
+  "curation_version": "opc-knowledge-curation-v1",
+  "limits": {
+    "record_bytes": 524288,
+    "records_per_status": 5000,
+    "query_results": 1000,
+    "relations_per_record": 64,
+    "keywords_per_record": 128,
+    "applicability_constraints": 32,
+    "allowed_values_per_constraint": 32
+  },
+  "hard_filter_order": [
+    "scope_and_project_id",
+    "approved_status",
+    "current_head_commit_and_content_hash",
+    "sensitivity_authorization",
+    "explicit_applicability",
+    "invalidation_and_supersession"
+  ],
+  "ranking_boundary": {
+    "file_git_authority": true,
+    "provider_is_candidate_source_only": true,
+    "provider_score_can_override_hard_filter": false,
+    "provider_score_can_override_canonical_order": false
+  },
+  "relation_kinds": [
+    "conflicts",
+    "supersedes",
+    "superseded_by",
+    "invalidates",
+    "invalidated_by"
+  ],
+  "conflict_policy": {
+    "unresolved_records_enter_context": false,
+    "both_canonical_citations_required": true,
+    "body_in_diagnostics": false,
+    "manager_curation_required": true
+  },
+  "missing_project_context": "global_only",
+  "absolute_path_project_inference": false,
+  "fail_safe_relation_reasons": [
+    "relation_target_missing",
+    "relation_target_ineligible",
+    "relation_cycle",
+    "relations_invalid"
+  ],
+  "excluded_reason_codes": [
+    "candidate",
+    "rejected",
+    "obsolete",
+    "project_scope_mismatch",
+    "stale_provenance",
+    "sensitivity_not_authorized",
+    "role_context_missing",
+    "role_not_applicable",
+    "knowledge_type_not_applicable",
+    "applicability_context_missing",
+    "explicit_applicability_mismatch",
+    "not_yet_applicable",
+    "stale",
+    "superseded",
+    "invalidated",
+    "unresolved_conflict"
+  ],
+  "governance": {
+    "preview_default_zero_write": true,
+    "manager_approval_required": true,
+    "exact_transition_paths_only": true,
+    "exact_git_commit_required": true,
+    "provider_write_during_curation": false,
+    "migration_backup_required": true,
+    "automatic_llm_or_provider_approval": false
+  }
+}

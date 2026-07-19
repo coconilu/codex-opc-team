@@ -69,6 +69,7 @@ Hook/runtime events live in private `PLUGIN_DATA` or a project `.opc` fallback, 
 | [Vision and scope](docs/vision-and-scope.md) | Product goals, boundaries, and user experience |
 | [Architecture](docs/architecture.md) | Components, contracts, and execution flow |
 | [Memory architecture](docs/memory-architecture.md) | File/Git authority, optional Mem0, and learning governance |
+| [Knowledge governance](docs/knowledge-governance.md) | Deterministic applicability, relations, conflicts, and Schema 1-to-2 migration |
 | [Installation and distribution](docs/installation-and-distribution.md) | Local install, marketplace release, upgrade, and removal |
 | [Migration](docs/migration-from-local-prototype.md) | Safe cutover from the local prototype |
 | [Security and privacy](docs/security-and-privacy.md) | Data boundaries, hook safety, and publication checks |

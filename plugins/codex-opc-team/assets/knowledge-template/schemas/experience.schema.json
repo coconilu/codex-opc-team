@@ -1,64 +1,103 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:codex-opc-team:schema:experience:v1",
-  "title": "OPC Organizational Experience",
-  "type": "object",
-  "required": [
-    "schema_version",
-    "id",
-    "type",
-    "summary",
-    "content",
-    "keywords",
-    "metadata",
-    "scope",
-    "owner",
-    "evidence",
-    "confidence",
-    "status",
-    "created_at",
-    "updated_at"
-  ],
-  "properties": {
-    "schema_version": {"const": 1},
-    "id": {"type": "string", "pattern": "^exp-[A-Za-z0-9._-]+$"},
-    "type": {"type": "string", "minLength": 1},
-    "summary": {"type": "string", "minLength": 1},
-    "content": {"type": "string", "minLength": 1},
-    "status": {"enum": ["candidate", "approved", "rejected", "obsolete"]},
-    "keywords": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-    "metadata": {"type": "object"},
-    "scope": {"type": "string"},
-    "owner": {"type": "string"},
-    "project_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
-    "source": {"type": ["string", "object"]},
-    "evidence": {"type": "object"},
-    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-    "validation": {"type": ["string", "object"]},
-    "approved_by": {"type": "string"},
-    "approved_at": {"type": "string", "format": "date-time"},
-    "rejected_by": {"type": "string"},
-    "rejected_at": {"type": "string", "format": "date-time"},
-    "rejection_reason": {"type": "string"},
-    "obsolete_at": {"type": "string", "format": "date-time"},
-    "obsolete_reason": {"type": "string"},
-    "superseded_by": {"type": "string"},
-    "created_at": {"type": "string", "format": "date-time"},
-    "updated_at": {"type": "string", "format": "date-time"}
+  "$id": "urn:codex-opc-team:schema:experience:v2",
+  "title": "OPC Organizational Experience (Schema 1 compatible, Schema 2 governed)",
+  "$defs": {
+    "portableId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
+    "recordId": {"type": "string", "minLength": 5, "maxLength": 128, "pattern": "^exp-[A-Za-z0-9._-]+$"},
+    "base": {
+      "type": "object",
+      "required": ["schema_version", "id", "type", "summary", "content", "keywords", "metadata", "scope", "owner", "evidence", "confidence", "status", "created_at", "updated_at"],
+      "properties": {
+        "schema_version": {"enum": [1, 2]},
+        "id": {"$ref": "#/$defs/recordId"},
+        "type": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "content": {"type": "string", "minLength": 1, "maxLength": 262144},
+        "status": {"enum": ["candidate", "approved", "rejected", "obsolete"]},
+        "keywords": {"type": "array", "maxItems": 128, "items": {"type": "string", "maxLength": 4096}, "uniqueItems": true},
+        "metadata": {"type": "object", "maxProperties": 256},
+        "scope": {"enum": ["global", "project"]},
+        "owner": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "project_id": {"$ref": "#/$defs/portableId"},
+        "source": {"type": ["string", "object"]},
+        "evidence": {"type": "object", "maxProperties": 256},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "validation": {"type": ["string", "object"]},
+        "approved_by": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "approved_at": {"type": "string", "format": "date-time"},
+        "rejected_by": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "rejected_at": {"type": "string", "format": "date-time"},
+        "rejection_reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "obsolete_at": {"type": "string", "format": "date-time"},
+        "obsolete_reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "created_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "relation": {
+      "type": "object",
+      "required": ["kind", "target_id", "scope", "project_id"],
+      "properties": {
+        "kind": {"enum": ["conflicts", "supersedes", "superseded_by", "invalidates", "invalidated_by"]},
+        "target_id": {"$ref": "#/$defs/recordId"},
+        "scope": {"enum": ["global", "project"]},
+        "project_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/portableId"}]}
+      },
+      "allOf": [
+        {"if": {"properties": {"scope": {"const": "global"}}}, "then": {"properties": {"project_id": {"type": "null"}}}},
+        {"if": {"properties": {"scope": {"const": "project"}}}, "then": {"properties": {"project_id": {"$ref": "#/$defs/portableId"}}}}
+      ],
+      "additionalProperties": false
+    },
+    "applicability": {
+      "type": "object",
+      "required": ["roles", "knowledge_types", "constraints", "valid_from", "valid_until"],
+      "properties": {
+        "roles": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/portableId"}, "uniqueItems": true},
+        "knowledge_types": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/portableId"}, "uniqueItems": true},
+        "constraints": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": {"$ref": "#/$defs/portableId"},
+          "additionalProperties": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/portableId"}, "uniqueItems": true}
+        },
+        "valid_from": {"type": ["string", "null"], "format": "date-time"},
+        "valid_until": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "additionalProperties": false
+    }
   },
-  "allOf": [
+  "oneOf": [
     {
-      "if": {"properties": {"status": {"const": "approved"}}, "required": ["status"]},
-      "then": {"required": ["approved_by", "approved_at", "validation"]}
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "properties": {"schema_version": {"const": 1}, "superseded_by": {"$ref": "#/$defs/recordId"}}
+        }
+      ]
     },
     {
-      "if": {"properties": {"status": {"const": "rejected"}}, "required": ["status"]},
-      "then": {"required": ["rejected_by", "rejected_at", "rejection_reason"]}
-    },
-    {
-      "if": {"properties": {"status": {"const": "obsolete"}}, "required": ["status"]},
-      "then": {"required": ["obsolete_at", "obsolete_reason"]}
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "required": ["sensitivity", "applicability", "relations"],
+          "properties": {
+            "schema_version": {"const": 2},
+            "sensitivity": {"enum": ["public", "internal", "restricted"]},
+            "applicability": {"$ref": "#/$defs/applicability"},
+            "relations": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/relation"}, "uniqueItems": true}
+          }
+        }
+      ]
     }
   ],
-  "additionalProperties": false
+  "unevaluatedProperties": false,
+  "allOf": [
+    {"if": {"properties": {"scope": {"const": "global"}}}, "then": {"not": {"required": ["project_id"]}}},
+    {"if": {"properties": {"scope": {"const": "project"}}}, "then": {"required": ["project_id"]}},
+    {"if": {"properties": {"status": {"const": "approved"}}}, "then": {"required": ["approved_by", "approved_at", "validation"]}},
+    {"if": {"properties": {"status": {"const": "rejected"}}}, "then": {"required": ["rejected_by", "rejected_at", "rejection_reason"]}},
+    {"if": {"properties": {"status": {"const": "obsolete"}}}, "then": {"required": ["obsolete_at", "obsolete_reason"]}}
+  ]
 }

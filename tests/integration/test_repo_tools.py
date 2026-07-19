@@ -108,6 +108,64 @@ class ShadowContractValidationTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, message):
                         validate_repo.validate_shadow_evaluation_contract()
 
+
+class KnowledgeGovernanceContractValidationTests(unittest.TestCase):
+    def test_exact_governance_contract_matches_runtime_and_schema(self):
+        validate_repo.validate_knowledge_governance_contract()
+
+    def test_governance_contract_drift_fails_closed(self):
+        original = validate_repo.load_json
+        contract_path = (
+            validate_repo.PLUGIN
+            / "assets"
+            / "knowledge"
+            / "knowledge-governance-contract.v1.json"
+        )
+
+        def altered(path):
+            value = original(path)
+            if path == contract_path:
+                value["hard_filter_order"].reverse()
+            return value
+
+        with mock.patch.object(validate_repo, "load_json", side_effect=altered):
+            with self.assertRaisesRegex(ValueError, "drifted from runtime"):
+                validate_repo.validate_knowledge_governance_contract()
+
+    def test_provider_or_conflict_boundary_drift_fails_closed(self):
+        original = validate_repo.load_json
+        contract_path = (
+            validate_repo.PLUGIN
+            / "assets"
+            / "knowledge"
+            / "knowledge-governance-contract.v1.json"
+        )
+        cases = (
+            (
+                lambda value: value["ranking_boundary"].update(
+                    provider_score_can_override_canonical_order=True
+                ),
+                "provider ranking boundary",
+            ),
+            (
+                lambda value: value["conflict_policy"].update(
+                    body_in_diagnostics=True
+                ),
+                "conflict policy",
+            ),
+        )
+        for mutation, message in cases:
+            with self.subTest(message=message):
+                def altered(path):
+                    value = original(path)
+                    if path == contract_path:
+                        mutation(value)
+                    return value
+
+                with mock.patch.object(validate_repo, "load_json", side_effect=altered):
+                    with self.assertRaisesRegex(ValueError, message):
+                        validate_repo.validate_knowledge_governance_contract()
+
     def test_shadow_result_hash_and_numeric_limit_drift_fail_closed(self):
         original = validate_repo.load_json
         contract_path = (

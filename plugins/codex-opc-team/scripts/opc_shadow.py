@@ -370,10 +370,15 @@ def _preflight(knowledge_root: Path, replay: Mapping[str, Any]) -> dict[str, Any
     backend = FileGitBackend(_assert_existing_directory(knowledge_root, label="knowledge root"))
     candidate_id = replay["candidate"]["candidate_id"]
     found: list[dict[str, Any]] = []
-    for status in MEMORY_STATUSES:
-        for record in backend.list_by_status(status, limit=10000):
-            if record.get("id") == candidate_id:
-                found.append(record)
+    try:
+        for status in MEMORY_STATUSES:
+            for record in backend.list_by_status(status, limit=10000):
+                if record.get("id") == candidate_id:
+                    found.append(record)
+    except (OpcMemoryError, OSError) as exc:
+        raise ShadowError(
+            "candidate canonical records must be valid and uniquely linked"
+        ) from exc
     reasons: list[str] = []
     if len(found) != 1:
         reasons.append("candidate_missing_or_duplicate")
