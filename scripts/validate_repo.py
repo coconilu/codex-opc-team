@@ -599,6 +599,24 @@ def validate_knowledge_governance_contract() -> None:
         "relation failure policy is incomplete",
     )
     require(
+        "record_invalid" in set(contract.get("excluded_reason_codes", [])),
+        "invalid canonical records require a redacted omission reason",
+    )
+    governance = contract.get("governance", {})
+    require(
+        all(
+            governance.get(key) is True
+            for key in (
+                "migration_inventory_unique_across_statuses",
+                "relation_graph_after_hard_filters",
+                "relation_cycle_detection_iterative_and_bounded",
+                "curation_preview_binds_final_timestamp_and_bytes",
+                "timezone_aware_evaluation_required",
+            )
+        ),
+        "knowledge governance safety invariants are incomplete",
+    )
+    require(
         "knowledge-governance-contract.v1.json" in guide_path.read_text(encoding="utf-8")
         and "Schema 1" in guide_path.read_text(encoding="utf-8")
         and "Schema 2" in guide_path.read_text(encoding="utf-8"),

@@ -139,6 +139,32 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def normalized_event_time(value: str | None, *, label: str) -> str:
+    candidate = value if value is not None else utc_now()
+    if not isinstance(candidate, str) or not candidate or len(candidate) > 64:
+        raise OpcMemoryError(f"{label} must be a bounded timezone-aware timestamp")
+    try:
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timezone is required")
+    except (TypeError, ValueError) as exc:
+        raise OpcMemoryError(f"{label} must be a timezone-aware RFC 3339 timestamp") from exc
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def canonical_record_bytes(value: Mapping[str, Any]) -> bytes:
+    try:
+        validate_record(value)
+        payload = (
+            json.dumps(dict(value), ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+    except (GovernanceError, TypeError, ValueError) as exc:
+        raise OpcMemoryError("canonical record is not valid strict JSON") from exc
+    if len(payload) > MAX_RECORD_BYTES:
+        raise OpcMemoryError("canonical record exceeds the configured size limit")
+    return payload
+
+
 def resolve_knowledge_root(value: str | None = None) -> Path:
     configured = value or os.environ.get("OPC_KNOWLEDGE_HOME")
     return (
@@ -618,6 +644,22 @@ class FileGitBackend:
             raise OpcMemoryError("knowledge record escaped the canonical root")
         return _read_bounded_record(path, label="canonical knowledge record")
 
+    def _invalid_record_id(self, path: Path) -> str | None:
+        """Recover only a portable ID for a redacted invalid-record omission."""
+
+        try:
+            raw = _read_bounded_bytes(path, label="invalid knowledge record")
+            value = json.loads(
+                raw.decode("utf-8"),
+                parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token)),
+            )
+            if not isinstance(value, dict) or not isinstance(value.get("id"), str):
+                return None
+            record_id = safe_record_id(value["id"])
+            return record_id if path.stem == record_id else None
+        except (OpcMemoryError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            return None
+
     def ensure_layout(self) -> None:
         for relative in STATUS_DIRS.values():
             (self.root / relative).mkdir(parents=True, exist_ok=True)
@@ -988,21 +1030,22 @@ class FileGitBackend:
         except GovernanceError as exc:
             raise OpcMemoryError(str(exc)) from exc
         try:
-            evaluation_time = (
-                datetime.fromisoformat(at.replace("Z", "+00:00")).astimezone(timezone.utc)
-                if at is not None
-                else datetime.now(timezone.utc)
-            )
-        except (AttributeError, ValueError) as exc:
+            if at is None:
+                evaluation_time = datetime.now(timezone.utc)
+            else:
+                parsed_time = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                if parsed_time.tzinfo is None or parsed_time.utcoffset() is None:
+                    raise ValueError("timezone is required")
+                evaluation_time = parsed_time.astimezone(timezone.utc)
+        except (AttributeError, TypeError, ValueError) as exc:
             raise OpcMemoryError("at must be a timezone-aware RFC 3339 timestamp") from exc
-        if evaluation_time.tzinfo is None:
-            raise OpcMemoryError("at must include a timezone")
         extra_ids = {safe_record_id(value) for value in extra_candidate_ids or []}
 
         inventory: dict[str, dict[str, Any]] = {}
         provenance: dict[str, dict[str, Any]] = {}
         duplicate_ids: set[str] = set()
         invalid_count = 0
+        invalid_omissions: list[dict[str, Any]] = []
         for status in MEMORY_STATUSES:
             paths = sorted(self._folder(status).glob("*.json"))
             if len(paths) > MAX_RECORDS:
@@ -1028,6 +1071,15 @@ class FileGitBackend:
                         provenance[record_id] = self.source_metadata(record["_source_path"])
                 except (OpcMemoryError, OSError):
                     invalid_count += 1
+                    if status == "approved":
+                        invalid_id = self._invalid_record_id(path)
+                        if invalid_id is not None:
+                            invalid_omissions.append(
+                                {
+                                    "record_id": invalid_id,
+                                    "reason_codes": ["record_invalid"],
+                                }
+                            )
 
         base_reasons: dict[str, list[str]] = {}
         for record_id, record in inventory.items():
@@ -1070,15 +1122,24 @@ class FileGitBackend:
                 candidate_ids.add(record_id)
 
         relation_reasons: dict[str, set[str]] = {record_id: set() for record_id in inventory}
-        edges: dict[str, set[str]] = {}
-        active_relations: list[tuple[str, str, str]] = []
-        for source_id, record in inventory.items():
+        hard_filter_eligible = {
+            record_id for record_id in inventory if not base_reasons.get(record_id)
+        }
+        normalized_by_source: dict[str, list[dict[str, Any]]] = {}
+        for source_id in sorted(hard_filter_eligible):
             try:
-                relations = normalize_relations(record)
+                normalized_by_source[source_id] = normalize_relations(
+                    inventory[source_id]
+                )
             except GovernanceError:
                 relation_reasons[source_id].add("relations_invalid")
+
+        edges: dict[str, set[str]] = {}
+        active_relations: list[tuple[str, str, str]] = []
+        for source_id in sorted(hard_filter_eligible):
+            if relation_reasons[source_id]:
                 continue
-            for relation in relations:
+            for relation in normalized_by_source.get(source_id, []):
                 if not relation_applies(relation, project_id):
                     continue
                 target_id = relation["target_id"]
@@ -1086,6 +1147,13 @@ class FileGitBackend:
                     relation_reasons[source_id].add("relation_target_missing")
                     continue
                 kind = relation["kind"]
+                if (
+                    target_id not in hard_filter_eligible
+                    or relation_reasons[target_id]
+                ):
+                    if kind in {"superseded_by", "invalidated_by"}:
+                        relation_reasons[source_id].add("relation_target_ineligible")
+                    continue
                 active_relations.append((source_id, target_id, kind))
                 if kind != "conflicts":
                     edges.setdefault(source_id, set()).add(target_id)
@@ -1150,6 +1218,12 @@ class FileGitBackend:
             hit["_citation"] = canonical_citation(record, provenance[record_id])
             records.append(hit)
 
+        omitted_ids = {item["record_id"] for item in omissions}
+        for item in invalid_omissions:
+            if item["record_id"] not in omitted_ids:
+                omissions.append(item)
+                omitted_ids.add(item["record_id"])
+
         records.sort(
             key=lambda item: (
                 -float(item.get("_score", 0)),
@@ -1180,7 +1254,7 @@ class FileGitBackend:
             "conflicts": conflicts[:limit],
             "omissions": omissions[:limit],
             "omitted_summary": {
-                "count": len(omissions) + invalid_count,
+                "count": len(omissions) + invalid_count - len(invalid_omissions),
                 "invalid_record_count": invalid_count,
                 "reason_codes": sorted(
                     {
@@ -1737,13 +1811,27 @@ class FileGitBackend:
             backup_token = _directory_object_token(_lstat_identity(resolved_backup))
 
         items: list[dict[str, Any]] = []
+        seen_ids: dict[str, str] = {}
         for status in MEMORY_STATUSES:
-            for path in sorted(self._folder(status).glob("*.json")):
+            paths = sorted(self._folder(status).glob("*.json"))
+            if len(paths) > MAX_RECORDS:
+                raise OpcMemoryError(
+                    f"migration inventory exceeds the per-status record limit: {status}"
+                )
+            for path in paths:
                 record = self._load_record(path)
+                record_id_value = str(record["id"])
+                source_path = path.relative_to(self.root).as_posix()
+                previous = seen_ids.get(record_id_value)
+                if previous is not None:
+                    raise OpcMemoryError(
+                        "migration inventory contains a duplicate record id across "
+                        f"canonical paths: {record_id_value}"
+                    )
+                seen_ids[record_id_value] = source_path
                 if selected and record["id"] != selected:
                     continue
                 raw = _read_bounded_bytes(path, label="canonical migration source")
-                source_path = path.relative_to(self.root).as_posix()
                 action = (
                     "migrate_schema_1_to_2"
                     if record.get("schema_version") == 1
@@ -1800,6 +1888,13 @@ class FileGitBackend:
         if not plan_token or plan_token != preview["plan_token"]:
             raise OpcMemoryError(
                 "MIGRATION_PLAN_CHANGED: preview the exact record and backup root again"
+            )
+        if (
+            len(preview["items"]) != 1
+            or preview["items"][0].get("record_id") != safe_record_id(record_id)
+        ):
+            raise OpcMemoryError(
+                "MIGRATION_PLAN_CHANGED: apply requires exactly one unique record"
             )
         item = preview["items"][0]
         if item["action"] == "skip_schema_2":
@@ -1906,6 +2001,7 @@ class FileGitBackend:
         relations: Sequence[Mapping[str, Any]] | None = None,
         applicability: Mapping[str, Any] | None = None,
         sensitivity: str | None = None,
+        transition_at: str | None = None,
     ) -> dict[str, Any]:
         """Preview one exact manager-governed relation/status transition."""
 
@@ -1932,6 +2028,9 @@ class FileGitBackend:
             raise OpcMemoryError("approval transition requires validation evidence")
         if target_status in {"rejected", "obsolete"} and not reason:
             raise OpcMemoryError(f"{target_status} transition requires a reason")
+        transition_time = normalized_event_time(
+            transition_at, label="transition_at"
+        )
         proposal: dict[str, Any] = {
             "manager_approval": manager_approval.strip(),
             "from_status": current_status,
@@ -1953,6 +2052,7 @@ class FileGitBackend:
             ),
             "applicability": dict(applicability) if applicability is not None else None,
             "sensitivity": sensitivity,
+            "transition_at": transition_time,
         }
         proposed = dict(record)
         if proposal["relations"] is not None:
@@ -1962,11 +2062,12 @@ class FileGitBackend:
         if sensitivity is not None:
             proposed["sensitivity"] = sensitivity
         proposed["status"] = target_status
+        proposed["updated_at"] = transition_time
         if target_status == "approved" and current_status == "candidate":
             proposed.update(
                 {
                     "approved_by": manager_approval.strip(),
-                    "approved_at": record["updated_at"],
+                    "approved_at": transition_time,
                     "validation": validation,
                 }
             )
@@ -1974,18 +2075,20 @@ class FileGitBackend:
             proposed.update(
                 {
                     "rejected_by": manager_approval.strip(),
-                    "rejected_at": record["updated_at"],
+                    "rejected_at": transition_time,
                     "rejection_reason": reason,
                 }
             )
         elif target_status == "obsolete":
             proposed.update(
-                {"obsolete_at": record["updated_at"], "obsolete_reason": reason}
+                {"obsolete_at": transition_time, "obsolete_reason": reason}
             )
         try:
             validate_record(proposed)
         except GovernanceError as exc:
             raise OpcMemoryError(str(exc)) from exc
+        proposed_raw = canonical_record_bytes(proposed)
+        proposed_sha256 = sha256_bytes(proposed_raw)
         destination = self._path(target_status, record_id)
         source_raw = _read_bounded_bytes(source, label="canonical curation source")
         source_path = source.relative_to(self.root).as_posix()
@@ -1997,6 +2100,7 @@ class FileGitBackend:
             "source_sha256": sha256_bytes(source_raw),
             "proposal": proposal,
             "destination_path": destination_path,
+            "proposed_sha256": proposed_sha256,
         }
         return {
             "schema_version": CURATION_VERSION,
@@ -2008,11 +2112,12 @@ class FileGitBackend:
             "source_path": source_path,
             "destination_path": destination_path,
             "source_sha256": fingerprint["source_sha256"],
-            "proposed_sha256": sha256_bytes(strict_json_bytes(proposed)),
+            "proposed_sha256": proposed_sha256,
+            "transition_at": transition_time,
             "changed_fields": sorted(
                 key
-                for key in ("status", "relations", "applicability", "sensitivity")
-                if proposed.get(key) != record.get(key)
+                for key in set(record) | set(proposed)
+                if record.get(key) != proposed.get(key)
             ),
             "transition_paths": sorted(set((source_path, destination_path))),
             "plan_token": _metadata_token(fingerprint),
@@ -2033,7 +2138,12 @@ class FileGitBackend:
         relations: Sequence[Mapping[str, Any]] | None = None,
         applicability: Mapping[str, Any] | None = None,
         sensitivity: str | None = None,
+        transition_at: str | None = None,
     ) -> dict[str, Any]:
+        if transition_at is None:
+            raise OpcMemoryError(
+                "curation apply requires the exact preview transition_at"
+            )
         preview = self.curation_plan(
             record_id,
             manager_approval=manager_approval,
@@ -2043,6 +2153,7 @@ class FileGitBackend:
             relations=relations,
             applicability=applicability,
             sensitivity=sensitivity,
+            transition_at=transition_at,
         )
         if not plan_token or plan_token != preview["plan_token"]:
             raise OpcMemoryError(
@@ -2051,7 +2162,6 @@ class FileGitBackend:
         source = self.root / preview["source_path"]
         destination = self.root / preview["destination_path"]
         record = self._load_record(source)
-        now = utc_now()
         if relations is not None:
             record["relations"] = sorted(
                 [dict(item) for item in relations],
@@ -2069,12 +2179,12 @@ class FileGitBackend:
         target_status = preview["to_status"]
         current_status = preview["from_status"]
         record["status"] = target_status
-        record["updated_at"] = now
+        record["updated_at"] = preview["transition_at"]
         if target_status == "approved" and current_status == "candidate":
             record.update(
                 {
                     "approved_by": manager_approval.strip(),
-                    "approved_at": now,
+                    "approved_at": preview["transition_at"],
                     "validation": validation,
                 }
             )
@@ -2082,16 +2192,20 @@ class FileGitBackend:
             record.update(
                 {
                     "rejected_by": manager_approval.strip(),
-                    "rejected_at": now,
+                    "rejected_at": preview["transition_at"],
                     "rejection_reason": reason,
                 }
             )
         elif target_status == "obsolete":
-            record.update({"obsolete_at": now, "obsolete_reason": reason})
-        try:
-            validate_record(record)
-        except GovernanceError as exc:
-            raise OpcMemoryError(str(exc)) from exc
+            record.update(
+                {
+                    "obsolete_at": preview["transition_at"],
+                    "obsolete_reason": reason,
+                }
+            )
+        proposed_raw = canonical_record_bytes(record)
+        if sha256_bytes(proposed_raw) != preview["proposed_sha256"]:
+            raise OpcMemoryError("CURATION_PLAN_CHANGED: proposed record changed")
         source_raw = _read_bounded_bytes(source, label="canonical curation source")
         if sha256_bytes(source_raw) != preview["source_sha256"]:
             raise OpcMemoryError("CURATION_PLAN_CHANGED: canonical source changed")
@@ -2134,6 +2248,9 @@ class FileGitBackend:
             raise OpcMemoryError(
                 "curation transaction failed without an owned partial transition"
             ) from exc
+        final_raw = _read_bounded_bytes(destination, label="canonical curation result")
+        if final_raw != proposed_raw or sha256_bytes(final_raw) != preview["proposed_sha256"]:
+            raise OpcMemoryError("curation verification did not reproduce preview bytes")
         final = self._load_record(destination)
         return {
             **preview,
@@ -3442,6 +3559,10 @@ def build_parser() -> argparse.ArgumentParser:
     curate.add_argument(
         "--sensitivity", choices=("public", "internal", "restricted")
     )
+    curate.add_argument(
+        "--transition-at",
+        help="Exact timezone-aware transition timestamp returned by dry-run",
+    )
     curate.add_argument("--plan-token")
     return parser
 
@@ -3680,6 +3801,7 @@ def main(argv: list[str] | None = None) -> int:
                         label="applicability",
                     ),
                     "sensitivity": args.sensitivity,
+                    "transition_at": args.transition_at,
                 }
                 result = (
                     service.backend.apply_curation(

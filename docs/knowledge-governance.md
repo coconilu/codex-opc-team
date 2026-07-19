@@ -78,6 +78,13 @@ python <plugin-root>/scripts/opc_memory.py curate <id> --dry-run \
 
 经理批准的必须是这一个 preview。apply 时所有 proposal 参数和 `--plan-token` 必须完全相同；任何 canonical source 变化都会得到 `CURATION_PLAN_CHANGED`。成功结果给出精确 `git_stage_pathspecs`，只允许提交这些路径。curation 不会自动写 Mem0；exact Git commit 可被当前 HEAD 验证后，才可另行 preview/批准 reindex。
 
+### 审计加固约束
+
+- 关系图只包含通过状态、来源、scope、敏感级别和适用性硬过滤的记录；环检测采用有界迭代遍历，超长无关链不会消耗 Python 调用栈。
+- 迁移 inventory 必须先扫描全部状态并证明 ID 跨状态唯一，同时执行每状态 5000 条上限；apply 仅接受绑定一个唯一记录的 token。
+- curation preview 返回规范化的 `transition_at`、完整 `changed_fields` 和最终规范字节的 SHA-256。apply 必须带回同一个 `--transition-at`，并在落盘后逐字节验证。
+- `query-context --at`、适用期和生命周期时间戳都必须包含时区。非法 approved 记录仅以 `record_invalid` 和 portable ID 出现在 omission 中，正文不会输出。
+
 ## 5. Consumer 边界
 
 | Consumer | 可以 | 不可以 |

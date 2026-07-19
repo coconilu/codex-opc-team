@@ -23,7 +23,7 @@
         "source": {"type": ["string", "object"]},
         "evidence": {"type": "object", "maxProperties": 256},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "validation": {"type": ["string", "object"]},
+        "validation": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 4096}, {"type": "object"}]},
         "approved_by": {"type": "string", "minLength": 1, "maxLength": 4096},
         "approved_at": {"type": "string", "format": "date-time"},
         "rejected_by": {"type": "string", "minLength": 1, "maxLength": 4096},

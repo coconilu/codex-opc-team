@@ -157,9 +157,15 @@ def _timestamp(value: Any, label: str) -> datetime:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise GovernanceError(f"{label} must be a valid RFC 3339 timestamp") from exc
-    if parsed.tzinfo is None:
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise GovernanceError(f"{label} must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def _bounded_text(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > MAX_SHORT_TEXT:
+        raise GovernanceError(f"{label} must be a non-empty bounded string")
+    return value
 
 
 def _reject_non_finite(value: Any) -> None:
@@ -368,21 +374,32 @@ def validate_record(record: Mapping[str, Any]) -> None:
             raise GovernanceError(f"record.{field} must be an object")
     _timestamp(record.get("created_at"), "record.created_at")
     _timestamp(record.get("updated_at"), "record.updated_at")
-    if record["status"] == "approved":
-        for field in ("approved_by", "approved_at", "validation"):
-            if not record.get(field):
-                raise GovernanceError(f"approved record requires {field}")
-        _timestamp(record["approved_at"], "record.approved_at")
-    elif record["status"] == "rejected":
-        for field in ("rejected_by", "rejected_at", "rejection_reason"):
-            if not record.get(field):
-                raise GovernanceError(f"rejected record requires {field}")
-        _timestamp(record["rejected_at"], "record.rejected_at")
-    elif record["status"] == "obsolete":
-        for field in ("obsolete_at", "obsolete_reason"):
-            if not record.get(field):
-                raise GovernanceError(f"obsolete record requires {field}")
-        _timestamp(record["obsolete_at"], "record.obsolete_at")
+    lifecycle_text = (
+        "approved_by",
+        "rejected_by",
+        "rejection_reason",
+        "obsolete_reason",
+    )
+    for field in lifecycle_text:
+        if field in record:
+            _bounded_text(record[field], f"record.{field}")
+    for field in ("approved_at", "rejected_at", "obsolete_at"):
+        if field in record:
+            _timestamp(record[field], f"record.{field}")
+    if "validation" in record:
+        validation = record["validation"]
+        if isinstance(validation, str):
+            _bounded_text(validation, "record.validation")
+        elif not isinstance(validation, dict):
+            raise GovernanceError("record.validation must be a bounded string or object")
+    required_by_status = {
+        "approved": ("approved_by", "approved_at", "validation"),
+        "rejected": ("rejected_by", "rejected_at", "rejection_reason"),
+        "obsolete": ("obsolete_at", "obsolete_reason"),
+    }
+    for field in required_by_status.get(record["status"], ()):
+        if field not in record:
+            raise GovernanceError(f"{record['status']} record requires {field}")
     if version == SCHEMA_V2:
         if record.get("sensitivity") not in SENSITIVITIES:
             raise GovernanceError("record.sensitivity is unsupported")
@@ -476,27 +493,47 @@ def canonical_citation(
 
 
 def relation_cycles(edges: Mapping[str, set[str]]) -> set[str]:
-    """Return only nodes in a directed cycle, not every dependent node."""
+    """Return only directed-cycle nodes using a bounded iterative DFS."""
+
+    nodes = set(edges)
+    edge_count = 0
+    for targets in edges.values():
+        edge_count += len(targets)
+        nodes.update(targets)
+    if len(nodes) > MAX_RECORDS or edge_count > MAX_RECORDS * MAX_RELATIONS:
+        raise GovernanceError("relation graph exceeds the configured limit")
 
     state: dict[str, int] = {}
-    stack: list[str] = []
+    path: list[str] = []
+    positions: dict[str, int] = {}
     cyclic: set[str] = set()
-
-    def visit(node: str) -> None:
-        state[node] = 1
-        stack.append(node)
-        for target in sorted(edges.get(node, set())):
-            if state.get(target, 0) == 0:
-                visit(target)
-            elif state.get(target) == 1:
-                start = stack.index(target)
-                cyclic.update(stack[start:])
-        stack.pop()
-        state[node] = 2
-
-    for node in sorted(edges):
-        if state.get(node, 0) == 0:
-            visit(node)
+    for root in sorted(nodes):
+        if state.get(root, 0) != 0:
+            continue
+        state[root] = 1
+        positions[root] = len(path)
+        path.append(root)
+        frames: list[tuple[str, Any]] = [
+            (root, iter(sorted(edges.get(root, set()))))
+        ]
+        while frames:
+            node, targets = frames[-1]
+            try:
+                target = next(targets)
+            except StopIteration:
+                frames.pop()
+                finished = path.pop()
+                positions.pop(finished, None)
+                state[node] = 2
+                continue
+            target_state = state.get(target, 0)
+            if target_state == 0:
+                state[target] = 1
+                positions[target] = len(path)
+                path.append(target)
+                frames.append((target, iter(sorted(edges.get(target, set())))))
+            elif target_state == 1:
+                cyclic.update(path[positions[target] :])
     return cyclic
 
 

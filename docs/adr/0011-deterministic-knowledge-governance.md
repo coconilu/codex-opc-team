@@ -34,6 +34,8 @@ Schema 1 保持只读兼容。升级到 Schema 2 必须先生成零写入 previe
 
 Shadow Evaluation 仍用于 candidate 的只读证据生成。它可以读取 Schema 1/2 candidate，但不负责解决关系、改变状态或授予执行上下文资格；最终 recall 必须重新通过本 ADR 的完整治理筛选。
 
+补充的 fail-closed 实现约束如下：关系图只能在非关系硬过滤之后构建，环检测必须是有界迭代算法；迁移 inventory 必须验证跨状态 ID 唯一并执行每状态数量上限；curation token 必须绑定规范化 transition timestamp 与最终规范字节 hash，apply 写后验证同一字节；所有查询和生命周期时间必须显式带时区。无法通过 schema/runtime 校验的 approved 文件只产生不含正文的 `record_invalid` omission。
+
 ## Consequences
 
 - 不同消费者使用同一套版本、字段、限制、reason code 和排序边界。

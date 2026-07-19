@@ -73,6 +73,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         knowledge_type: str = "decision",
         constraints: Mapping[str, list[str]] | None = None,
         sensitivity: str = "internal",
+        valid_from: str | None = None,
         valid_until: str | None = None,
         relations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -95,7 +96,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
                 "roles": [role] if role else [],
                 "knowledge_types": [knowledge_type],
                 "constraints": dict(constraints or {}),
-                "valid_from": None,
+                "valid_from": valid_from,
                 "valid_until": valid_until,
             },
             "relations": sorted(
@@ -228,6 +229,42 @@ class KnowledgeGovernanceTests(unittest.TestCase):
             at_later_time["omitted_summary"]["reason_codes"],
         )
 
+    def test_query_time_requires_timezone_and_respects_window_boundaries(self) -> None:
+        windowed = self.record(
+            "exp-windowed",
+            valid_from="2026-01-01T00:00:00Z",
+            valid_until="2026-01-02T00:00:00Z",
+        )
+        self.write(windowed)
+        self.commit()
+        with self.assertRaisesRegex(opc_memory.OpcMemoryError, "timezone-aware"):
+            self.backend.query_context("governance-marker", at="2026-01-01T00:00:00")
+        at_start_z = self.backend.query_context(
+            "governance-marker", at="2026-01-01T00:00:00Z"
+        )
+        at_start_offset = self.backend.query_context(
+            "governance-marker", at="2026-01-01T08:00:00+08:00"
+        )
+        self.assertEqual(
+            [item["id"] for item in at_start_z["records"]],
+            [item["id"] for item in at_start_offset["records"]],
+        )
+        self.assertEqual([windowed["id"]], [item["id"] for item in at_start_z["records"]])
+        before = self.backend.query_context(
+            "governance-marker", at="2025-12-31T23:59:59Z"
+        )
+        self.assertEqual([], before["records"])
+        self.assertIn("not_yet_applicable", before["omitted_summary"]["reason_codes"])
+        before_end = self.backend.query_context(
+            "governance-marker", at="2026-01-01T23:59:59.999999Z"
+        )
+        self.assertEqual([windowed["id"]], [item["id"] for item in before_end["records"]])
+        at_end = self.backend.query_context(
+            "governance-marker", at="2026-01-02T00:00:00Z"
+        )
+        self.assertEqual([], at_end["records"])
+        self.assertIn("stale", at_end["omitted_summary"]["reason_codes"])
+
     def test_unresolved_conflict_withholds_both_bodies_and_preserves_citations(self) -> None:
         secret_a = "synthetic-private-body-a"
         secret_b = "synthetic-private-body-b"
@@ -296,6 +333,44 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         self.assertIn("relation_cycle", reasons["exp-cycle-a"])
         self.assertIn("relation_cycle", reasons["exp-cycle-b"])
         self.assertIn("relation_target_missing", reasons["exp-broken"])
+
+    def test_relation_cycles_are_iterative_bounded_and_isolated_after_hard_filters(self) -> None:
+        size = 1201
+        ring = {
+            f"exp-ring-{index}": {f"exp-ring-{(index + 1) % size}"}
+            for index in range(size)
+        }
+        self.assertEqual(set(ring), governance.relation_cycles(ring))
+        chain = {
+            f"exp-chain-{index}": {f"exp-chain-{index + 1}"}
+            for index in range(size)
+        }
+        self.assertEqual(set(), governance.relation_cycles(chain))
+
+        for index in range(size):
+            relations = (
+                [self.relation("invalidated_by", f"exp-rejected-{index + 1}")]
+                if index + 1 < size
+                else []
+            )
+            self.write(
+                self.record(
+                    f"exp-rejected-{index}",
+                    status="rejected",
+                    relations=relations,
+                )
+            )
+        valid = self.record("exp-independent-valid")
+        self.write(valid)
+        self.commit("large rejected relation chain")
+        with mock.patch.object(
+            opc_memory,
+            "relation_cycles",
+            wraps=governance.relation_cycles,
+        ) as cycle_check:
+            result = self.backend.query_context("governance-marker")
+        self.assertEqual([valid["id"]], [item["id"] for item in result["records"]])
+        self.assertEqual({}, cycle_check.call_args.args[0])
 
     def test_supersession_invalidation_and_status_chains_exclude_old_guidance(self) -> None:
         records = [
@@ -406,6 +481,58 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         self.assertFalse(second["changed"])
         self.assertTrue(second["idempotent"])
 
+    def test_migration_preview_rejects_cross_status_duplicates_before_any_write(self) -> None:
+        record_id = "exp-migration-duplicate"
+        legacy = self.record(record_id, status="approved")
+        legacy["schema_version"] = 1
+        for field in ("sensitivity", "applicability", "relations"):
+            legacy.pop(field)
+        candidate = self.record(record_id, status="candidate")
+        source_a = self.write(legacy)
+        source_b = self.write(candidate)
+        before = {source_a: source_a.read_bytes(), source_b: source_b.read_bytes()}
+        with self.assertRaisesRegex(opc_memory.OpcMemoryError, "duplicate record id"):
+            self.backend.schema_migration_plan(
+                record_id=record_id, backup_root=self.backups
+            )
+        obsolete = self.record(record_id, status="obsolete")
+        source_c = self.write(obsolete)
+        before[source_c] = source_c.read_bytes()
+        with self.assertRaisesRegex(opc_memory.OpcMemoryError, "duplicate record id"):
+            self.backend.schema_migration_plan(
+                record_id=record_id, backup_root=self.backups
+            )
+        self.assertEqual([], list(self.backups.iterdir()))
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+
+    def test_migration_inventory_limit_and_apply_single_identity_fail_closed(self) -> None:
+        oversized = mock.Mock()
+        oversized.glob.return_value = [
+            Path(f"exp-over-limit-{index}.json")
+            for index in range(governance.MAX_RECORDS + 1)
+        ]
+        with mock.patch.object(self.backend, "_folder", return_value=oversized):
+            with self.assertRaisesRegex(opc_memory.OpcMemoryError, "per-status"):
+                self.backend.schema_migration_plan(backup_root=self.backups)
+
+        forged_preview = {
+            "plan_token": "exact-token",
+            "items": [
+                {"record_id": "exp-one"},
+                {"record_id": "exp-one"},
+            ],
+        }
+        with mock.patch.object(
+            self.backend, "schema_migration_plan", return_value=forged_preview
+        ):
+            with self.assertRaisesRegex(opc_memory.OpcMemoryError, "exactly one unique"):
+                self.backend.apply_schema_migration(
+                    record_id="exp-one",
+                    backup_root=self.backups,
+                    plan_token="exact-token",
+                )
+        self.assertEqual([], list(self.backups.iterdir()))
+
     def test_migration_failure_preserves_source_and_removes_owned_backup(self) -> None:
         import opc_feedback
 
@@ -442,6 +569,31 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         self.assertEqual([], context["records"])
         self.assertEqual(3, context["omitted_summary"]["invalid_record_count"])
 
+    def test_malformed_approved_lifecycle_is_redacted_as_invalid_omission(self) -> None:
+        valid = self.record("exp-valid-lifecycle")
+        invalid_by = self.record("exp-invalid-approved-by")
+        invalid_by["approved_by"] = ["not", "a", "string"]
+        invalid_by["content"] = "secret-invalid-approved-by-body"
+        invalid_validation = self.record("exp-invalid-validation")
+        invalid_validation["validation"] = 7
+        invalid_validation["content"] = "secret-invalid-validation-body"
+        self.write(valid)
+        self.write(invalid_by)
+        self.write(invalid_validation)
+        self.commit("invalid lifecycle fixtures")
+
+        context = self.backend.query_context("governance-marker")
+        self.assertEqual([valid["id"]], [item["id"] for item in context["records"]])
+        invalid = {
+            item["record_id"]: item["reason_codes"]
+            for item in context["omissions"]
+        }
+        self.assertEqual(["record_invalid"], invalid[invalid_by["id"]])
+        self.assertEqual(["record_invalid"], invalid[invalid_validation["id"]])
+        serialized = json.dumps(context, ensure_ascii=False)
+        self.assertNotIn(invalid_by["content"], serialized)
+        self.assertNotIn(invalid_validation["content"], serialized)
+
     def test_curation_requires_exact_preview_and_exposes_narrow_git_paths(self) -> None:
         candidate = self.record("exp-curate", status="candidate")
         target = self.record("exp-curate-target")
@@ -460,6 +612,16 @@ class KnowledgeGovernanceTests(unittest.TestCase):
             relations=[relation],
         )
         self.assertTrue(preview["zero_write"])
+        self.assertTrue(
+            {
+                "approved_at",
+                "approved_by",
+                "relations",
+                "status",
+                "updated_at",
+                "validation",
+            }.issubset(preview["changed_fields"])
+        )
         self.assertEqual(
             set(preview["transition_paths"]),
             {
@@ -471,6 +633,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
             self.backend.apply_curation(
                 candidate["id"],
                 plan_token="0" * 64,
+                transition_at=preview["transition_at"],
                 manager_approval="manager-approval-01",
                 set_status="approved",
                 validation="synthetic replay passed",
@@ -479,6 +642,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         result = self.backend.apply_curation(
             candidate["id"],
             plan_token=preview["plan_token"],
+            transition_at=preview["transition_at"],
             manager_approval="manager-approval-01",
             set_status="approved",
             validation="synthetic replay passed",
@@ -486,6 +650,23 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         )
         self.assertTrue(result["git_commit_required"])
         self.assertFalse(result["provider_write_performed"])
+        destination = self.knowledge / preview["destination_path"]
+        self.assertEqual(
+            preview["proposed_sha256"],
+            opc_memory.sha256_bytes(destination.read_bytes()),
+        )
+        applied_bytes = destination.read_bytes()
+        with self.assertRaises(opc_memory.OpcMemoryError):
+            self.backend.apply_curation(
+                candidate["id"],
+                plan_token=preview["plan_token"],
+                transition_at=preview["transition_at"],
+                manager_approval="manager-approval-01",
+                set_status="approved",
+                validation="synthetic replay passed",
+                relations=[relation],
+            )
+        self.assertEqual(applied_bytes, destination.read_bytes())
         subprocess.run(
             [
                 "git", "-C", str(self.knowledge), "add", "-A", "--",
@@ -519,6 +700,32 @@ class KnowledgeGovernanceTests(unittest.TestCase):
             capture_output=True,
         ).stdout.replace("\\", "/"))
 
+    def test_in_place_relation_curation_reproduces_preview_bytes(self) -> None:
+        record = self.record("exp-in-place")
+        target = self.record("exp-in-place-target")
+        source = self.write(record)
+        self.write(target)
+        relation = self.relation("conflicts", target["id"])
+        preview = self.backend.curation_plan(
+            record["id"],
+            manager_approval="manager-in-place",
+            relations=[relation],
+            transition_at="2026-02-03T04:05:06+08:00",
+        )
+        self.assertEqual("2026-02-02T20:05:06Z", preview["transition_at"])
+        self.assertEqual(["relations", "updated_at"], preview["changed_fields"])
+        result = self.backend.apply_curation(
+            record["id"],
+            plan_token=preview["plan_token"],
+            manager_approval="manager-in-place",
+            relations=[relation],
+            transition_at=preview["transition_at"],
+        )
+        self.assertEqual(preview["proposed_sha256"], result["proposed_sha256"])
+        self.assertEqual(
+            preview["proposed_sha256"], opc_memory.sha256_bytes(source.read_bytes())
+        )
+
     def test_curation_move_failure_rolls_back_owned_destination(self) -> None:
         import opc_feedback
 
@@ -551,6 +758,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
                 self.backend.apply_curation(
                     candidate["id"],
                     plan_token=preview["plan_token"],
+                    transition_at=preview["transition_at"],
                     manager_approval="manager-approval-rollback",
                     set_status="approved",
                     validation="synthetic replay passed",
@@ -610,6 +818,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
                     self.backend.apply_curation(
                         candidate["id"],
                         plan_token=preview["plan_token"],
+                        transition_at=preview["transition_at"],
                         manager_approval="manager-approval-parent-swap",
                         set_status="approved",
                         validation="synthetic replay passed",
@@ -660,7 +869,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         "jsonschema is optional in the dependency-free core job",
     )
     def test_schema_and_runtime_accept_v1_v2_and_reject_the_same_bad_relation(self) -> None:
-        from jsonschema import Draft202012Validator
+        from jsonschema import Draft202012Validator, FormatChecker
 
         schema = json.loads(
             (
@@ -673,7 +882,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
                 / "experience.schema.json"
             ).read_text(encoding="utf-8")
         )
-        validator = Draft202012Validator(schema)
+        validator = Draft202012Validator(schema, format_checker=FormatChecker())
         v2 = self.record("exp-schema-v2", status="candidate")
         v1 = copy.deepcopy(v2)
         v1["schema_version"] = 1
@@ -692,6 +901,26 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         self.assertFalse(validator.is_valid(invalid))
         with self.assertRaises(governance.GovernanceError):
             governance.validate_record(invalid)
+
+        lifecycle_cases: list[tuple[str, dict[str, Any]]] = []
+        for label, field, value in (
+            ("approved_by_list", "approved_by", ["manager"]),
+            ("validation_number", "validation", 7),
+            ("rejected_by_number", "rejected_by", 7),
+            ("obsolete_reason_empty", "obsolete_reason", ""),
+            ("approved_by_oversized", "approved_by", "x" * 4097),
+        ):
+            case = self.record(f"exp-{label.replace('_', '-')}", status="candidate")
+            case[field] = value
+            lifecycle_cases.append((label, case))
+        naive_time = self.record("exp-naive-approved-time")
+        naive_time["approved_at"] = "2026-01-01T00:00:00"
+        lifecycle_cases.append(("approved_at_naive", naive_time))
+        for label, case in lifecycle_cases:
+            with self.subTest(label=label):
+                self.assertFalse(validator.is_valid(case))
+                with self.assertRaises(governance.GovernanceError):
+                    governance.validate_record(case)
 
     @unittest.skipUnless(os.name == "nt", "Windows 8.3 aliases only")
     def test_windows_short_normal_directory_alias_keeps_identity(self) -> None:

@@ -65,7 +65,8 @@
     "stale",
     "superseded",
     "invalidated",
-    "unresolved_conflict"
+    "unresolved_conflict",
+    "record_invalid"
   ],
   "governance": {
     "preview_default_zero_write": true,
@@ -74,6 +75,11 @@
     "exact_git_commit_required": true,
     "provider_write_during_curation": false,
     "migration_backup_required": true,
+    "migration_inventory_unique_across_statuses": true,
+    "relation_graph_after_hard_filters": true,
+    "relation_cycle_detection_iterative_and_bounded": true,
+    "curation_preview_binds_final_timestamp_and_bytes": true,
+    "timezone_aware_evaluation_required": true,
     "automatic_llm_or_provider_approval": false
   }
 }
