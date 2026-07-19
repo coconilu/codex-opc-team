@@ -349,29 +349,50 @@ def _is_reparse(path: Path) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
+def _existing_object_is_within(candidate: Path, parent: Path) -> bool:
+    """Compare existing ancestors by filesystem identity, including Windows aliases."""
+    current = candidate
+    while not current.exists():
+        ancestor = current.parent
+        if ancestor == current:
+            return False
+        current = ancestor
+    while True:
+        try:
+            if os.path.samefile(current, parent):
+                return True
+        except OSError as exc:
+            raise FeedbackError("feedback boundary identity could not be verified") from exc
+        ancestor = current.parent
+        if ancestor == current:
+            return False
+        current = ancestor
+
+
 def _assert_private_containment(project_root: Path, target: Path) -> Path:
     project = project_root.expanduser().resolve(strict=True)
     plugin = Path(__file__).resolve().parents[1]
-    try:
-        project.relative_to(plugin)
+    if _existing_object_is_within(project, plugin):
         raise FeedbackError("project runtime must not be stored inside the installed plugin tree")
-    except ValueError:
-        pass
-    try:
-        plugin.relative_to(project)
+    if _existing_object_is_within(plugin, project):
         raise FeedbackError("project runtime must not contain the installed plugin tree")
-    except ValueError:
-        pass
     candidate = target.resolve(strict=False)
-    try:
-        candidate.relative_to(project)
-    except ValueError as exc:
-        raise FeedbackError("feedback path escapes the private project boundary") from exc
-    current = project
-    for part in target.relative_to(project).parts[:-1]:
-        current = current / part
-        if current.exists() and (current.is_symlink() or _is_reparse(current)):
+    if not _existing_object_is_within(candidate, project):
+        raise FeedbackError("feedback path escapes the private project boundary")
+    current = target.parent
+    while True:
+        try:
+            at_project = current.exists() and os.path.samefile(current, project)
+        except OSError as exc:
+            raise FeedbackError("feedback boundary identity could not be verified") from exc
+        if at_project:
+            break
+        if current.is_symlink() or (current.exists() and _is_reparse(current)):
             raise FeedbackError("feedback path crosses a symlink or reparse boundary")
+        ancestor = current.parent
+        if ancestor == current:
+            raise FeedbackError("feedback path escapes the private project boundary")
+        current = ancestor
     if target.exists() and (target.is_symlink() or _is_reparse(target)):
         raise FeedbackError("feedback record must not be a symlink or reparse point")
     if target.exists() and target.is_file() and target.lstat().st_nlink != 1:

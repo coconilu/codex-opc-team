@@ -93,6 +93,39 @@ class StructuredFeedbackTests(unittest.TestCase):
         root.mkdir()
         return temporary, FeedbackFixture(root)
 
+    @unittest.skipUnless(os.name == "nt", "Windows short-path aliases only")
+    def test_windows_short_and_long_path_aliases_use_filesystem_identity(self):
+        import ctypes
+
+        temporary, fixture = self.make_fixture()
+        self.addCleanup(temporary.cleanup)
+        get_short = ctypes.windll.kernel32.GetShortPathNameW
+        get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        get_short.restype = ctypes.c_uint
+        source = str(fixture.root.resolve(strict=True))
+        size = get_short(source, None, 0)
+        if size == 0:
+            self.skipTest("8.3 path aliases are unavailable")
+        buffer = ctypes.create_unicode_buffer(size + 1)
+        written = get_short(source, buffer, len(buffer))
+        if written == 0 or Path(buffer.value) == Path(source):
+            self.skipTest("this volume did not produce a distinct 8.3 alias")
+        feedback = Path(buffer.value) / ".opc" / "feedback"
+        with opc_feedback._BoundDirectory(feedback, Path(source)) as bound:
+            self.assertEqual(
+                opc_feedback._directory_identity(feedback.lstat()), bound.token
+            )
+
+    def test_filesystem_identity_containment_still_rejects_true_escape(self):
+        temporary, fixture = self.make_fixture()
+        self.addCleanup(temporary.cleanup)
+        outside = Path(temporary.name) / "outside"
+        outside.mkdir()
+        with self.assertRaisesRegex(opc_feedback.FeedbackError, "escapes"):
+            opc_feedback._assert_private_containment(
+                fixture.root, outside / "feedback" / "record.json"
+            )
+
     def test_existing_run_without_feedback_remains_readable_without_default_fabrication(self):
         temporary, fixture = self.make_fixture()
         self.addCleanup(temporary.cleanup)
