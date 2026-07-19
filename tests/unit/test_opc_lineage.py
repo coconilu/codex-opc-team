@@ -170,6 +170,21 @@ class KnowledgeLineageTests(unittest.TestCase):
         self.assertEqual(len(result["context_packet"]["citations"]), 1)
         return result, result["context_packet"]["citations"][0]
 
+    def windows_short_alias_or_same(self, path: Path) -> Path:
+        if os.name != "nt":
+            return path
+        import ctypes
+
+        get_short = ctypes.windll.kernel32.GetShortPathNameW
+        source = str(path.resolve(strict=True))
+        size = get_short(source, None, 0)
+        if size == 0:
+            return path
+        buffer = ctypes.create_unicode_buffer(size + 1)
+        if get_short(source, buffer, len(buffer)) == 0:
+            return path
+        return Path(buffer.value)
+
     def test_v01_run_without_lineage_is_readable_and_preview_is_zero_write(self) -> None:
         view = opc_lineage.build_view(self.fixture.project)
         self.assertEqual(view["lineage_status"], "unavailable")
@@ -1187,7 +1202,7 @@ class KnowledgeLineageTests(unittest.TestCase):
                 now="2026-07-19T00:00:30Z",
             )
 
-    def test_directory_ignore_covers_final_lock_pending_and_backup_artifacts(self) -> None:
+    def test_directory_ignore_covers_transaction_artifacts_across_filesystem_aliases(self) -> None:
         subprocess.run(
             ["git", "init", "-b", "main", str(self.fixture.project)],
             check=True,
@@ -1195,6 +1210,9 @@ class KnowledgeLineageTests(unittest.TestCase):
         )
         (self.fixture.project / ".gitignore").write_text(
             ".opc/lineage/\n", encoding="utf-8"
+        )
+        self.fixture.project = self.windows_short_alias_or_same(
+            self.fixture.project
         )
         first = self.fixture.event(
             "lineage-private-first",
@@ -1224,8 +1242,18 @@ class KnowledgeLineageTests(unittest.TestCase):
 
         def inspect_artifacts(bound, label):
             if label == "after_pending_creation":
+                self.assertTrue(
+                    os.path.samefile(
+                        bound.path,
+                        self.fixture.project / ".opc" / "lineage",
+                    )
+                )
                 for artifact in bound.path.iterdir():
-                    relative = artifact.relative_to(self.fixture.project).as_posix()
+                    # Windows can expose the fixture root through an 8.3 alias
+                    # while the bound handle expands to the long path.  The
+                    # portable Git ref is defined by the bound directory and
+                    # child name, not lexical parent-path spelling.
+                    relative = f".opc/lineage/{artifact.name}"
                     result = subprocess.run(
                         ["git", "-C", str(self.fixture.project), "check-ignore", "-q", "--", relative],
                         check=False,
@@ -1291,17 +1319,12 @@ class KnowledgeLineageTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows 8.3 aliases only")
     def test_windows_short_path_alias_uses_filesystem_identity(self) -> None:
-        import ctypes
-
-        get_short = ctypes.windll.kernel32.GetShortPathNameW
-        source = str(self.fixture.project.resolve(strict=True))
-        size = get_short(source, None, 0)
-        if size == 0:
-            self.skipTest("8.3 aliases unavailable")
-        buffer = ctypes.create_unicode_buffer(size + 1)
-        if get_short(source, buffer, len(buffer)) == 0 or buffer.value == source:
+        source = self.fixture.project.resolve(strict=True)
+        alias = self.windows_short_alias_or_same(source)
+        if alias == source:
             self.skipTest("no distinct 8.3 alias")
-        view = opc_lineage.build_view(Path(buffer.value))
+        self.assertTrue(os.path.samefile(alias, source))
+        view = opc_lineage.build_view(alias)
         self.assertEqual(view["lineage_status"], "unavailable")
 
 
