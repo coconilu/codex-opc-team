@@ -220,6 +220,92 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
             self.assertIn("Windows only", help_text)
             self.assertIn("POSIX is stdout-only", help_text)
 
+    @unittest.skipIf(os.name == "nt", "POSIX stdout-only contract")
+    def test_posix_cli_rejects_output_before_any_private_processing(self) -> None:
+        missing = self.temporary_canonical / "missing-private"
+        malicious = self.temporary_canonical / "private" / ".." / "escape"
+        unreadable = self.temporary_canonical / "unreadable-private"
+        unreadable.mkdir()
+        unreadable_summary = unreadable / "pilot.json"
+        unreadable_gates = unreadable / "gates.json"
+        unreadable_summary.write_bytes(b"not private JSON\n")
+        unreadable_gates.write_bytes(b"not release gates\n")
+        unreadable_summary.chmod(0)
+        unreadable_gates.chmod(0)
+        unreadable.chmod(0)
+
+        scenarios = (
+            ("missing", missing, missing / "pilot.json", missing / "gates.json"),
+            ("malicious", malicious, malicious / "../pilot.json", malicious / "../gates.json"),
+            ("unreadable", unreadable, unreadable_summary, unreadable_gates),
+        )
+        fd_root = Path("/proc/self/fd")
+        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
+        outputs: list[Path] = []
+        original_stat = release.os.stat
+
+        try:
+            with mock.patch.object(release, "_canonical_private_root") as canonical, \
+                    mock.patch.object(release, "_read_json") as read_json, \
+                    mock.patch.object(release, "_regular_private_file") as regular, \
+                    mock.patch.object(release.Path, "resolve") as resolve, \
+                    mock.patch.object(release.Path, "open") as path_open, \
+                    mock.patch.object(release, "validate_private_pilot") as validate, \
+                    mock.patch.object(release, "build_release_verdict") as build, \
+                    mock.patch.object(release, "_write_private_output") as write, \
+                    mock.patch.object(release, "_revalidate_private_reads") as revalidate, \
+                    mock.patch.object(release, "_require_exact_clean_head") as exact_head, \
+                    mock.patch.object(release.subprocess, "run") as git, \
+                    mock.patch.object(release.os, "stat", wraps=original_stat) as stat_call:
+                expected_error = None
+                for command in ("private-pilot", "release"):
+                    for name, private_root, summary, gates in scenarios:
+                        output = self.temporary_canonical / f"{command}-{name}-verdict.json"
+                        outputs.append(output)
+                        argv = [
+                            command,
+                            "--private-root",
+                            str(private_root),
+                            "--summary",
+                            str(summary),
+                        ]
+                        if command == "release":
+                            argv.extend(("--gates", str(gates)))
+                        argv.extend(("--output", str(output)))
+                        stdout, stderr = io.StringIO(), io.StringIO()
+                        with redirect_stdout(stdout), redirect_stderr(stderr):
+                            code = release.main(argv)
+                        self.assertEqual(1, code)
+                        self.assertEqual("", stdout.getvalue())
+                        self.assertIn(
+                            "POSIX private verdict output is unsupported",
+                            stderr.getvalue(),
+                        )
+                        if expected_error is None:
+                            expected_error = stderr.getvalue()
+                        self.assertEqual(expected_error, stderr.getvalue())
+
+                for operation in (
+                    canonical, read_json, regular, resolve, path_open, validate, build, write,
+                    revalidate, exact_head, git,
+                ):
+                    operation.assert_not_called()
+                private_prefix = os.fspath(self.temporary_canonical)
+                for stat_args in stat_call.call_args_list:
+                    candidate = os.fspath(stat_args.args[0])
+                    self.assertFalse(
+                        candidate.startswith(private_prefix),
+                        f"CLI rejection statted private input: {candidate}",
+                    )
+        finally:
+            unreadable.chmod(0o700)
+            unreadable_summary.chmod(0o600)
+            unreadable_gates.chmod(0o600)
+
+        self.assertTrue(all(not output.exists() for output in outputs))
+        if before_fds is not None:
+            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
+
     def test_public_template_and_quality_regression_fail_closed(self) -> None:
         private_template = self.private / ".opc" / "release-evidence" / "template.json"
         private_template.write_bytes(

@@ -736,6 +736,14 @@ def _write_private_output_windows(
             close_handle(handle)
 
 
+def _require_private_output_supported() -> None:
+    if os.name != "nt":
+        raise ReleaseEvidenceError(
+            "POSIX private verdict output is unsupported; omit --output and capture stdout "
+            "only within an approved private boundary"
+        )
+
+
 def _write_private_output(
     root: Path,
     path: Path,
@@ -743,11 +751,7 @@ def _write_private_output(
     *,
     pre_publish: Callable[[], None] | None = None,
 ) -> None:
-    if os.name != "nt":
-        raise ReleaseEvidenceError(
-            "POSIX private verdict output is unsupported; omit --output and capture stdout "
-            "only within an approved private boundary"
-        )
+    _require_private_output_supported()
     root_absolute, resolved_root, root_tokens = _canonical_private_root(root)
     absolute = Path(os.path.abspath(path))
     try:
@@ -1233,6 +1237,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command in {"private-pilot", "release"} and args.output is not None:
+            _require_private_output_supported()
         if args.command == "public":
             write_public(args.output, args.report)
             result: Mapping[str, Any] = {"public_evidence_status": "pass", "release_status": "blocked"}
