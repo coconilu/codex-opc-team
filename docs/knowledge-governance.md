@@ -80,7 +80,7 @@ python <plugin-root>/scripts/opc_memory.py curate <id> --dry-run \
 
 ### 审计加固约束
 
-- 关系图只包含通过状态、来源、scope、敏感级别和适用性硬过滤的记录；环检测采用有界迭代遍历，超长无关链不会消耗 Python 调用栈。
+- 关系图只包含通过状态、来源、scope、敏感级别和适用性硬过滤的记录；环检测采用有界迭代遍历，超长无关链不会消耗 Python 调用栈。结构失败先冻结，合法 supersede/invalidate 边再同时计算效果，因此链、分支和菱形图不依赖 ID、文件或边顺序，中间节点被淘汰也不会丢失其合法出边。
 - 迁移 inventory 必须先扫描全部状态并证明 ID 跨状态唯一，同时执行每状态 5000 条上限；apply 仅接受绑定一个唯一记录的 token。
 - curation preview 返回规范化的 `transition_at`、完整 `changed_fields` 和最终规范字节的 SHA-256。apply 必须带回同一个 `--transition-at`，并在落盘后逐字节验证。
 - `query-context --at`、适用期和生命周期时间戳都必须包含时区。非法 approved 记录仅以 `record_invalid` 和 portable ID 出现在 omission 中，正文不会输出。

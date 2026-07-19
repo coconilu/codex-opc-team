@@ -401,6 +401,105 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         self.assertIn("superseded", reasons["exp-old"])
         self.assertIn("invalidated", reasons["exp-invalid-target"])
 
+    def test_relation_effects_are_order_independent_across_chains_and_diamonds(self) -> None:
+        records = [
+            # The first chain sorts newest before middle; the second sorts
+            # middle before newest. Both must produce the same closure.
+            self.record(
+                "exp-sup-a-newest",
+                relations=[self.relation("supersedes", "exp-sup-z-middle")],
+            ),
+            self.record(
+                "exp-sup-z-middle",
+                relations=[self.relation("supersedes", "exp-sup-y-oldest")],
+            ),
+            self.record("exp-sup-y-oldest"),
+            self.record(
+                "exp-sup-z2-newest",
+                relations=[self.relation("supersedes", "exp-sup-a2-middle")],
+            ),
+            self.record(
+                "exp-sup-a2-middle",
+                relations=[self.relation("supersedes", "exp-sup-b2-oldest")],
+            ),
+            self.record("exp-sup-b2-oldest"),
+            self.record(
+                "exp-inv-a-newest",
+                relations=[self.relation("invalidates", "exp-inv-z-middle")],
+            ),
+            self.record(
+                "exp-inv-z-middle",
+                relations=[self.relation("invalidates", "exp-inv-y-oldest")],
+            ),
+            self.record("exp-inv-y-oldest"),
+            self.record(
+                "exp-mix-a-newest",
+                relations=[self.relation("supersedes", "exp-mix-z-middle")],
+            ),
+            self.record(
+                "exp-mix-z-middle",
+                relations=[self.relation("invalidates", "exp-mix-y-oldest")],
+            ),
+            self.record("exp-mix-y-oldest"),
+            self.record(
+                "exp-dia-z-left",
+                relations=[self.relation("supersedes", "exp-dia-x-bottom")],
+            ),
+            self.record(
+                "exp-dia-y-right",
+                relations=[self.relation("supersedes", "exp-dia-x-bottom")],
+            ),
+            self.record("exp-dia-x-bottom"),
+            self.record("exp-effect-independent"),
+        ]
+        diamond_root = self.record(
+            "exp-dia-a-newest",
+            relations=[
+                self.relation("supersedes", "exp-dia-y-right"),
+                self.relation("supersedes", "exp-dia-z-left"),
+            ],
+        )
+        diamond_root["relations"].reverse()
+        governance.validate_record(diamond_root)
+        records.append(diamond_root)
+        for record in reversed(records):
+            self.write(record)
+        self.commit("relation effect closure fixtures")
+
+        result = self.backend.query_context("governance-marker")
+        self.assertEqual(
+            {
+                "exp-sup-a-newest",
+                "exp-sup-z2-newest",
+                "exp-inv-a-newest",
+                "exp-mix-a-newest",
+                "exp-dia-a-newest",
+                "exp-effect-independent",
+            },
+            {item["id"] for item in result["records"]},
+        )
+        omissions = {item["record_id"]: item for item in result["omissions"]}
+        expected = {
+            "exp-sup-z-middle": "superseded",
+            "exp-sup-y-oldest": "superseded",
+            "exp-sup-a2-middle": "superseded",
+            "exp-sup-b2-oldest": "superseded",
+            "exp-inv-z-middle": "invalidated",
+            "exp-inv-y-oldest": "invalidated",
+            "exp-mix-z-middle": "superseded",
+            "exp-mix-y-oldest": "invalidated",
+            "exp-dia-z-left": "superseded",
+            "exp-dia-y-right": "superseded",
+            "exp-dia-x-bottom": "superseded",
+        }
+        for record_id, reason in expected.items():
+            with self.subTest(record_id=record_id):
+                self.assertIn(reason, omissions[record_id]["reason_codes"])
+                self.assertEqual(
+                    record_id,
+                    omissions[record_id]["citation"]["record_id"],
+                )
+
     def test_provider_rank_cannot_override_canonical_order_or_current_head(self) -> None:
         project = self.record(
             "exp-ranked-project", scope="project", project_id="project-a"

@@ -610,6 +610,7 @@ def validate_knowledge_governance_contract() -> None:
                 "migration_inventory_unique_across_statuses",
                 "relation_graph_after_hard_filters",
                 "relation_cycle_detection_iterative_and_bounded",
+                "relation_effects_order_independent",
                 "curation_preview_binds_final_timestamp_and_bytes",
                 "timezone_aware_evaluation_required",
             )

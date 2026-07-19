@@ -1161,22 +1161,54 @@ class FileGitBackend:
         for record_id in relation_cycles(edges):
             relation_reasons[record_id].add("relation_cycle")
 
+        # Finish structural eligibility before computing any governance effect.
+        # For inverse relations, an ineligible target makes the source
+        # ineligible too; propagate that fact with a bounded work queue so the
+        # result cannot depend on record or edge order.
+        inverse_dependents: dict[str, set[str]] = {}
+        for source_id, target_id, kind in active_relations:
+            if kind in {"superseded_by", "invalidated_by"}:
+                inverse_dependents.setdefault(target_id, set()).add(source_id)
+        structurally_ineligible = [
+            record_id
+            for record_id in sorted(hard_filter_eligible)
+            if relation_reasons[record_id]
+        ]
+        queue_index = 0
+        while queue_index < len(structurally_ineligible):
+            target_id = structurally_ineligible[queue_index]
+            queue_index += 1
+            for source_id in sorted(inverse_dependents.get(target_id, set())):
+                if relation_reasons[source_id]:
+                    continue
+                relation_reasons[source_id].add("relation_target_ineligible")
+                structurally_ineligible.append(source_id)
+
+        # Compute effects simultaneously from the frozen, structurally valid
+        # graph. A middle node that is superseded/invalidated by one edge still
+        # contributes all of its own valid outgoing edges in the same graph.
+        relation_effects: dict[str, set[str]] = {
+            record_id: set() for record_id in inventory
+        }
         for source_id, target_id, kind in active_relations:
             if base_reasons.get(source_id) or relation_reasons[source_id]:
                 continue
-            target_eligible = not base_reasons.get(target_id) and not relation_reasons[target_id]
+            target_eligible = (
+                not base_reasons.get(target_id)
+                and not relation_reasons[target_id]
+            )
             if kind in {"supersedes", "invalidates"}:
                 if target_eligible:
-                    relation_reasons[target_id].add(
+                    relation_effects[target_id].add(
                         "superseded" if kind == "supersedes" else "invalidated"
                     )
             elif kind in {"superseded_by", "invalidated_by"}:
                 if target_eligible:
-                    relation_reasons[source_id].add(
+                    relation_effects[source_id].add(
                         "superseded" if kind == "superseded_by" else "invalidated"
                     )
-                else:
-                    relation_reasons[source_id].add("relation_target_ineligible")
+        for record_id, effects in relation_effects.items():
+            relation_reasons[record_id].update(effects)
 
         conflict_pairs: set[tuple[str, str]] = set()
         for source_id, target_id, kind in active_relations:

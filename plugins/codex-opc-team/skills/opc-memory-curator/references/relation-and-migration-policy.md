@@ -4,7 +4,7 @@
 
 Use `query-context`, not Provider rank, to decide what may enter execution context. The fixed hard-filter order is scope/project identity, approved status, current-HEAD commit and hash, sensitivity permission, explicit applicability, then invalidation/supersession. Missing project context means global-only; never infer a project ID from an absolute path.
 
-An unresolved conflict withholds both records. Show both canonical citations and no body. Build the bounded relation graph only after status, provenance, scope, sensitivity, and applicability hard filters; use iterative cycle detection so a long irrelevant chain cannot exhaust the call stack. Missing targets, invalid relation data, ineligible targets, and directed cycles fail only the related records. An invalid approved record emits only its portable record ID plus `record_invalid`; never expose its body.
+An unresolved conflict withholds both records. Show both canonical citations and no body. Build the bounded relation graph only after status, provenance, scope, sensitivity, and applicability hard filters; use iterative cycle detection so a long irrelevant chain cannot exhaust the call stack. Freeze structural failures first, then compute all supersession and invalidation effects simultaneously: a middle record excluded by one valid edge still contributes its own valid outgoing edges, so chains, branches, and diamonds are independent of record and edge order. Missing targets, invalid relation data, ineligible targets, and directed cycles fail only the related records. An invalid approved record emits only its portable record ID plus `record_invalid`; never expose its body.
 
 ## Schema migration
 
