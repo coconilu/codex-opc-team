@@ -134,6 +134,22 @@ class PrivacyScanTests(unittest.TestCase):
             findings = privacy_scan.scan(root)
             self.assertTrue(any("OpenAI-style secret" in item for item in findings))
 
+    def test_shared_common_credential_rules_are_scanned(self):
+        samples = {
+            "GitHub token": "ghp" + "_" + ("a" * 36),
+            "AWS access key": "AKIA" + ("B" * 16),
+            "Slack token": "xoxb" + "-" + ("c" * 20),
+            "Bearer credential": "Bearer " + ("d" * 24),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for index, value in enumerate(samples.values()):
+                (root / f"sample-{index}.txt").write_text(value, encoding="utf-8")
+            findings = privacy_scan.scan(root)
+            for label in samples:
+                with self.subTest(label=label):
+                    self.assertTrue(any(label in item for item in findings))
+
     def test_linked_worktree_git_control_file_is_not_public_content(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

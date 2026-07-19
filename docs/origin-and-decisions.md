@@ -69,6 +69,9 @@ flowchart LR
 | [ADR-0004](adr/0004-controlled-knowledge-promotion.md) | 经验受控晋升 | 候选不能直接成为组织规则 |
 | [ADR-0005](adr/0005-no-silent-global-config-mutation.md) | 不静默修改 Codex 全局配置 | 可选配置必须预览、确认、备份、恢复 |
 | [ADR-0006](adr/0006-independent-qa-before-manager-handoff.md) | 独立 QA 后才经理交接 | 实现者自述不构成 PASS |
+| [ADR-0007](adr/0007-runtime-events-outside-canonical-knowledge.md) | 运行事件与权威知识分离 | Hook/runtime 数据不得污染可召回知识 |
+| [ADR-0008](adr/0008-public-evaluation-private-pilot-boundary.md) | 公开评测与私有证据分离 | 真实试点只导出严格安全聚合 |
+| [ADR-0009](adr/0009-private-structured-feedback-sidecars.md) | 反馈使用项目私有不可变 sidecar | 晚到结果可审计但不自动晋升知识 |
 
 ## 6. 贯穿项目的四个关键词
 

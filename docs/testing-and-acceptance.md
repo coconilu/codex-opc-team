@@ -55,6 +55,8 @@ Optional Mem0 切片必须在安装依赖前从 `RUNNER_TEMP` 初始化 `MEM0_DI
 
 真实项目试点固定为 3–5 tasks。原始源码、对话、路径、运行标识、组织知识和逐任务结果留在私有项目证据边界，不进入公开仓库或 canonical knowledge；跨边界只允许严格 schema 的整体聚合。scope leakage 与 stale/obsolete acceptance 为零容忍，缺字段、零分母或不可验证结果不得记为 PASS。质量、context tokens 和 latency 必须并列报告，任何单项都不足以证明产品改进。
 
+结构化反馈测试必须覆盖：PASS、FAIL、partial 和 unknown 合成结果；经理判断/独立 QA/假设/未知信息分离；旧 run 无 sidecar 可读；同事件幂等、同 ID 冲突、stale 与并发写入 fail closed；Draft 2020-12 schema 与运行时对非法引用的一致拒绝；事件/sidecar 读取上限；共享凭证规则且错误/报告不泄漏；父目录在 pending 前后、replace 前和最终清理前变化时的回滚；竞争 lock/pending identity 保留；机器记录与确定性人类报告同源。测试还要证明写入只产生项目私有 feedback sidecar，不触发候选批准、Git、索引、发布、付款或外部通信。
+
 ## 6. Hook 隐私测试
 
 至少包含以下自动化用例：

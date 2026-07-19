@@ -290,6 +290,63 @@ def validate_evaluation_baseline() -> None:
     require("Safety: **PASS**" in report, "human evaluation report safety mismatch")
 
 
+def validate_structured_feedback_contract() -> None:
+    feedback = PLUGIN / "assets" / "feedback"
+    contract_path = feedback / "structured-feedback-contract.v1.json"
+    schema_path = feedback / "structured-feedback.v1.schema.json"
+    script_path = PLUGIN / "scripts" / "opc_feedback.py"
+    for path in (contract_path, schema_path, script_path):
+        require(path.is_file(), f"missing structured feedback artifact: {path}")
+    contract = load_json(contract_path)
+    schema = load_json(schema_path)
+    baseline = load_json(ROOT / "evaluation" / "contracts" / "baseline-contract.v1.json")
+    require(
+        contract.get("contract_version") == "opc-structured-feedback-contract-v1",
+        "unsupported structured feedback contract",
+    )
+    require(
+        contract.get("schema_version") == "opc-structured-feedback-v1",
+        "structured feedback schema version mismatch",
+    )
+    require(
+        contract.get("metric_contract") == baseline.get("contract_version"),
+        "structured feedback must reuse the evaluation metric contract",
+    )
+    metric_ids = [metric.get("id") for metric in baseline.get("metrics", [])]
+    require(
+        contract.get("metric_ids") == metric_ids,
+        "structured feedback metric ids must exactly match the baseline contract",
+    )
+    require(schema.get("additionalProperties") is False, "feedback record schema must be strict")
+    definitions = schema.get("$defs") or {}
+    for name in ("metricRef", "references", "event"):
+        require(
+            definitions.get(name, {}).get("additionalProperties") is False,
+            f"feedback schema {name} must reject additional properties",
+        )
+    require(
+        definitions.get("evidenceClass", {}).get("enum") == contract.get("evidence_classes"),
+        "feedback evidence classes must match the contract",
+    )
+    require(
+        definitions.get("observedOutcome", {}).get("enum") == contract.get("outcome_statuses"),
+        "feedback outcome statuses must match the contract",
+    )
+    require(
+        definitions.get("managerAcceptance", {}).get("enum") == contract.get("manager_judgments"),
+        "feedback manager judgments must match the contract",
+    )
+    require(
+        definitions.get("independentQaStatus", {}).get("enum") == contract.get("qa_statuses"),
+        "feedback QA statuses must match the contract",
+    )
+    require(
+        set(contract.get("forbidden_side_effects", []))
+        == {"candidate_approval", "git_commit", "indexing", "publishing", "payment", "external_communication"},
+        "structured feedback forbidden side effects are incomplete",
+    )
+
+
 def main() -> int:
     checks = [
         validate_manifest,
@@ -301,6 +358,7 @@ def main() -> int:
         validate_architecture_api_contract,
         validate_published_memory_contract,
         validate_evaluation_baseline,
+        validate_structured_feedback_contract,
         validate_markdown_links,
     ]
     try:

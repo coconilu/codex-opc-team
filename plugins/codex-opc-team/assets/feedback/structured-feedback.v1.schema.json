@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:schema:structured-feedback:v1",
+  "title": "OPC structured feedback record",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "project_ref", "run_ref", "revision", "created_at", "updated_at", "events"],
+  "properties": {
+    "schema_version": {"const": "opc-structured-feedback-v1"},
+    "contract_version": {"const": "opc-structured-feedback-contract-v1"},
+    "project_ref": {"$ref": "#/$defs/portableProjectId"},
+    "run_ref": {"$ref": "#/$defs/portableRunId"},
+    "revision": {"type": "integer", "minimum": 0, "maximum": 200},
+    "created_at": {"type": "string", "format": "date-time", "pattern": "Z$", "maxLength": 32},
+    "updated_at": {"type": "string", "format": "date-time", "pattern": "Z$", "maxLength": 32},
+    "events": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {"$ref": "#/$defs/event"}
+    }
+  },
+  "$defs": {
+    "portableProjectId": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$",
+      "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
+    },
+    "portableRunId": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^opc-(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$",
+      "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
+    },
+    "portableEventId": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^feedback-(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$",
+      "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
+    },
+    "knowledgeCandidateRef": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^exp-(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$",
+      "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
+    },
+    "evidenceClass": {
+      "enum": ["confirmed_outcome", "manager_judgment", "independent_qa_evidence", "hypothesis", "unverified"]
+    },
+    "observedOutcome": {
+      "enum": ["pass", "fail", "partial", "unknown", "not_applicable"]
+    },
+    "managerAcceptance": {
+      "enum": ["accepted", "changes_requested", "mixed", "neutral", "unknown", "not_applicable"]
+    },
+    "independentQaStatus": {
+      "enum": ["pass", "fail", "partial", "unknown", "not_applicable"]
+    },
+    "portableRef": {
+      "type": "string",
+      "maxLength": 240,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+      "not": {
+        "anyOf": [
+          {"pattern": "(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._ -]?[Ii][Dd]"},
+          {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
+        ]
+      }
+    },
+    "metricRef": {
+      "type": "object",
+      "required": ["metric_id", "aggregate_ref", "aggregate_sha256", "interpretation"],
+      "properties": {
+        "metric_id": {
+          "enum": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate", "scope_leakage_acceptances", "stale_obsolete_acceptances", "context_tokens_per_task", "latency_ms"]
+        },
+        "aggregate_ref": {"$ref": "#/$defs/portableRef"},
+        "aggregate_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
+        "interpretation": {"enum": ["supporting", "conflicting", "unknown"]}
+      },
+      "additionalProperties": false
+    },
+    "references": {
+      "type": "object",
+      "required": ["project_id", "run_id", "candidate_ids", "metric_refs", "artifact_refs"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/portableProjectId"},
+        "run_id": {"$ref": "#/$defs/portableRunId"},
+        "candidate_ids": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/knowledgeCandidateRef"}
+        },
+        "metric_refs": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {"$ref": "#/$defs/metricRef"}
+        },
+        "artifact_refs": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/portableRef"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["event_id", "recorded_at", "category", "epistemic_status", "summary", "outcome_status", "manager_judgment", "qa_status", "references"],
+      "properties": {
+        "event_id": {"$ref": "#/$defs/portableEventId"},
+        "recorded_at": {"type": "string", "format": "date-time", "pattern": "Z$", "maxLength": 32},
+        "category": {"$ref": "#/$defs/evidenceClass"},
+        "epistemic_status": {"$ref": "#/$defs/evidenceClass"},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 500, "pattern": "^[^\\r\\n]+$"},
+        "outcome_status": {"$ref": "#/$defs/observedOutcome"},
+        "manager_judgment": {"$ref": "#/$defs/managerAcceptance"},
+        "qa_status": {"$ref": "#/$defs/independentQaStatus"},
+        "references": {"$ref": "#/$defs/references"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"category": {"const": "confirmed_outcome"}}},
+          "then": {
+            "properties": {
+              "epistemic_status": {"const": "confirmed_outcome"},
+              "outcome_status": {"enum": ["pass", "fail", "partial"]},
+              "manager_judgment": {"const": "not_applicable"},
+              "qa_status": {"const": "not_applicable"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"category": {"const": "manager_judgment"}}},
+          "then": {
+            "properties": {
+              "epistemic_status": {"const": "manager_judgment"},
+              "outcome_status": {"const": "not_applicable"},
+              "manager_judgment": {"enum": ["accepted", "changes_requested", "mixed", "neutral", "unknown"]},
+              "qa_status": {"const": "not_applicable"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"category": {"const": "independent_qa_evidence"}}},
+          "then": {
+            "properties": {
+              "epistemic_status": {"const": "independent_qa_evidence"},
+              "outcome_status": {"const": "not_applicable"},
+              "manager_judgment": {"const": "not_applicable"},
+              "qa_status": {"enum": ["pass", "fail", "partial", "unknown"]},
+              "references": {"properties": {"artifact_refs": {"minItems": 1}}}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"category": {"const": "hypothesis"}}},
+          "then": {
+            "properties": {
+              "epistemic_status": {"const": "hypothesis"},
+              "outcome_status": {"const": "not_applicable"},
+              "manager_judgment": {"const": "not_applicable"},
+              "qa_status": {"const": "not_applicable"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"category": {"const": "unverified"}}},
+          "then": {
+            "properties": {
+              "epistemic_status": {"const": "unverified"},
+              "outcome_status": {"const": "unknown"},
+              "manager_judgment": {"const": "not_applicable"},
+              "qa_status": {"const": "not_applicable"}
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
