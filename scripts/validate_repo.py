@@ -347,6 +347,189 @@ def validate_structured_feedback_contract() -> None:
     )
 
 
+def validate_shadow_evaluation_contract() -> None:
+    contract_path = PLUGIN / "assets" / "evaluation" / "shadow-evaluation-contract.v1.json"
+    replay_schema_path = ROOT / "evaluation" / "schemas" / "shadow-replay.v1.schema.json"
+    result_schema_path = ROOT / "evaluation" / "schemas" / "shadow-result.v1.schema.json"
+    script_path = PLUGIN / "scripts" / "opc_shadow.py"
+    skill_path = PLUGIN / "skills" / "opc-shadow-evaluation" / "SKILL.md"
+    for path in (contract_path, replay_schema_path, result_schema_path, script_path, skill_path):
+        require(path.is_file(), f"missing Shadow Evaluation artifact: {path}")
+    contract = load_json(contract_path)
+    replay_schema = load_json(replay_schema_path)
+    result_schema = load_json(result_schema_path)
+    contract_hash = hashlib.sha256(contract_path.read_bytes()).hexdigest()
+    baseline_path = ROOT / "evaluation" / "contracts" / "baseline-contract.v1.json"
+    baseline = load_json(baseline_path)
+    baseline_hash = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
+    require(
+        contract.get("contract_version") == "opc-shadow-evaluation-contract-v1",
+        "unsupported Shadow Evaluation contract",
+    )
+    require(
+        contract.get("metric_contract") == baseline.get("contract_version")
+        and contract.get("metric_contract_sha256") == baseline_hash,
+        "Shadow Evaluation must bind the exact #4 metric contract",
+    )
+    baseline_groups = {
+        "quality_metrics": [
+            metric["id"] for metric in baseline["metrics"] if metric["category"] == "product_outcome"
+        ],
+        "safety_metrics": [
+            metric["id"] for metric in baseline["metrics"] if metric["category"] == "safety_gate"
+        ],
+        "telemetry_metrics": [
+            metric["id"] for metric in baseline["metrics"] if metric["category"] == "diagnostic_telemetry"
+        ],
+    }
+    arm = contract.get("arm_contract") or {}
+    for group, expected in baseline_groups.items():
+        require(arm.get(group) == expected, f"Shadow Evaluation {group} drifted from #4")
+    require(
+        replay_schema.get("additionalProperties") is False
+        and result_schema.get("additionalProperties") is False,
+        "Shadow Evaluation top-level schemas must reject extra fields",
+    )
+    for name in ("dataset", "candidate", "dependency", "ratio", "arm", "case"):
+        require(
+            replay_schema.get("$defs", {}).get(name, {}).get("additionalProperties") is False,
+            f"Shadow replay schema {name} must reject extra fields",
+        )
+    result_objects = (
+        "dataset",
+        "candidateSnapshot",
+        "preflight",
+        "aggregateRatio",
+        "contextAggregate",
+        "latencyAggregate",
+        "armAggregate",
+        "metricComparison",
+        "positiveMetricComparison",
+        "counterMetricComparison",
+        "metricRef",
+        "feedbackEvidence",
+        "evidenceBuckets",
+        "confidence",
+        "failureMode",
+        "conflictingMeasuredFailure",
+        "governance",
+        "measurements",
+    )
+    for name in result_objects:
+        require(
+            result_schema.get("$defs", {}).get(name, {}).get("additionalProperties") is False,
+            f"Shadow result schema {name} must reject extra fields",
+        )
+    result_properties = result_schema.get("properties", {})
+    require(
+        result_properties.get("metric_contract_sha256", {}).get("const") == baseline_hash
+        and result_properties.get("contract_sha256", {}).get("const") == contract_hash,
+        "Shadow result schema must bind exact baseline and Shadow contract hashes",
+    )
+    limits = contract.get("limits") or {}
+    require(
+        limits
+        == {
+            "replay_bytes": 524288,
+            "feedback_bytes": 524288,
+            "result_bytes": 1048576,
+            "cases": 20,
+            "evidence_items": 200,
+            "failure_modes": 64,
+            "identifier_characters": 128,
+            "portable_reference_characters": 240,
+            "ratio_component": 1000000,
+            "safety_count": 1000000,
+            "context_tokens_per_task": 10000000,
+            "latency_ms": 86400000,
+            "aggregate_ratio_component": 20000000,
+            "aggregate_safety_count": 20000000,
+            "aggregate_context_tokens": 200000000,
+            "aggregate_latency_ms": 1728000000,
+        },
+        "Shadow Evaluation numeric and artifact limits drifted",
+    )
+    replay_defs = replay_schema.get("$defs", {})
+    replay_metrics = replay_defs.get("arm", {}).get("properties", {}).get("metrics", {}).get("properties", {})
+    require(
+        replay_defs.get("ratio", {}).get("properties", {}).get("numerator", {}).get("maximum")
+        == limits["ratio_component"]
+        and replay_defs.get("ratio", {}).get("properties", {}).get("denominator", {}).get("maximum")
+        == limits["ratio_component"]
+        and replay_metrics.get("scope_leakage_acceptances", {}).get("maximum")
+        == limits["safety_count"]
+        and replay_metrics.get("stale_obsolete_acceptances", {}).get("maximum")
+        == limits["safety_count"]
+        and replay_metrics.get("context_tokens_per_task", {}).get("maximum")
+        == limits["context_tokens_per_task"]
+        and replay_metrics.get("latency_ms", {}).get("maximum") == limits["latency_ms"],
+        "Shadow replay schema numeric limits drifted from the contract",
+    )
+    governance = result_schema.get("$defs", {}).get("governance", {}).get("properties", {})
+    require(
+        all(
+            governance.get(name, {}).get("const") is False
+            for name in (
+                "automatic_promotion",
+                "candidate_status_changed",
+                "canonical_knowledge_written",
+                "git_written",
+                "provider_index_written",
+                "project_source_written",
+            )
+        ),
+        "Shadow result governance write permissions must be schema-constant false",
+    )
+    positive = result_schema.get("$defs", {}).get("positiveMetricComparison", {})
+    counter = result_schema.get("$defs", {}).get("counterMetricComparison", {})
+    conflict_failure = result_schema.get("$defs", {}).get("conflictingMeasuredFailure", {})
+    result_conditions = json.dumps(result_schema.get("allOf", []), sort_keys=True)
+    require(
+        positive.get("properties", {}).get("direction", {}).get("const") == "supporting"
+        and positive.get("properties", {}).get("source_kind", {}).get("const") == "measured",
+        "Shadow positive result schema must require measured supporting evidence",
+    )
+    require(
+        counter.get("properties", {}).get("direction", {}).get("const")
+        == "counterevidence"
+        and counter.get("properties", {}).get("source_kind", {}).get("const")
+        == "measured"
+        and conflict_failure.get("properties", {}).get("code", {}).get("const")
+        == "conflicting_measured_results"
+        and '"$ref": "#/$defs/conflictingMeasuredFailure"' in result_conditions
+        and '"$ref": "#/$defs/counterMetricComparison"' in result_conditions
+        and '"maxContains": 1' in result_conditions,
+        "Shadow result schema must preserve exact measured conflict evidence",
+    )
+    decision_policy = contract.get("decision_policy") or {}
+    require(
+        decision_policy.get("conflicting_quality_deltas") == "inconclusive"
+        and decision_policy.get("conflicting_measured_quality_or_safety_failure")
+        == "conflicting_measured_results"
+        and decision_policy.get(
+            "positive_forbids_measured_quality_or_safety_counterevidence"
+        )
+        is True,
+        "Shadow measured conflict policy is incomplete",
+    )
+    require(
+        set(contract.get("forbidden_side_effects", []))
+        == {
+            "candidate_status_change",
+            "canonical_knowledge_write",
+            "git_write",
+            "provider_index_write",
+            "project_source_write",
+            "automatic_promotion",
+        },
+        "Shadow Evaluation forbidden side effects are incomplete",
+    )
+    require(
+        (ROOT / "docs" / "adr" / "0010-read-only-shadow-evaluation.md").is_file(),
+        "Shadow Evaluation architecture boundary requires ADR-0010",
+    )
+
+
 def main() -> int:
     checks = [
         validate_manifest,
@@ -359,6 +542,7 @@ def main() -> int:
         validate_published_memory_contract,
         validate_evaluation_baseline,
         validate_structured_feedback_contract,
+        validate_shadow_evaluation_contract,
         validate_markdown_links,
     ]
     try:

@@ -45,6 +45,7 @@ SKILL_NAMES = (
     "opc-retrospective",
     "opc-memory-curator",
     "opc-memory",
+    "opc-shadow-evaluation",
 )
 SKILLS = tuple(f"codex-opc-team:{name}" for name in SKILL_NAMES)
 FIXTURE_SKILL_NAME = "lifecycle-sentinel"
@@ -606,6 +607,32 @@ def _install_opc(runner: CodexRunner, source: str, ref: str | None) -> dict[str,
     return result
 
 
+def _installed_opc_skills(install_result: Mapping[str, Any]) -> tuple[str, ...]:
+    """Read the exact catalog shipped by this installed snapshot.
+
+    Candidate and rollback refs may legitimately contain different Skill sets.
+    The installed immutable snapshot, not the runner checkout, is authoritative
+    for what fresh-process discovery must expose.
+    """
+
+    installed_path = install_result.get("installedPath")
+    if not isinstance(installed_path, str) or not installed_path:
+        raise AcceptanceError("Codex install result omitted installedPath")
+    skills_root = Path(installed_path) / "skills"
+    if not skills_root.is_dir():
+        raise AcceptanceError("installed OPC plugin omitted its Skill directory")
+    names = tuple(
+        sorted(
+            f"codex-opc-team:{path.parent.name}"
+            for path in skills_root.glob("*/SKILL.md")
+            if path.is_file()
+        )
+    )
+    if not names or len(names) != len(set(names)):
+        raise AcceptanceError("installed OPC plugin has an empty or duplicate Skill catalog")
+    return names
+
+
 def _install_fixture(runner: CodexRunner, source: Path) -> None:
     result = runner.run(
         "plugin", "marketplace", "add", str(source), "--json", json_output=True
@@ -670,14 +697,20 @@ def _validate_skill_catalog(
     *,
     expect_opc: bool,
     workspace: Path,
+    expected_opc: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     by_name = {entry["name"]: entry for entry in entries}
-    present = sorted(set(SKILLS) & set(by_name))
+    expected = tuple(expected_opc or SKILLS)
+    if len(expected) != len(set(expected)) or any(
+        not name.startswith("codex-opc-team:") for name in expected
+    ):
+        raise AcceptanceError("expected OPC Skill catalog is invalid")
+    present = sorted(set(expected) & set(by_name))
     opc_namespace = sorted(name for name in by_name if name.startswith("codex-opc-team:"))
-    if expect_opc and set(present) != set(SKILLS):
-        missing = sorted(set(SKILLS) - set(present))
+    if expect_opc and set(present) != set(expected):
+        missing = sorted(set(expected) - set(present))
         raise AcceptanceError(f"fresh-process discovery missed exact OPC skills: {missing}")
-    if expect_opc and opc_namespace != sorted(SKILLS):
+    if expect_opc and opc_namespace != sorted(expected):
         raise AcceptanceError("fresh-process discovery exposed an unexpected OPC skill set")
     if not expect_opc and opc_namespace:
         raise AcceptanceError("OPC skills remained model-visible after uninstall")
@@ -719,7 +752,11 @@ def _validate_skill_catalog(
 
 
 def _discovery(
-    runner: CodexRunner, *, expect_opc: bool, workspace: Path
+    runner: CodexRunner,
+    *,
+    expect_opc: bool,
+    workspace: Path,
+    expected_opc: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     # This starts a new OS process and asks Codex to render the real model-visible
     # prompt.  It does not call a model, use credentials, or create a session.
@@ -729,7 +766,10 @@ def _discovery(
     except json.JSONDecodeError as exc:
         raise AcceptanceError("fresh-process prompt discovery returned invalid JSON") from exc
     result = _validate_skill_catalog(
-        _parse_skill_catalog(parsed), expect_opc=expect_opc, workspace=workspace
+        _parse_skill_catalog(parsed),
+        expect_opc=expect_opc,
+        workspace=workspace,
+        expected_opc=expected_opc,
     )
     return {
         "method": "fresh-process-debug-prompt-input",
@@ -1032,7 +1072,12 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         report["checks"]["candidate_install"] = {
             "version": candidate_version,
             "fixed_ref": candidate_resolution is not None,
-            "discovery": _discovery(runner, expect_opc=True, workspace=workspace),
+            "discovery": _discovery(
+                runner,
+                expect_opc=True,
+                workspace=workspace,
+                expected_opc=_installed_opc_skills(candidate),
+            ),
         }
         _assert_protected_unchanged(baseline, paths, phase)
 
@@ -1066,7 +1111,12 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         report["checks"]["reinstall"] = {
             "version": reinstalled.get("version"),
             "same_version": True,
-            "discovery": _discovery(runner, expect_opc=True, workspace=workspace),
+            "discovery": _discovery(
+                runner,
+                expect_opc=True,
+                workspace=workspace,
+                expected_opc=_installed_opc_skills(reinstalled),
+            ),
             "memory_status": _memory_status(reinstalled, paths),
         }
         _assert_protected_unchanged(baseline, paths, phase)
@@ -1081,7 +1131,12 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             "version": rollback_version,
             "distinct_version": rollback_version != candidate_version,
             "fixed_ref": rollback_resolution is not None,
-            "discovery": _discovery(runner, expect_opc=True, workspace=workspace),
+            "discovery": _discovery(
+                runner,
+                expect_opc=True,
+                workspace=workspace,
+                expected_opc=_installed_opc_skills(rollback),
+            ),
             "memory_status": _memory_status(rollback, paths),
         }
         _assert_protected_unchanged(baseline, paths, phase)

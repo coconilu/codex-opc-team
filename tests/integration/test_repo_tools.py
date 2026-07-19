@@ -78,6 +78,91 @@ class VersionContractTests(unittest.TestCase):
             validate_repo.validate_version_contract()
 
 
+class ShadowContractValidationTests(unittest.TestCase):
+    def test_exact_shadow_contract_matches_baseline(self):
+        validate_repo.validate_shadow_evaluation_contract()
+
+    def test_shadow_contract_hash_or_metric_drift_fails_closed(self):
+        original = validate_repo.load_json
+        contract_path = (
+            validate_repo.PLUGIN
+            / "assets"
+            / "evaluation"
+            / "shadow-evaluation-contract.v1.json"
+        )
+        for mutation, message in (
+            (lambda value: value.update(metric_contract_sha256="0" * 64), "exact #4"),
+            (
+                lambda value: value["arm_contract"]["quality_metrics"].reverse(),
+                "quality_metrics drifted",
+            ),
+        ):
+            with self.subTest(message=message):
+                def altered(path):
+                    value = original(path)
+                    if path == contract_path:
+                        mutation(value)
+                    return value
+
+                with mock.patch.object(validate_repo, "load_json", side_effect=altered):
+                    with self.assertRaisesRegex(ValueError, message):
+                        validate_repo.validate_shadow_evaluation_contract()
+
+    def test_shadow_result_hash_and_numeric_limit_drift_fail_closed(self):
+        original = validate_repo.load_json
+        contract_path = (
+            validate_repo.PLUGIN
+            / "assets"
+            / "evaluation"
+            / "shadow-evaluation-contract.v1.json"
+        )
+        result_schema_path = (
+            validate_repo.ROOT
+            / "evaluation"
+            / "schemas"
+            / "shadow-result.v1.schema.json"
+        )
+        cases = (
+            (
+                contract_path,
+                lambda value: value["limits"].update(ratio_component=1000001),
+                "numeric and artifact limits drifted",
+            ),
+            (
+                result_schema_path,
+                lambda value: value["properties"]["contract_sha256"].update(
+                    const="0" * 64
+                ),
+                "exact baseline and Shadow contract hashes",
+            ),
+            (
+                contract_path,
+                lambda value: value["decision_policy"].update(
+                    positive_forbids_measured_quality_or_safety_counterevidence=False
+                ),
+                "measured conflict policy is incomplete",
+            ),
+            (
+                result_schema_path,
+                lambda value: value["$defs"]["counterMetricComparison"]["properties"][
+                    "direction"
+                ].update(const="neutral"),
+                "preserve exact measured conflict evidence",
+            ),
+        )
+        for target, mutation, message in cases:
+            with self.subTest(message=message):
+                def altered(path):
+                    value = original(path)
+                    if path == target:
+                        mutation(value)
+                    return value
+
+                with mock.patch.object(validate_repo, "load_json", side_effect=altered):
+                    with self.assertRaisesRegex(ValueError, message):
+                        validate_repo.validate_shadow_evaluation_contract()
+
+
 class PrivacyScanTests(unittest.TestCase):
     def test_reparse_attribute_is_python_310_compatible_junction_fallback(self):
         path = mock.Mock(spec=["lstat"])

@@ -135,6 +135,51 @@ class LifecycleContractTests(unittest.TestCase):
                         reduced, expect_opc=True, workspace=workspace
                     )
 
+    def test_candidate_and_rollback_validate_their_own_installed_catalog(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "clean-room"
+            installed = Path(temp) / "installed-plugin"
+            old_skills = tuple(
+                name for name in lifecycle.SKILLS if name != "codex-opc-team:opc-shadow-evaluation"
+            )
+            for name in old_skills:
+                folder = name.split(":", 1)[1]
+                skill = installed / "skills" / folder / "SKILL.md"
+                skill.parent.mkdir(parents=True, exist_ok=True)
+                skill.write_text("synthetic", encoding="utf-8")
+            expected = lifecycle._installed_opc_skills({"installedPath": str(installed)})
+            self.assertEqual(tuple(sorted(old_skills)), expected)
+            entries = [
+                {
+                    "name": name,
+                    "locator_kind": "file",
+                    "locator": str(workspace / "skills" / name / "SKILL.md"),
+                }
+                for name in (*old_skills, lifecycle.FIXTURE_SKILL)
+            ]
+            result = lifecycle._validate_skill_catalog(
+                entries,
+                expect_opc=True,
+                workspace=workspace,
+                expected_opc=expected,
+            )
+            self.assertEqual(list(expected), result["opc_skills"])
+            entries.insert(
+                -1,
+                {
+                    "name": "codex-opc-team:opc-shadow-evaluation",
+                    "locator_kind": "file",
+                    "locator": str(workspace / "skills" / "unexpected" / "SKILL.md"),
+                },
+            )
+            with self.assertRaisesRegex(lifecycle.AcceptanceError, "unexpected OPC skill set"):
+                lifecycle._validate_skill_catalog(
+                    entries,
+                    expect_opc=True,
+                    workspace=workspace,
+                    expected_opc=expected,
+                )
+
     def test_skill_catalog_rejects_injected_host_locator(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp) / "clean-room"

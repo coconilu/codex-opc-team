@@ -1,0 +1,391 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:schema:shadow-result:v1",
+  "title": "OPC Shadow Evaluation result",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "metric_contract", "metric_contract_sha256", "contract_sha256", "replay_sha256", "evaluation_id", "dataset", "candidate", "preflight", "status", "degradation_status", "recommendation", "measurements", "evidence", "confidence", "failure_modes", "governance"],
+  "properties": {
+    "schema_version": {"const": "opc-shadow-result-v1"},
+    "contract_version": {"const": "opc-shadow-evaluation-contract-v1"},
+    "metric_contract": {"const": "opc-evaluation-contract-v1"},
+    "metric_contract_sha256": {"const": "f7eda22695e25f91f15031d6a94d0183e399fc3b52b34a21130b7f567180444d"},
+    "contract_sha256": {"const": "d63bb2cc4ca9f4d545810f83256856f9e904e765de4bd591945df42bc9992d0d"},
+    "replay_sha256": {"$ref": "#/$defs/sha256"},
+    "evaluation_id": {"$ref": "#/$defs/portableId"},
+    "dataset": {"$ref": "#/$defs/dataset"},
+    "candidate": {"anyOf": [{"$ref": "#/$defs/candidateSnapshot"}, {"type": "null"}]},
+    "preflight": {"$ref": "#/$defs/preflight"},
+    "status": {"enum": ["conclusive", "inconclusive", "rejected_preflight"]},
+    "degradation_status": {"enum": ["none", "degraded"]},
+    "recommendation": {"enum": ["consider_for_separate_curation", "do_not_promote_on_shadow_evidence", "inconclusive", "preflight_rejected"]},
+    "measurements": {"anyOf": [{"$ref": "#/$defs/measurements"}, {"type": "null"}]},
+    "evidence": {"$ref": "#/$defs/evidenceBuckets"},
+    "confidence": {"$ref": "#/$defs/confidence"},
+    "failure_modes": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/failureMode"}},
+    "governance": {"$ref": "#/$defs/governance"}
+  },
+  "$defs": {
+    "portableId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
+    "candidateId": {"type": "string", "minLength": 5, "maxLength": 128, "pattern": "^exp-[A-Za-z0-9._-]+$"},
+    "portableRef": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"},
+    "sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
+    "gitCommit": {"type": "string", "minLength": 40, "maxLength": 64, "pattern": "^[0-9a-f]{40,64}$"},
+    "dataset": {
+      "type": "object",
+      "required": ["kind", "dataset_id", "project_id", "approval_ref"],
+      "properties": {
+        "kind": {"enum": ["synthetic", "approved_private_pilot"]},
+        "dataset_id": {"$ref": "#/$defs/portableId"},
+        "project_id": {"$ref": "#/$defs/portableId"},
+        "approval_ref": {"anyOf": [{"$ref": "#/$defs/portableRef"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "synthetic"}}},
+          "then": {"properties": {"approval_ref": {"type": "null"}}},
+          "else": {"properties": {"approval_ref": {"$ref": "#/$defs/portableRef"}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "candidateSnapshot": {
+      "type": "object",
+      "required": ["candidate_id", "status", "scope", "project_id", "source_path", "source_commit", "content_sha256", "declared_confidence"],
+      "properties": {
+        "candidate_id": {"$ref": "#/$defs/candidateId"},
+        "status": {"enum": ["candidate", "approved", "rejected", "obsolete"]},
+        "scope": {"enum": ["global", "project"]},
+        "project_id": {"anyOf": [{"$ref": "#/$defs/portableId"}, {"type": "null"}]},
+        "source_path": {"$ref": "#/$defs/portableRef"},
+        "source_commit": {"anyOf": [{"$ref": "#/$defs/gitCommit"}, {"type": "null"}]},
+        "content_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "declared_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"scope": {"const": "project"}}},
+          "then": {"properties": {"project_id": {"$ref": "#/$defs/portableId"}}},
+          "else": {"properties": {"project_id": {"type": "null"}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "preflight": {
+      "type": "object",
+      "required": ["passed", "reasons"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "reasons": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {"enum": ["candidate_missing_or_duplicate", "obsolete_or_non_candidate", "cross_project_scope", "stale_provenance"]}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"passed": {"const": true}}},
+          "then": {"properties": {"reasons": {"maxItems": 0}}},
+          "else": {"properties": {"reasons": {"minItems": 1}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "aggregateRatio": {
+      "type": "object",
+      "required": ["numerator", "denominator", "value"],
+      "properties": {
+        "numerator": {"type": "integer", "minimum": 0, "maximum": 20000000},
+        "denominator": {"type": "integer", "minimum": 0, "maximum": 20000000},
+        "value": {"type": ["number", "null"], "minimum": 0, "maximum": 20000000}
+      },
+      "additionalProperties": false
+    },
+    "contextAggregate": {
+      "type": "object",
+      "required": ["total", "median", "p95_nearest_rank"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 1, "maximum": 200000000},
+        "median": {"type": "number", "exclusiveMinimum": 0, "maximum": 10000000},
+        "p95_nearest_rank": {"type": "number", "exclusiveMinimum": 0, "maximum": 10000000}
+      },
+      "additionalProperties": false
+    },
+    "latencyAggregate": {
+      "type": "object",
+      "required": ["total", "median", "p95_nearest_rank"],
+      "properties": {
+        "total": {"type": "number", "exclusiveMinimum": 0, "maximum": 1728000000},
+        "median": {"type": "number", "exclusiveMinimum": 0, "maximum": 86400000},
+        "p95_nearest_rank": {"type": "number", "exclusiveMinimum": 0, "maximum": 86400000}
+      },
+      "additionalProperties": false
+    },
+    "armAggregate": {
+      "type": "object",
+      "required": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate", "scope_leakage_acceptances", "stale_obsolete_acceptances", "context_tokens_per_task", "latency_ms"],
+      "properties": {
+        "manager_intervention_rate": {"$ref": "#/$defs/aggregateRatio"},
+        "qa_catch_rate": {"$ref": "#/$defs/aggregateRatio"},
+        "rework_loops_per_task": {"$ref": "#/$defs/aggregateRatio"},
+        "valid_knowledge_reuse_rate": {"$ref": "#/$defs/aggregateRatio"},
+        "false_recall_rate": {"$ref": "#/$defs/aggregateRatio"},
+        "scope_leakage_acceptances": {"type": "integer", "minimum": 0, "maximum": 20000000},
+        "stale_obsolete_acceptances": {"type": "integer", "minimum": 0, "maximum": 20000000},
+        "context_tokens_per_task": {"$ref": "#/$defs/contextAggregate"},
+        "latency_ms": {"$ref": "#/$defs/latencyAggregate"}
+      },
+      "additionalProperties": false
+    },
+    "metricComparison": {
+      "type": "object",
+      "required": ["metric_id", "control", "treatment", "direction", "source_kind"],
+      "properties": {
+        "metric_id": {"enum": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate", "scope_leakage_acceptances", "stale_obsolete_acceptances", "context_tokens_per_task", "latency_ms"]},
+        "control": {"type": ["number", "null"], "minimum": 0, "maximum": 86400000},
+        "treatment": {"type": ["number", "null"], "minimum": 0, "maximum": 86400000},
+        "direction": {"enum": ["supporting", "counterevidence", "neutral", "unknown"]},
+        "source_kind": {"const": "measured"}
+      },
+      "additionalProperties": false
+    },
+    "positiveMetricComparison": {
+      "type": "object",
+      "required": ["metric_id", "control", "treatment", "direction", "source_kind"],
+      "properties": {
+        "metric_id": {"enum": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate", "scope_leakage_acceptances", "stale_obsolete_acceptances"]},
+        "control": {"type": ["number", "null"], "minimum": 0, "maximum": 20000000},
+        "treatment": {"type": ["number", "null"], "minimum": 0, "maximum": 20000000},
+        "direction": {"const": "supporting"},
+        "source_kind": {"const": "measured"}
+      },
+      "additionalProperties": false
+    },
+    "counterMetricComparison": {
+      "type": "object",
+      "required": ["metric_id", "control", "treatment", "direction", "source_kind"],
+      "properties": {
+        "metric_id": {"enum": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate", "scope_leakage_acceptances", "stale_obsolete_acceptances"]},
+        "control": {"type": ["number", "null"], "minimum": 0, "maximum": 20000000},
+        "treatment": {"type": ["number", "null"], "minimum": 0, "maximum": 20000000},
+        "direction": {"const": "counterevidence"},
+        "source_kind": {"const": "measured"}
+      },
+      "additionalProperties": false
+    },
+    "metricRef": {
+      "type": "object",
+      "required": ["metric_id", "aggregate_ref", "aggregate_sha256", "interpretation"],
+      "properties": {
+        "metric_id": {"enum": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate", "scope_leakage_acceptances", "stale_obsolete_acceptances", "context_tokens_per_task", "latency_ms"]},
+        "aggregate_ref": {"$ref": "#/$defs/portableRef"},
+        "aggregate_sha256": {"$ref": "#/$defs/sha256"},
+        "interpretation": {"enum": ["supporting", "conflicting", "unknown"]}
+      },
+      "additionalProperties": false
+    },
+    "feedbackEvidence": {
+      "type": "object",
+      "required": ["evidence_id", "source_kind", "evidence_class", "direction", "metric_refs", "artifact_refs"],
+      "properties": {
+        "evidence_id": {"$ref": "#/$defs/portableId"},
+        "source_kind": {"enum": ["measured", "human_judgment", "model_inference", "unverified"]},
+        "evidence_class": {"enum": ["confirmed_outcome", "independent_qa_evidence", "manager_judgment", "hypothesis", "unverified"]},
+        "direction": {"enum": ["supporting", "counterevidence", "neutral", "unknown"]},
+        "metric_refs": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/metricRef"}},
+        "artifact_refs": {"type": "array", "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/portableRef"}}
+      },
+      "additionalProperties": false
+    },
+    "evidenceItem": {"oneOf": [{"$ref": "#/$defs/metricComparison"}, {"$ref": "#/$defs/feedbackEvidence"}]},
+    "evidenceBuckets": {
+      "type": "object",
+      "required": ["support", "counterevidence", "neutral_or_unknown"],
+      "properties": {
+        "support": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/evidenceItem"}},
+        "counterevidence": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/evidenceItem"}},
+        "neutral_or_unknown": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/evidenceItem"}}
+      },
+      "additionalProperties": false
+    },
+    "confidence": {
+      "type": "object",
+      "required": ["formula_version", "evidence_derived", "declared_candidate_confidence", "weighted_support", "weighted_counterevidence", "evaluated_confidence", "approval_permission"],
+      "properties": {
+        "formula_version": {"const": "beta-v1"},
+        "evidence_derived": {"const": true},
+        "declared_candidate_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "weighted_support": {"type": "integer", "minimum": 0, "maximum": 600},
+        "weighted_counterevidence": {"type": "integer", "minimum": 0, "maximum": 600},
+        "evaluated_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "approval_permission": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "failureMode": {
+      "type": "object",
+      "required": ["arm", "case_id", "code", "failure_ref"],
+      "properties": {
+        "arm": {"enum": ["control", "treatment", "preflight", "comparison"]},
+        "case_id": {"$ref": "#/$defs/portableId"},
+        "code": {"$ref": "#/$defs/portableId"},
+        "failure_ref": {"$ref": "#/$defs/portableId"}
+      },
+      "additionalProperties": false
+    },
+    "conflictingMeasuredFailure": {
+      "type": "object",
+      "required": ["arm", "case_id", "code", "failure_ref"],
+      "properties": {
+        "arm": {"const": "comparison"},
+        "case_id": {"const": "aggregate"},
+        "code": {"const": "conflicting_measured_results"},
+        "failure_ref": {"const": "quality_safety"}
+      },
+      "additionalProperties": false
+    },
+    "governance": {
+      "type": "object",
+      "required": ["automatic_promotion", "candidate_status_changed", "canonical_knowledge_written", "git_written", "provider_index_written", "project_source_written", "next_required_steps"],
+      "properties": {
+        "automatic_promotion": {"const": false},
+        "candidate_status_changed": {"const": false},
+        "canonical_knowledge_written": {"const": false},
+        "git_written": {"const": false},
+        "provider_index_written": {"const": false},
+        "project_source_written": {"const": false},
+        "next_required_steps": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "manager_preview"},
+            {"const": "manager_approval"},
+            {"const": "exact_git_commit"},
+            {"const": "optional_reindex_preview_and_approval"}
+          ],
+          "minItems": 4,
+          "maxItems": 4
+        }
+      },
+      "additionalProperties": false
+    },
+    "measurements": {
+      "type": "object",
+      "required": ["control", "treatment", "comparisons", "context_cost_and_latency_are_diagnostic_only"],
+      "properties": {
+        "control": {"$ref": "#/$defs/armAggregate"},
+        "treatment": {"$ref": "#/$defs/armAggregate"},
+        "comparisons": {"type": "array", "minItems": 9, "maxItems": 9, "uniqueItems": true, "items": {"$ref": "#/$defs/metricComparison"}},
+        "context_cost_and_latency_are_diagnostic_only": {"const": true}
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"preflight": {"properties": {"passed": {"const": false}}}}},
+      "then": {
+        "properties": {
+          "status": {"const": "rejected_preflight"},
+          "degradation_status": {"const": "none"},
+          "recommendation": {"const": "preflight_rejected"},
+          "measurements": {"type": "null"},
+          "failure_modes": {"minItems": 1}
+        }
+      },
+      "else": {
+        "properties": {
+          "candidate": {"$ref": "#/$defs/candidateSnapshot"},
+          "status": {"enum": ["conclusive", "inconclusive"]},
+          "recommendation": {"enum": ["consider_for_separate_curation", "do_not_promote_on_shadow_evidence", "inconclusive"]},
+          "measurements": {"$ref": "#/$defs/measurements"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"recommendation": {"const": "consider_for_separate_curation"}}},
+      "then": {
+        "properties": {
+          "status": {"const": "conclusive"},
+          "degradation_status": {"const": "none"},
+          "failure_modes": {"maxItems": 0},
+          "evidence": {
+            "properties": {
+              "support": {
+                "contains": {"$ref": "#/$defs/positiveMetricComparison"},
+                "minContains": 1,
+                "not": {"contains": {"$ref": "#/$defs/counterMetricComparison"}}
+              },
+              "counterevidence": {"not": {"contains": {"$ref": "#/$defs/counterMetricComparison"}}},
+              "neutral_or_unknown": {"not": {"contains": {"$ref": "#/$defs/counterMetricComparison"}}}
+            }
+          },
+          "measurements": {
+            "properties": {
+              "comparisons": {
+                "contains": {"$ref": "#/$defs/positiveMetricComparison"},
+                "minContains": 1,
+                "not": {"contains": {"$ref": "#/$defs/counterMetricComparison"}}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "measurements": {
+            "type": "object",
+            "required": ["comparisons"],
+            "properties": {
+              "comparisons": {
+                "allOf": [
+                  {"contains": {"$ref": "#/$defs/positiveMetricComparison"}, "minContains": 1},
+                  {"contains": {"$ref": "#/$defs/counterMetricComparison"}, "minContains": 1}
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {"const": "inconclusive"},
+          "recommendation": {"const": "inconclusive"},
+          "failure_modes": {
+            "contains": {"$ref": "#/$defs/conflictingMeasuredFailure"},
+            "minContains": 1,
+            "maxContains": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "failure_modes": {
+            "not": {"contains": {"$ref": "#/$defs/conflictingMeasuredFailure"}}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "conclusive"}}},
+      "then": {
+        "properties": {
+          "degradation_status": {"const": "none"},
+          "recommendation": {"enum": ["consider_for_separate_curation", "do_not_promote_on_shadow_evidence"]},
+          "failure_modes": {"maxItems": 0}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "inconclusive"}}},
+      "then": {
+        "properties": {
+          "recommendation": {"const": "inconclusive"},
+          "failure_modes": {"minItems": 1}
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

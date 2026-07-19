@@ -75,6 +75,7 @@ Hook/runtime events live in private `PLUGIN_DATA` or a project `.opc` fallback, 
 | [Testing and acceptance](docs/testing-and-acceptance.md) | Test matrix and release gates |
 | [Evaluation baseline](docs/evaluation-baseline.md) | Versioned synthetic File/Git baseline and private 3–5-task aggregate protocol |
 | [Structured feedback](docs/structured-feedback.md) | Private, auditable manager judgment, QA evidence, outcome, and hypothesis records |
+| [Shadow Evaluation](docs/shadow-evaluation.md) | Read-only candidate control/treatment replay with exact provenance and no automatic promotion |
 | [Roadmap](docs/roadmap.md) | Planned delivery stages |
 
 Architecture decisions live under [`docs/adr`](docs/adr/README.md).

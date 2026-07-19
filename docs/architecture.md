@@ -184,6 +184,7 @@ v0.1 以 `plugins/codex-opc-team/scripts/opc_memory.py` 为真实可调用契约
 | Mem0 实现 | `Mem0Provider.add(...)` / `search(...)` |
 | 显式索引计划和写入 | `MemoryService.reindex_plan(...)` / `reindex_apply(...)` |
 | 健康与运行状态 | `MemoryService.status()` / `doctor()` |
+| 候选只读回放与 control/treatment 证据 | `opc_shadow.py preview` / `evaluate` / `report`；不属于 `MemoryService` 状态迁移 |
 
 因此，`KnowledgeRepository`、`FileRecallProvider`、`Mem0RecallProvider` 和 `ContextPacket` 在本文中是概念名；它们不应被当成 v0.1 的 import 路径。Mem0 索引会接收已批准条目的摘要和正文，以及用于回读的 canonical 路径、Commit 和哈希元数据；默认 Provider 还可能把文本发给配置的模型/嵌入服务。来自任何召回器的结果都只是候选引用，必须通过 `FileGitBackend` 验证和读取原文。
 

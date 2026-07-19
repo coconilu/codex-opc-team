@@ -30,6 +30,15 @@
   → 独立评审与 QA
 ```
 
+Codex system skills 可用时，还要运行官方结构验证；路径通过 `CODEX_HOME` 解析，不把用户主目录写进仓库：
+
+```text
+python <CODEX_HOME>/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/codex-opc-team
+python <CODEX_HOME>/skills/.system/skill-creator/scripts/quick_validate.py plugins/codex-opc-team/skills/<skill>
+```
+
+第二条命令必须对 `plugins/codex-opc-team/skills/` 下每个 Skill 分别执行。Windows 可用 PowerShell `Get-ChildItem` 遍历，Linux/macOS 可用 shell loop；任一 Skill 失败都阻断提交。
+
 请使用小而清晰的提交，不要把格式化、重构和行为变更混在一个提交里。Pull Request 至少应包含：
 
 - 问题和预期结果；

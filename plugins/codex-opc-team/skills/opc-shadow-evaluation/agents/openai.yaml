@@ -1,0 +1,4 @@
+interface:
+  display_name: "OPC Shadow Evaluation"
+  short_description: "Preview and compare candidate knowledge without promotion"
+  default_prompt: "Use $opc-shadow-evaluation to preview or report a read-only candidate Shadow Evaluation."
