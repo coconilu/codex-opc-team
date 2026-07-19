@@ -573,9 +573,16 @@ def _write_private_output_posix(
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
-    directory_fds = [os.open(root, directory_flags)]
+    anchor_fd = os.open(root.parent, directory_flags)
+    try:
+        root_fd = os.open(root, directory_flags)
+    except BaseException:
+        os.close(anchor_fd)
+        raise
+    directory_fds = [root_fd]
     descriptor = -1
     created = False
+    created_identity: tuple[int, int] | None = None
     try:
         if _file_identity(os.fstat(directory_fds[0])) != parent_tokens[0]:
             raise ReleaseEvidenceError("private verdict root changed before binding")
@@ -600,6 +607,19 @@ def _write_private_output_posix(
         _write_all_and_verify(descriptor, raw)
         after = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
         chain_is_bound = _file_identity(after) == created_identity
+        try:
+            anchored_root = os.stat(root.name, dir_fd=anchor_fd, follow_symlinks=False)
+            absolute_root = root.lstat()
+        except OSError:
+            chain_is_bound = False
+        else:
+            held_root_identity = _file_identity(os.fstat(directory_fds[0]))
+            if (
+                not stat.S_ISDIR(anchored_root.st_mode)
+                or _file_identity(anchored_root) != held_root_identity
+                or _file_identity(absolute_root) != held_root_identity
+            ):
+                chain_is_bound = False
         for index, fd in enumerate(directory_fds):
             current = os.fstat(fd)
             if (
@@ -630,9 +650,16 @@ def _write_private_output_posix(
         if descriptor >= 0:
             os.close(descriptor)
             descriptor = -1
-        if created:
+        if created and created_identity is not None:
             try:
-                os.unlink(relative.name, dir_fd=parent_fd)
+                current = os.stat(
+                    relative.name, dir_fd=parent_fd, follow_symlinks=False
+                )
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and _file_identity(current) == created_identity
+                ):
+                    os.unlink(relative.name, dir_fd=parent_fd)
             except OSError:
                 pass
         raise
@@ -641,6 +668,7 @@ def _write_private_output_posix(
             os.close(descriptor)
         for fd in reversed(directory_fds):
             os.close(fd)
+        os.close(anchor_fd)
 
 
 def _write_private_output_windows(
