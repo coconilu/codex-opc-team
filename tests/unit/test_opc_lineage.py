@@ -612,6 +612,196 @@ class KnowledgeLineageTests(unittest.TestCase):
                 os.replace(fixture.project, moved)
                 os.replace(moved, fixture.project)
 
+    def test_binding_open_releases_partial_resources_on_keyboard_interrupt(self) -> None:
+        original_enter = opc_lineage._BoundDirectory.__enter__
+        observed = []
+
+        def interrupt_opc_open(bound):
+            observed.append(bound)
+            if bound.path.name == ".opc":
+                raise KeyboardInterrupt("synthetic opc binding cancellation")
+            return original_enter(bound)
+
+        with patch.object(
+            opc_lineage._BoundDirectory,
+            "__enter__",
+            new=interrupt_opc_open,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                opc_lineage.preview_event(
+                    self.fixture.project,
+                    self.fixture.event(
+                        "lineage-open-cancel", event_type="provider",
+                        provider={
+                            "provider_id": "mem0", "state": "disabled",
+                            "authoritative": False,
+                        },
+                        reasons=["provider_disabled"],
+                    ),
+                    expected_revision=0,
+                    knowledge_root=self.fixture.knowledge,
+                    now="2026-07-19T00:00:30Z",
+                )
+        self.assertEqual([item.path.name for item in observed], ["private-project", ".opc"])
+        for bound in observed:
+            self.assertIsNone(bound.fd)
+            self.assertIsNone(bound.windows_handle)
+        moved = self.fixture.project.with_name("private-project-after-open-cancel")
+        os.replace(self.fixture.project, moved)
+        os.replace(moved, self.fixture.project)
+
+    def test_preview_releases_binding_on_subject_and_contract_cancellation(self) -> None:
+        for stage, exception_type in (
+            ("subject", KeyboardInterrupt),
+            ("contract", SystemExit),
+        ):
+            with self.subTest(stage=stage):
+                root = Path(self.temporary.name) / f"preview-cancel-{stage}"
+                root.mkdir()
+                fixture = LineageFixture(root)
+                event = fixture.event(
+                    f"lineage-preview-cancel-{stage}", event_type="provider",
+                    provider={
+                        "provider_id": "mem0", "state": "disabled",
+                        "authoritative": False,
+                    },
+                    reasons=["provider_disabled"],
+                )
+                original_close = opc_lineage._FilesystemSubjectBinding.close
+                closed = []
+
+                def track_close(binding):
+                    original_close(binding)
+                    closed.append(binding)
+
+                target = (
+                    "_read_project_subject" if stage == "subject" else "_load_contract"
+                )
+                with patch.object(
+                    opc_lineage._FilesystemSubjectBinding,
+                    "close",
+                    new=track_close,
+                ), patch.object(
+                    opc_lineage,
+                    target,
+                    side_effect=exception_type(f"synthetic {stage} cancellation"),
+                ):
+                    with self.assertRaises(exception_type):
+                        opc_lineage.preview_event(
+                            fixture.project, event, expected_revision=0,
+                            knowledge_root=fixture.knowledge,
+                            now="2026-07-19T00:00:30Z",
+                        )
+                self.assertEqual(len(closed), 1)
+                binding = closed[0]
+                self.assertTrue(binding.closed)
+                self.assertIsNone(binding.project_bound.fd)
+                self.assertIsNone(binding.project_bound.windows_handle)
+                self.assertIsNone(binding.opc_bound.fd)
+                self.assertIsNone(binding.opc_bound.windows_handle)
+                self.assertFalse((fixture.project / ".opc" / "lineage").exists())
+                moved = fixture.project.with_name(f"private-project-{stage}-moved")
+                os.replace(fixture.project, moved)
+                os.replace(moved, fixture.project)
+
+    def test_record_cancellation_releases_binding_and_rolls_back_all_artifacts(self) -> None:
+        for stage in ("internal_preview", "lock", "pending", "publish"):
+            with self.subTest(stage=stage):
+                root = Path(self.temporary.name) / f"record-cancel-{stage}"
+                root.mkdir()
+                fixture = LineageFixture(root)
+                event = fixture.event(
+                    f"lineage-record-cancel-{stage}", event_type="provider",
+                    provider={
+                        "provider_id": "mem0", "state": "disabled",
+                        "authoritative": False,
+                    },
+                    reasons=["provider_disabled"],
+                )
+                preview = opc_lineage.preview_event(
+                    fixture.project, event, expected_revision=0,
+                    knowledge_root=fixture.knowledge,
+                    now="2026-07-19T00:00:30Z",
+                )
+                original_close = opc_lineage._FilesystemSubjectBinding.close
+                closed = []
+
+                def track_close(binding):
+                    original_close(binding)
+                    closed.append(binding)
+
+                original_filesystem_checkpoint = (
+                    opc_lineage._verify_filesystem_checkpoint
+                )
+                original_write_checkpoint = opc_lineage._verify_checkpoint
+
+                def filesystem_checkpoint(binding, label, bound=None):
+                    if stage == "lock" and label == "after_lineage_lock":
+                        raise KeyboardInterrupt("synthetic lock cancellation")
+                    return original_filesystem_checkpoint(binding, label, bound)
+
+                def write_checkpoint(bound, label):
+                    if stage == "pending" and label == "after_pending_creation":
+                        raise KeyboardInterrupt("synthetic pending cancellation")
+                    if stage == "publish" and label == "after_replace":
+                        raise KeyboardInterrupt("synthetic publish cancellation")
+                    return original_write_checkpoint(bound, label)
+
+                preview_patch = (
+                    patch.object(
+                        opc_lineage,
+                        "_preview_event_bound",
+                        side_effect=KeyboardInterrupt(
+                            "synthetic internal preview cancellation"
+                        ),
+                    )
+                    if stage == "internal_preview"
+                    else nullcontext()
+                )
+                filesystem_patch = (
+                    patch.object(
+                        opc_lineage,
+                        "_verify_filesystem_checkpoint",
+                        side_effect=filesystem_checkpoint,
+                    )
+                    if stage == "lock"
+                    else nullcontext()
+                )
+                write_patch = (
+                    patch.object(
+                        opc_lineage,
+                        "_verify_checkpoint",
+                        side_effect=write_checkpoint,
+                    )
+                    if stage in {"pending", "publish"}
+                    else nullcontext()
+                )
+                with patch.object(
+                    opc_lineage._FilesystemSubjectBinding,
+                    "close",
+                    new=track_close,
+                ), preview_patch, filesystem_patch, write_patch:
+                    with self.assertRaises(KeyboardInterrupt):
+                        opc_lineage.record_event(
+                            fixture.project, event, expected_revision=0,
+                            plan_token=preview["plan_token"],
+                            knowledge_root=fixture.knowledge,
+                            now="2026-07-19T00:00:30Z",
+                        )
+
+                self.assertEqual(len(closed), 1)
+                binding = closed[0]
+                self.assertTrue(binding.closed)
+                self.assertIsNone(binding.project_bound.fd)
+                self.assertIsNone(binding.project_bound.windows_handle)
+                self.assertIsNone(binding.opc_bound.fd)
+                self.assertIsNone(binding.opc_bound.windows_handle)
+                lineage = fixture.project / ".opc" / "lineage"
+                self.assertEqual([], list(lineage.iterdir()) if lineage.exists() else [])
+                moved = fixture.project.with_name(f"private-project-{stage}-moved")
+                os.replace(fixture.project, moved)
+                os.replace(moved, fixture.project)
+
     def test_default_preview_token_is_stable_across_cli_processes(self) -> None:
         recall, citation = self.one_recall()
         event = self.fixture.event(

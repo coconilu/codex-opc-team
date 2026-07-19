@@ -142,28 +142,10 @@ class _FilesystemSubjectBinding:
 
     __slots__ = (
         "project", "project_bound", "opc_bound", "lineage_identity",
-        "established_lineage_identity", "closed",
+        "established_lineage_identity", "acquired", "closed",
     )
 
-    def __init__(
-        self,
-        project: Path,
-        project_bound: _BoundDirectory,
-        opc_bound: _BoundDirectory,
-        lineage_identity: tuple[int, int, int, int] | None,
-    ) -> None:
-        self.project = project
-        self.project_bound = project_bound
-        self.opc_bound = opc_bound
-        self.lineage_identity = lineage_identity
-        self.established_lineage_identity = lineage_identity
-        self.closed = False
-
-    def __repr__(self) -> str:
-        return "<_FilesystemSubjectBinding private>"
-
-    @classmethod
-    def open(cls, project_root: Path) -> "_FilesystemSubjectBinding":
+    def __init__(self, project_root: Path) -> None:
         project = project_root.expanduser().resolve(strict=True)
         _assert_private_containment(project, project / ".opc" / "placeholder")
         opc = project / ".opc"
@@ -177,35 +159,45 @@ class _FilesystemSubjectBinding:
             or _is_reparse(opc)
         ):
             raise LineageError("project runtime directory is not a stable directory")
-        project_bound = _BoundDirectory(project, project)
-        opc_bound = _BoundDirectory(opc, project)
+        self.project = project
+        self.project_bound = _BoundDirectory(project, project)
+        self.opc_bound = _BoundDirectory(opc, project)
+        self.lineage_identity: tuple[int, int, int, int] | None = None
+        self.established_lineage_identity: tuple[int, int, int, int] | None = None
+        self.acquired = False
+        self.closed = False
+
+    def __repr__(self) -> str:
+        return "<_FilesystemSubjectBinding private>"
+
+    def acquire(self) -> None:
+        """Open both directory objects while the caller already owns cleanup."""
+
+        if self.closed or self.acquired:
+            raise LineageError("filesystem subject binding cannot be acquired")
+        self.project_bound.__enter__()
+        self.opc_bound.__enter__()
+        self.project_bound.verify_current()
+        self.opc_bound.verify_current()
+        lineage = self.opc_bound.path / "lineage"
         try:
-            project_bound.__enter__()
-            opc_bound.__enter__()
-            project_bound.verify_current()
-            opc_bound.verify_current()
-            lineage = opc / "lineage"
-            try:
-                lineage_metadata = lineage.lstat()
-            except FileNotFoundError:
-                lineage_identity = None
-            except OSError as exc:
-                raise LineageError("lineage directory identity is unavailable") from exc
-            else:
-                if (
-                    not stat.S_ISDIR(lineage_metadata.st_mode)
-                    or lineage.is_symlink()
-                    or _is_reparse(lineage)
-                ):
-                    raise LineageError("lineage directory is not a stable directory")
-                lineage_identity = _directory_identity(lineage_metadata)
-            binding = cls(project, project_bound, opc_bound, lineage_identity)
-            binding.verify_before_lineage_open()
-            return binding
-        except Exception:
-            opc_bound.close()
-            project_bound.close()
-            raise
+            lineage_metadata = lineage.lstat()
+        except FileNotFoundError:
+            lineage_identity = None
+        except OSError as exc:
+            raise LineageError("lineage directory identity is unavailable") from exc
+        else:
+            if (
+                not stat.S_ISDIR(lineage_metadata.st_mode)
+                or lineage.is_symlink()
+                or _is_reparse(lineage)
+            ):
+                raise LineageError("lineage directory is not a stable directory")
+            lineage_identity = _directory_identity(lineage_metadata)
+        self.lineage_identity = lineage_identity
+        self.established_lineage_identity = lineage_identity
+        self.acquired = True
+        self.verify_before_lineage_open()
 
     def verify_root_and_opc(self) -> None:
         if self.closed:
@@ -998,11 +990,11 @@ def preview_event(
     recall_result: Mapping[str, Any] | None = None,
     knowledge_root: Path | None = None,
     now: str | None = None,
-    _retain_filesystem_binding: bool = False,
 ) -> dict[str, Any]:
-    filesystem_binding = _FilesystemSubjectBinding.open(project_root)
+    filesystem_binding = _FilesystemSubjectBinding(project_root)
     try:
-        result = _preview_event_bound(
+        filesystem_binding.acquire()
+        return _preview_event_with_binding(
             project_root,
             event_input,
             expected_revision=expected_revision,
@@ -1011,14 +1003,30 @@ def preview_event(
             now=now,
             filesystem_binding=filesystem_binding,
         )
-        _verify_filesystem_checkpoint(filesystem_binding, "after_preview")
-    except Exception:
+    finally:
         filesystem_binding.close()
-        raise
-    if _retain_filesystem_binding:
-        result["_filesystem_binding"] = filesystem_binding
-    else:
-        filesystem_binding.close()
+
+
+def _preview_event_with_binding(
+    project_root: Path,
+    event_input: Mapping[str, Any],
+    *,
+    expected_revision: int,
+    recall_result: Mapping[str, Any] | None = None,
+    knowledge_root: Path | None = None,
+    now: str | None = None,
+    filesystem_binding: _FilesystemSubjectBinding,
+) -> dict[str, Any]:
+    result = _preview_event_bound(
+        project_root,
+        event_input,
+        expected_revision=expected_revision,
+        recall_result=recall_result,
+        knowledge_root=knowledge_root,
+        now=now,
+        filesystem_binding=filesystem_binding,
+    )
+    _verify_filesystem_checkpoint(filesystem_binding, "after_preview")
     return result
 
 
@@ -1191,7 +1199,7 @@ def _atomic_write(
         if backup_identity is not None and not bound.unlink_owned(backup_name, backup_identity):
             raise LineageError("lineage backup identity changed during cleanup")
         backup_identity = None
-    except Exception:
+    except BaseException:
         if published:
             if had_original and backup_identity is not None:
                 bound.replace(backup_name, target_name, expected_source=backup_identity, require_current=False)
@@ -1217,15 +1225,18 @@ def record_event(
     now: str | None = None,
 ) -> dict[str, Any]:
     _hash(plan_token, "plan_token")
-    preview = preview_event(
-        project_root, event_input, expected_revision=expected_revision,
-        recall_result=recall_result, knowledge_root=knowledge_root, now=now,
-        _retain_filesystem_binding=True,
-    )
-    filesystem_binding = preview.pop("_filesystem_binding")
-    if not isinstance(filesystem_binding, _FilesystemSubjectBinding):
-        raise LineageError("private filesystem subject binding is unavailable")
+    filesystem_binding = _FilesystemSubjectBinding(project_root)
     try:
+        filesystem_binding.acquire()
+        preview = _preview_event_with_binding(
+            project_root,
+            event_input,
+            expected_revision=expected_revision,
+            recall_result=recall_result,
+            knowledge_root=knowledge_root,
+            now=now,
+            filesystem_binding=filesystem_binding,
+        )
         return _record_previewed_event(
             preview,
             expected_revision=expected_revision,
