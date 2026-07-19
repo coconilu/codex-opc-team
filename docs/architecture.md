@@ -185,6 +185,7 @@ v0.1 以 `plugins/codex-opc-team/scripts/opc_memory.py` 为真实可调用契约
 | 显式索引计划和写入 | `MemoryService.reindex_plan(...)` / `reindex_apply(...)` |
 | 健康与运行状态 | `MemoryService.status()` / `doctor()` |
 | 候选只读回放与 control/treatment 证据 | `opc_shadow.py preview` / `evaluate` / `report`；不属于 `MemoryService` 状态迁移 |
+| 角色/Skill/组织策略版本生命周期 | `opc_evolution.py` 的 private proposal/pilot/evaluate/transition/confirm；只产生一个 unstaged allowlisted diff，不修改全局 Codex 配置 |
 
 `KnowledgeRepository`、`FileRecallProvider` 和 `Mem0RecallProvider` 仍是概念名。v0.1 flat API 是 `FileGitBackend.query_context(...)`；分层 v1 API 是 `opc_hierarchical.HierarchicalIndex` / `HierarchicalRecall`，输出 `opc-context-packet-v1` 与 `opc-recall-trace-v1`。Mem0 索引会接收已批准条目的摘要和正文，以及用于回读的 canonical 路径、Commit 和哈希元数据；默认 Provider 还可能把文本发给配置的模型/嵌入服务。来自任何召回器的结果都只是候选引用，必须通过 `FileGitBackend` 验证和读取原文。
 

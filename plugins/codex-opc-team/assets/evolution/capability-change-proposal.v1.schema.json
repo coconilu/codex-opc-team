@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:schema:capability-change-proposal:v1",
+  "title": "OPC capability change proposal",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "proposal_id", "project_id", "sources", "capability", "current_version", "candidate_version", "rollback_target", "scope", "owner", "pilot", "created_at", "proposal_core_sha256"],
+  "properties": {
+    "schema_version": {"const": "opc-capability-change-proposal-v1"},
+    "contract_version": {"const": "opc-capability-evolution-contract-v1"},
+    "proposal_id": {"type": "string", "pattern": "^cap-[A-Za-z0-9._-]+$", "maxLength": 128},
+    "project_id": {"$ref": "#/$defs/id"},
+    "sources": {"$ref": "#/$defs/sources"},
+    "capability": {"$ref": "#/$defs/capability"},
+    "current_version": {"$ref": "#/$defs/version"},
+    "candidate_version": {"$ref": "#/$defs/version"},
+    "rollback_target": {"$ref": "#/$defs/version"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "owner": {"$ref": "#/$defs/id"},
+    "pilot": {"$ref": "#/$defs/pilot"},
+    "created_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$", "maxLength": 32}
+    ,"proposal_core_sha256": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
+    "ref": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"},
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "refList": {"type": "array", "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/ref"}},
+    "sources": {
+      "type": "object",
+      "required": ["candidate_refs", "feedback_refs", "evaluation_refs", "lineage_refs"],
+      "properties": {
+        "candidate_refs": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/sourceRef"}},
+        "feedback_refs": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/sourceRef"}},
+        "evaluation_refs": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"$ref": "#/$defs/sourceRef"}},
+        "lineage_refs": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"$ref": "#/$defs/sourceRef"}}
+      },
+      "additionalProperties": false
+    },
+    "sourceRef": {"type": "object", "required": ["ref", "sha256"], "properties": {"ref": {"$ref": "#/$defs/ref"}, "sha256": {"$ref": "#/$defs/sha"}}, "additionalProperties": false},
+    "capability": {
+      "type": "object",
+      "required": ["kind", "target_path"],
+      "properties": {"kind": {"enum": ["role", "skill", "organization_policy"]}, "target_path": {"$ref": "#/$defs/ref"}},
+      "additionalProperties": false
+    },
+    "version": {
+      "type": "object",
+      "required": ["version", "source_path", "source_commit", "content_sha256"],
+      "properties": {
+        "version": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._+-]+$"},
+        "source_path": {"$ref": "#/$defs/ref"},
+        "source_commit": {"$ref": "#/$defs/commit"},
+        "content_sha256": {"$ref": "#/$defs/sha"}
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "required": ["kind", "project_id"],
+      "properties": {"kind": {"enum": ["project", "organization"]}, "project_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}},
+      "allOf": [{"if": {"properties": {"kind": {"const": "project"}}}, "then": {"properties": {"project_id": {"$ref": "#/$defs/id"}}}, "else": {"properties": {"project_id": {"type": "null"}}}}],
+      "additionalProperties": false
+    },
+    "pilot": {
+      "type": "object",
+      "required": ["min_cases", "max_cases", "observation_cases", "allowed_project_ids"],
+      "properties": {
+        "min_cases": {"type": "integer", "minimum": 1, "maximum": 20},
+        "max_cases": {"type": "integer", "minimum": 1, "maximum": 20},
+        "observation_cases": {"type": "integer", "minimum": 1, "maximum": 20},
+        "allowed_project_ids": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

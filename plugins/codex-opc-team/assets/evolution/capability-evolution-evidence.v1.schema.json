@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:schema:capability-evolution-evidence:v1",
+  "title": "OPC capability evolution evidence envelope",
+  "type": "object",
+  "required": ["schema_version", "evidence_kind", "proposal_id", "proposal_core_sha256", "pilot_snapshot_sha256", "evaluation_result_sha256", "capability", "run_binding", "pilot_binding", "decision", "safety", "recorded_at"],
+  "properties": {
+    "schema_version": {"const": "opc-capability-evolution-evidence-v1"},
+    "evidence_kind": {"enum": ["candidate", "manager_approval", "independent_qa", "shadow", "evaluation", "lineage", "outcome", "rollback_decision"]},
+    "proposal_id": {"type": "string", "pattern": "^cap-[A-Za-z0-9._-]+$", "maxLength": 128},
+    "proposal_core_sha256": {"$ref": "#/$defs/sha"},
+    "pilot_snapshot_sha256": {"anyOf": [{"$ref": "#/$defs/sha"}, {"type": "null"}]},
+    "evaluation_result_sha256": {"anyOf": [{"$ref": "#/$defs/sha"}, {"type": "null"}]},
+    "capability": {"$ref": "#/$defs/capability"},
+    "run_binding": {"anyOf": [{"$ref": "#/$defs/runBinding"}, {"type": "null"}]},
+    "pilot_binding": {"anyOf": [{"$ref": "#/$defs/pilotBinding"}, {"type": "null"}]},
+    "decision": {"enum": ["proposed", "observed", "verified", "approved", "denied", "pass", "fail", "beneficial", "neutral", "harmful", "inconclusive", "regression_detected", "rollback_approved", "rollback_denied"]},
+    "safety": {"enum": ["safe", "unsafe", "inconclusive", "not_applicable"]},
+    "recorded_at": {"$ref": "#/$defs/time"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
+    "runId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^opc-[A-Za-z0-9._-]+$"},
+    "ref": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"},
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "time": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$", "maxLength": 32},
+    "version": {
+      "type": "object",
+      "required": ["version", "source_path", "source_commit", "content_sha256"],
+      "properties": {
+        "version": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._+-]+$"},
+        "source_path": {"$ref": "#/$defs/ref"},
+        "source_commit": {"$ref": "#/$defs/commit"},
+        "content_sha256": {"$ref": "#/$defs/sha"}
+      },
+      "additionalProperties": false
+    },
+    "knowledgeVersion": {
+      "type": "object",
+      "required": ["record_id", "source_path", "source_commit", "content_sha256"],
+      "properties": {"record_id": {"$ref": "#/$defs/id"}, "source_path": {"$ref": "#/$defs/ref"}, "source_commit": {"$ref": "#/$defs/commit"}, "content_sha256": {"$ref": "#/$defs/sha"}},
+      "additionalProperties": false
+    },
+    "capability": {
+      "type": "object",
+      "required": ["kind", "target_path", "current_version", "candidate_version"],
+      "properties": {"kind": {"enum": ["role", "skill", "organization_policy"]}, "target_path": {"$ref": "#/$defs/ref"}, "current_version": {"$ref": "#/$defs/version"}, "candidate_version": {"$ref": "#/$defs/version"}},
+      "additionalProperties": false
+    },
+    "runBinding": {
+      "type": "object",
+      "required": ["case_id", "arm", "run_id", "capability_version", "knowledge_versions"],
+      "properties": {"case_id": {"$ref": "#/$defs/id"}, "arm": {"enum": ["control", "candidate"]}, "run_id": {"$ref": "#/$defs/runId"}, "capability_version": {"$ref": "#/$defs/version"}, "knowledge_versions": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/knowledgeVersion"}}},
+      "additionalProperties": false
+    },
+    "lineageBinding": {
+      "type": "object",
+      "required": ["case_id", "arm", "run_id", "ref", "sha256"],
+      "properties": {"case_id": {"$ref": "#/$defs/id"}, "arm": {"enum": ["control", "candidate"]}, "run_id": {"$ref": "#/$defs/runId"}, "ref": {"$ref": "#/$defs/ref"}, "sha256": {"$ref": "#/$defs/sha"}},
+      "additionalProperties": false
+    },
+    "pilotBinding": {
+      "type": "object",
+      "required": ["case_ids", "control_run_ids", "candidate_run_ids", "lineage_refs"],
+      "properties": {
+        "case_ids": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "control_run_ids": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/runId"}},
+        "candidate_run_ids": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/runId"}},
+        "lineage_refs": {"type": "array", "minItems": 2, "maxItems": 40, "uniqueItems": true, "items": {"$ref": "#/$defs/lineageBinding"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

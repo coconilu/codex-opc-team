@@ -1,0 +1,123 @@
+{
+  "contract_version": "opc-capability-evolution-contract-v1",
+  "proposal_schema_version": "opc-capability-change-proposal-v1",
+  "record_schema_version": "opc-capability-evolution-record-v1",
+  "evidence_schema_version": "opc-capability-evolution-evidence-v1",
+  "pilot_snapshot_version": "opc-capability-pilot-snapshot-v1",
+  "authority": "file-git-only",
+  "storage": {
+    "project_relative": ".opc/evolution/{proposal_id}.json",
+    "private_or_git_ignored": true,
+    "git_ignored_boundary": ".opc/evolution/",
+    "preview_writes": false,
+    "filesystem_subject_binding": "process-local-project-opc-evolution-directory-objects",
+    "evidence_read_binding": "bound-parent-no-follow-single-link-fd-before-after",
+    "filesystem_identity_serialized": false,
+    "remote_telemetry": false
+  },
+  "capability_kinds": ["role", "skill", "organization_policy"],
+  "managed_path_patterns": {
+    "role": ["roles/<name>.<md|toml|yaml>", "agents/<name>.<md|toml|yaml>", "plugins/<plugin>/assets/agent-configs/<name>.toml"],
+    "skill": ["skills/<skill>/SKILL.md", "skills/<skill>/references/<name>.md", "plugins/<plugin>/skills/<skill>/SKILL.md", "plugins/<plugin>/skills/<skill>/references/<name>.md"],
+    "organization_policy": ["AGENTS.md", "policies/<name>.md", "docs/policies/<name>.md"]
+  },
+  "lifecycle_states": ["candidate", "pilot_approved", "piloting", "evaluated", "promotion_pending", "promoted", "observing", "rollback_pending", "rolled_back", "rejected"],
+  "history_transitions": {
+    "opened": {"from": null, "to": "candidate"},
+    "pilot_authorized": {"from": ["candidate"], "to": "pilot_approved"},
+    "pilot_case_recorded": {"from": ["pilot_approved", "piloting"], "to": "piloting"},
+    "evaluated": {"from": ["piloting"], "to": "evaluated"},
+    "promotion_authorized": {"from": ["evaluated"], "to": "evaluated"},
+    "promotion_applied": {"from": ["evaluated"], "to": "promotion_pending"},
+    "promotion_confirmed": {"from": ["promotion_pending"], "to": "promoted"},
+    "observation_started": {"from": ["observing", "promoted"], "to": "observing"},
+    "rollback_applied": {"from": ["observing", "promoted"], "to": "rollback_pending"},
+    "rollback_confirmed": {"from": ["rollback_pending"], "to": "rolled_back"},
+    "rejected": {"from": ["candidate", "evaluated", "pilot_approved", "piloting"], "to": "rejected"}
+  },
+  "history_invariants": ["revision_contiguous", "timestamp_non_decreasing", "timestamp_bounded_by_record", "action_state_exact", "evidence_kind_exact", "single_use_actions_unique"],
+  "evidence_envelope": {
+    "strict": true,
+    "bindings": ["proposal_id", "proposal_core_sha256", "capability_kind", "target_path", "current_version", "candidate_version", "run", "pilot", "lineage", "pilot_snapshot_sha256", "evaluation_result_sha256"],
+    "proposal_core": {
+      "excludes": ["sources", "evidence_refs", "proposal_core_sha256"],
+      "includes": ["schema_version", "contract_version", "proposal_id", "project_id", "scope", "owner", "pilot", "capability", "current_version", "candidate_version", "rollback_target", "created_at"]
+    },
+    "pilot_snapshot": "ordered-full-cases-and-arms-plus-sorted-confounders",
+    "evaluation_result": "deterministically-recomputed-from-pilot-snapshot",
+    "semantic_gates": {"manager_approval": "approved", "independent_qa": "pass", "shadow": "beneficial_and_safe", "evaluation": "matches_computed_conclusion"},
+    "cumulative_revalidation_stages": ["evaluate", "promotion", "confirm"]
+  },
+  "required_evidence": {
+    "pilot": ["shadow", "independent_qa", "manager_approval"],
+    "promotion": ["beneficial_pilot", "independent_qa", "manager_approval"],
+    "rollback": ["regression_or_manager_decision"]
+  },
+  "evaluation": {
+    "metric_contract": "opc-evaluation-contract-v1",
+    "metric_contract_sha256": "f7eda22695e25f91f15031d6a94d0183e399fc3b52b34a21130b7f567180444d",
+    "quality_metrics": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate"],
+    "safety_metrics": ["scope_leakage_acceptances", "stale_obsolete_acceptances", "privacy_failures"],
+    "telemetry_metrics": ["context_tokens_per_task", "latency_ms"],
+    "same_contract_for_control_and_candidate": true,
+    "required_confounders": true,
+    "allowed_conclusions": ["beneficial", "neutral", "harmful", "inconclusive"]
+    ,"unavailable_measurements": "null-with-exact-reason",
+    "unavailable_arms_excluded_from_aggregation": true
+  },
+  "promotion_policy": {
+    "manager_approval_explicit": true,
+    "independent_qa_required": true,
+    "replay_or_shadow_required": true,
+    "bounded_pilot_required": true,
+    "automatic_self_modification": false,
+    "model_self_evaluation_can_promote": false,
+    "preview_before_write": true,
+    "exact_head_required": true,
+    "clean_worktree_required": true,
+    "single_allowlisted_path": true,
+    "candidate_is_exact_git_blob": true,
+    "candidate_commit_diff_is_single_target": true,
+    "allowed_git_blob_modes": ["100644", "100755"],
+    "git_object_type": "blob",
+    "strict_linear_commit_range": true,
+    "merge_commits_allowed": false,
+    "every_commit_changes_only_target": true,
+    "every_intermediate_target_blob_privacy_scanned": true,
+    "intermediate_blob_checkout": false,
+    "confirm_requires_strict_descendant_commit": true,
+    "stage_or_commit": false,
+    "automatic_global_config_write": false
+  },
+  "blocking_conditions": ["regression", "scope_leakage", "privacy_failure", "missing_evidence", "timeout", "provider_unavailable", "provider_error", "head_drift", "worktree_dirty", "path_identity_change", "concurrent_update"],
+  "compatibility": {
+    "v0_1_unversioned_assets": "usable-as-unversioned-v0.1",
+    "migration": "preview-first-explicit",
+    "migration_preview_writes": false,
+    "migration_idempotent": true,
+    "silent_global_registration": false
+  },
+  "report_claim": "association/evidence only",
+  "causal_claim_allowed": false,
+  "history_preserved_on_rollback": true,
+  "approved_knowledge_mutated_on_rollback": false,
+  "forbidden_content": ["raw_chat", "raw_prompt", "chain_of_thought", "hook_payload", "tool_payload", "credentials", "embeddings", "session_id", "turn_id", "thread_id", "user_home_path", "private_body"],
+  "forbidden_side_effects": ["global_codex_role_write", "global_feature_flag_write", "global_hook_write", "global_config_toml_write", "automatic_git_stage", "automatic_git_commit", "automatic_git_push", "automatic_git_merge", "provider_index_write", "approved_knowledge_rewrite"],
+  "limits": {
+    "proposal_bytes": 262144,
+    "record_bytes": 1048576,
+    "candidate_bytes": 1048576,
+    "pilot_cases": 20,
+    "knowledge_versions_per_run": 64,
+    "source_refs_per_kind": 20,
+    "confounders": 20,
+    "identifier_characters": 128,
+    "portable_reference_characters": 240,
+    "version_characters": 64,
+    "owner_characters": 128,
+    "timestamp_characters": 32,
+    "metric_component": 1000000,
+    "context_tokens": 10000000,
+    "latency_ms": 86400000
+  }
+}

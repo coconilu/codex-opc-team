@@ -440,15 +440,17 @@ def _directory_identity(value: os.stat_result) -> tuple[int, int, int, int]:
 class _BoundDirectory:
     """Hold one directory object for every child operation in a transaction."""
 
-    def __init__(self, path: Path, project_root: Path):
+    def __init__(self, path: Path, project_root: Path, *, create: bool = True):
         self.path = path
         self.project_root = project_root
+        self.create = create
         self.fd: int | None = None
         self.windows_handle: int | None = None
         self.token: tuple[int, int, int, int] | None = None
 
     def __enter__(self) -> "_BoundDirectory":
-        self.path.mkdir(parents=True, exist_ok=True)
+        if self.create:
+            self.path.mkdir(parents=True, exist_ok=True)
         _assert_private_containment(self.project_root, self.path / "placeholder")
         if os.name == "nt":
             self._open_windows_directory()
@@ -613,6 +615,9 @@ class _BoundDirectory:
             raw = os.read(descriptor, max_bytes + 1)
             if len(raw) > max_bytes:
                 raise FeedbackError("feedback sidecar exceeds the configured size limit")
+            after_descriptor = os.fstat(descriptor)
+            if _file_identity(after_descriptor) != expected:
+                raise FeedbackError("feedback child identity changed while being read")
             self.verify_current()
             after = self.child_identity(name)
             if after != expected:

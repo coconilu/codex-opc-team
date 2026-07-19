@@ -10,7 +10,7 @@
 | R1 v0.1 核心闭环 | 完成 | Codex 原生团队、File/Git 记忆、独立 QA |
 | R2 v0.1 可选 Mem0 | 完成 | 可引导安装、可降级、可卸载的 OSS Adapter |
 | R3 v0.1 发布 | 完成 | Windows/Linux CI、固定标签安装和 Release |
-| R4 反馈成长增强 | 候选 | 更强的评估、冲突治理和回放 |
+| R4 反馈成长增强 | 进行中 | 评估、冲突治理、知识链路与受控能力版本已实现 v1；导出/审计 UI 待定 |
 | R5 生态与企业能力 | 候选 | 角色包、策略层、更多后端和官方分发探索 |
 
 ## R0：开源基础与安全切换
@@ -73,6 +73,7 @@
 - 跨项目冲突检测、适用范围推断和失效提示；
 - 分层 File recall、严格 ContextPacket/RecallTrace 与预算评测（v1 已实现；公开 synthetic superior 只代表该 fixture，不改变 authority）；
 - 经理反馈与真实产品指标的结构化关联，以及角色/步骤知识使用链路（v1 已实现；仅 association/evidence，不证明因果）；
+- 角色、Skill 与组织策略的版本化候选、同合同 paired pilot、经理/独立 QA 门禁、单路径 Git 晋升、观察与回滚（v1 已实现；不自动 stage/commit，不改全局 Codex 配置）；
 - 知识导出、合并和审计 UI。
 
 这些能力仍遵守“不得自动晋升”的基础决策。任何自动化批准提议都需要新的 ADR 和安全评估。

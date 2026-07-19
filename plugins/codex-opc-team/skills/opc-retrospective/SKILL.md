@@ -9,7 +9,7 @@ Create candidates, not automatic policy changes.
 
 ## Workflow
 
-1. Resolve the skill directory as the directory containing this `SKILL.md`, then resolve the plugin root as `<skill-dir>/../..`; read `references/candidate-policy.md`, `references/feedback-contract.md`, `references/knowledge-lineage.md`, and `references/python-runtime.md`.
+1. Resolve the skill directory as the directory containing this `SKILL.md`, then resolve the plugin root as `<skill-dir>/../..`; read `references/candidate-policy.md`, `references/feedback-contract.md`, `references/knowledge-lineage.md`, `references/capability-evolution.md`, and `references/python-runtime.md`.
 2. Use base Python for the initial memory `status`, select `<memory-python>`, and run `<memory-python> "<plugin-root>/scripts/opc_memory.py" doctor`. Stop if canonical File/Git knowledge is not initialized or valid.
 3. Inspect the current run record, project diff, acceptance report, and failure evidence. Read structured feedback with `opc_feedback.py show`; absence means "not recorded," never an inferred positive result.
 4. Identify only lessons reusable beyond the exact incident.
