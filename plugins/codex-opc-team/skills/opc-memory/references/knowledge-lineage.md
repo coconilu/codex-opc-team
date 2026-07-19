@@ -5,7 +5,7 @@ Lineage is separate from canonical File/Git, hierarchical derived indexes, and M
 | Operation | Rule |
 |---|---|
 | Preview event | Zero write; validate event, exact full-citation RecallResult, current canonical revision, association-only evidence refs, and base sidecar identity |
-| Record event | Exact project/run subject + preview token + base-record/revision CAS; final/lock/pending/backup stay under an ignored, untracked lineage directory; Git/ignore uncertainty or subject drift fails closed |
+| Record event | Exact project/run subject + preview token + base-record/revision CAS; a non-serialized process-local binding holds project root, `.opc`, and lineage directory identity through cleanup; final/lock/pending/backup stay under an ignored, untracked lineage directory; Git/ignore, subject, or directory-object drift fails closed |
 | Show/report | Revalidate current HEAD/governance and evidence hashes before marking usable |
 | Provider degraded/no-memory | Record explicit provider event; continue File/Git |
 | Redact/expire | Delete the private derived sidecar under project policy; do not alter canonical knowledge |

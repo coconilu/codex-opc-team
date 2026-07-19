@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -228,6 +229,388 @@ class KnowledgeLineageTests(unittest.TestCase):
             ).hexdigest(),
         )
         self.assertFalse((self.fixture.project / ".opc" / "lineage").exists())
+        serialized = json.dumps(preview, ensure_ascii=False)
+        self.assertNotIn("_filesystem_binding", serialized)
+        self.assertNotIn(str(self.fixture.project), serialized)
+
+    def test_same_byte_project_root_replacement_after_internal_preview_fails_closed(self) -> None:
+        event = self.fixture.event(
+            "lineage-root-replacement",
+            event_type="provider",
+            provider={"provider_id": "mem0", "state": "disabled", "authoritative": False},
+            reasons=["provider_disabled"],
+        )
+        preview = opc_lineage.preview_event(
+            self.fixture.project, event, expected_revision=0,
+            knowledge_root=self.fixture.knowledge, now="2026-07-19T00:00:30Z",
+        )
+        project = self.fixture.project
+        replacement = project.with_name("private-project-replacement")
+        parked = project.with_name("private-project-original")
+        shutil.copytree(project, replacement)
+        original = opc_lineage._verify_filesystem_checkpoint
+        attempted = False
+
+        def replace_root(binding, label, bound=None):
+            nonlocal attempted
+            if label == "after_internal_preview" and not attempted:
+                attempted = True
+                try:
+                    os.replace(project, parked)
+                    os.replace(replacement, project)
+                except OSError as exc:
+                    raise opc_lineage.LineageError(
+                        "synthetic project replacement was refused safely"
+                    ) from exc
+            return original(binding, label, bound)
+
+        try:
+            with patch.object(
+                opc_lineage,
+                "_verify_filesystem_checkpoint",
+                side_effect=replace_root,
+            ):
+                with self.assertRaises(opc_lineage.LineageError):
+                    opc_lineage.record_event(
+                        project, event, expected_revision=0,
+                        plan_token=preview["plan_token"],
+                        knowledge_root=self.fixture.knowledge,
+                        now="2026-07-19T00:00:30Z",
+                    )
+            self.assertTrue(attempted)
+            for candidate in (project, parked, replacement):
+                if candidate.exists():
+                    self.assertFalse(
+                        (candidate / ".opc" / "lineage" / "opc-run-synthetic.json").exists()
+                    )
+        finally:
+            if parked.exists():
+                if project.exists():
+                    displaced = project.with_name("private-project-displaced")
+                    os.replace(project, displaced)
+                    shutil.rmtree(displaced)
+                os.replace(parked, project)
+            if replacement.exists():
+                shutil.rmtree(replacement)
+
+    def test_same_byte_opc_replacement_after_internal_preview_fails_closed(self) -> None:
+        event = self.fixture.event(
+            "lineage-opc-replacement",
+            event_type="provider",
+            provider={"provider_id": "mem0", "state": "disabled", "authoritative": False},
+            reasons=["provider_disabled"],
+        )
+        preview = opc_lineage.preview_event(
+            self.fixture.project, event, expected_revision=0,
+            knowledge_root=self.fixture.knowledge, now="2026-07-19T00:00:30Z",
+        )
+        opc = self.fixture.project / ".opc"
+        replacement = self.fixture.project / ".opc-replacement"
+        parked = self.fixture.project / ".opc-original"
+        shutil.copytree(opc, replacement)
+        original = opc_lineage._verify_filesystem_checkpoint
+        attempted = False
+
+        def replace_opc(binding, label, bound=None):
+            nonlocal attempted
+            if label == "after_internal_preview" and not attempted:
+                attempted = True
+                try:
+                    os.replace(opc, parked)
+                    os.replace(replacement, opc)
+                except OSError as exc:
+                    raise opc_lineage.LineageError(
+                        "synthetic runtime replacement was refused safely"
+                    ) from exc
+            return original(binding, label, bound)
+
+        try:
+            with patch.object(
+                opc_lineage,
+                "_verify_filesystem_checkpoint",
+                side_effect=replace_opc,
+            ):
+                with self.assertRaises(opc_lineage.LineageError):
+                    opc_lineage.record_event(
+                        self.fixture.project, event, expected_revision=0,
+                        plan_token=preview["plan_token"],
+                        knowledge_root=self.fixture.knowledge,
+                        now="2026-07-19T00:00:30Z",
+                    )
+            self.assertTrue(attempted)
+            for candidate in (opc, parked, replacement):
+                if candidate.exists():
+                    self.assertFalse(
+                        (candidate / "lineage" / "opc-run-synthetic.json").exists()
+                    )
+        finally:
+            if parked.exists():
+                if opc.exists():
+                    displaced = self.fixture.project / ".opc-displaced"
+                    os.replace(opc, displaced)
+                    shutil.rmtree(displaced)
+                os.replace(parked, opc)
+            if replacement.exists():
+                shutil.rmtree(replacement)
+
+    def test_lineage_parent_identity_change_after_internal_preview_fails_closed(self) -> None:
+        first = self.fixture.event(
+            "lineage-parent-first", event_type="provider",
+            provider={"provider_id": "mem0", "state": "disabled", "authoritative": False},
+            reasons=["provider_disabled"],
+        )
+        self.fixture.append(first, 0)
+        second = self.fixture.event(
+            "lineage-parent-second", event_type="provider", minute=1,
+            provider={"provider_id": "mem0", "state": "failed", "authoritative": False},
+            reasons=["provider_error"],
+        )
+        preview = opc_lineage.preview_event(
+            self.fixture.project, second, expected_revision=1,
+            knowledge_root=self.fixture.knowledge, now="2026-07-19T00:01:30Z",
+        )
+        lineage = self.fixture.project / ".opc" / "lineage"
+        replacement = self.fixture.project / ".opc" / "lineage-replacement"
+        parked = self.fixture.project / ".opc" / "lineage-original"
+        sidecar_name = "opc-run-synthetic.json"
+        original_bytes = (lineage / sidecar_name).read_bytes()
+        shutil.copytree(lineage, replacement)
+        original = opc_lineage._verify_filesystem_checkpoint
+        replaced = False
+
+        def replace_lineage(binding, label, bound=None):
+            nonlocal replaced
+            if label == "after_internal_preview" and not replaced:
+                os.replace(lineage, parked)
+                os.replace(replacement, lineage)
+                replaced = True
+            return original(binding, label, bound)
+
+        try:
+            with patch.object(
+                opc_lineage,
+                "_verify_filesystem_checkpoint",
+                side_effect=replace_lineage,
+            ):
+                with self.assertRaisesRegex(
+                    opc_lineage.LineageError, "lineage directory identity changed"
+                ):
+                    opc_lineage.record_event(
+                        self.fixture.project, second, expected_revision=1,
+                        plan_token=preview["plan_token"],
+                        knowledge_root=self.fixture.knowledge,
+                        now="2026-07-19T00:01:30Z",
+                    )
+            self.assertTrue(replaced)
+            self.assertEqual((lineage / sidecar_name).read_bytes(), original_bytes)
+            self.assertEqual((parked / sidecar_name).read_bytes(), original_bytes)
+        finally:
+            if parked.exists():
+                if lineage.exists():
+                    displaced = self.fixture.project / ".opc" / "lineage-displaced"
+                    os.replace(lineage, displaced)
+                    shutil.rmtree(displaced)
+                os.replace(parked, lineage)
+            if replacement.exists():
+                shutil.rmtree(replacement)
+
+    def test_lineage_parent_symlink_or_reparse_replacement_fails_closed(self) -> None:
+        first = self.fixture.event(
+            "lineage-symlink-first", event_type="provider",
+            provider={"provider_id": "mem0", "state": "disabled", "authoritative": False},
+            reasons=["provider_disabled"],
+        )
+        self.fixture.append(first, 0)
+        second = self.fixture.event(
+            "lineage-symlink-second", event_type="provider", minute=1,
+            provider={"provider_id": "mem0", "state": "failed", "authoritative": False},
+            reasons=["provider_error"],
+        )
+        preview = opc_lineage.preview_event(
+            self.fixture.project, second, expected_revision=1,
+            knowledge_root=self.fixture.knowledge, now="2026-07-19T00:01:30Z",
+        )
+        opc = self.fixture.project / ".opc"
+        lineage = opc / "lineage"
+        target = opc / "lineage-symlink-target"
+        replacement = opc / "lineage-symlink-replacement"
+        parked = opc / "lineage-symlink-original"
+        sidecar_name = "opc-run-synthetic.json"
+        original_bytes = (lineage / sidecar_name).read_bytes()
+        shutil.copytree(lineage, target)
+        try:
+            replacement.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            shutil.rmtree(target)
+            self.skipTest(f"directory symlink/reparse creation is unavailable: {exc}")
+        original = opc_lineage._verify_filesystem_checkpoint
+        replaced = False
+
+        def replace_with_link(binding, label, bound=None):
+            nonlocal replaced
+            if label == "after_internal_preview" and not replaced:
+                os.replace(lineage, parked)
+                os.replace(replacement, lineage)
+                replaced = True
+            return original(binding, label, bound)
+
+        try:
+            with patch.object(
+                opc_lineage,
+                "_verify_filesystem_checkpoint",
+                side_effect=replace_with_link,
+            ):
+                with self.assertRaisesRegex(
+                    opc_lineage.LineageError, "lineage directory is not a stable directory"
+                ):
+                    opc_lineage.record_event(
+                        self.fixture.project, second, expected_revision=1,
+                        plan_token=preview["plan_token"],
+                        knowledge_root=self.fixture.knowledge,
+                        now="2026-07-19T00:01:30Z",
+                    )
+            self.assertTrue(replaced)
+            self.assertEqual((target / sidecar_name).read_bytes(), original_bytes)
+            self.assertEqual((parked / sidecar_name).read_bytes(), original_bytes)
+        finally:
+            if lineage.is_symlink():
+                lineage.unlink()
+            elif lineage.exists() and parked.exists():
+                shutil.rmtree(lineage)
+            if parked.exists():
+                os.replace(parked, lineage)
+            if replacement.is_symlink():
+                replacement.unlink()
+            if target.exists():
+                shutil.rmtree(target)
+
+    def test_filesystem_binding_is_released_on_success_and_failure_paths(self) -> None:
+        scenarios = (
+            "success", "preview_failure", "lock_failure", "pending_failure",
+            "subject_mismatch", "publish_failure",
+        )
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                root = Path(self.temporary.name) / f"release-{scenario}"
+                root.mkdir()
+                fixture = LineageFixture(root)
+                event = fixture.event(
+                    f"lineage-release-{scenario}", event_type="provider",
+                    provider={
+                        "provider_id": "mem0", "state": "disabled",
+                        "authoritative": False,
+                    },
+                    reasons=["provider_disabled"],
+                )
+                preview = None
+                if scenario != "preview_failure":
+                    preview = opc_lineage.preview_event(
+                        fixture.project, event, expected_revision=0,
+                        knowledge_root=fixture.knowledge,
+                        now="2026-07-19T00:00:30Z",
+                    )
+                if scenario == "lock_failure":
+                    lineage = fixture.project / ".opc" / "lineage"
+                    lineage.mkdir()
+                    (lineage / "opc-run-synthetic.json.lock").write_text(
+                        "synthetic lock", encoding="utf-8"
+                    )
+
+                original_close = opc_lineage._FilesystemSubjectBinding.close
+                closed = []
+
+                def track_close(binding):
+                    original_close(binding)
+                    closed.append(binding)
+
+                original_write_checkpoint = opc_lineage._verify_checkpoint
+                original_filesystem_checkpoint = (
+                    opc_lineage._verify_filesystem_checkpoint
+                )
+
+                def write_checkpoint(bound, label):
+                    if scenario == "pending_failure" and label == "after_pending_creation":
+                        raise opc_lineage.LineageError("synthetic pending failure")
+                    if scenario == "publish_failure" and label == "after_replace":
+                        raise opc_lineage.LineageError("synthetic publish failure")
+                    return original_write_checkpoint(bound, label)
+
+                subject_changed = False
+
+                def filesystem_checkpoint(binding, label, bound=None):
+                    nonlocal subject_changed
+                    if (
+                        scenario == "subject_mismatch"
+                        and label == "after_lineage_lock"
+                        and not subject_changed
+                    ):
+                        changed = dict(fixture.run_record)
+                        changed["run_id"] = "opc-run-replaced"
+                        (fixture.project / ".opc" / "run.json").write_text(
+                            json.dumps(changed), encoding="utf-8"
+                        )
+                        subject_changed = True
+                    return original_filesystem_checkpoint(binding, label, bound)
+
+                write_patch = (
+                    patch.object(
+                        opc_lineage, "_verify_checkpoint", side_effect=write_checkpoint
+                    )
+                    if scenario in {"pending_failure", "publish_failure"}
+                    else nullcontext()
+                )
+                filesystem_patch = (
+                    patch.object(
+                        opc_lineage,
+                        "_verify_filesystem_checkpoint",
+                        side_effect=filesystem_checkpoint,
+                    )
+                    if scenario == "subject_mismatch"
+                    else nullcontext()
+                )
+                with patch.object(
+                    opc_lineage._FilesystemSubjectBinding,
+                    "close",
+                    new=track_close,
+                ), write_patch, filesystem_patch:
+                    if scenario == "preview_failure":
+                        with self.assertRaisesRegex(
+                            opc_lineage.LineageError, "expected_revision"
+                        ):
+                            opc_lineage.preview_event(
+                                fixture.project, event, expected_revision=-1,
+                                knowledge_root=fixture.knowledge,
+                                now="2026-07-19T00:00:30Z",
+                            )
+                    elif scenario == "success":
+                        result = opc_lineage.record_event(
+                            fixture.project, event, expected_revision=0,
+                            plan_token=preview["plan_token"],
+                            knowledge_root=fixture.knowledge,
+                            now="2026-07-19T00:00:30Z",
+                        )
+                        self.assertFalse(result["idempotent"])
+                    else:
+                        with self.assertRaises(
+                            (opc_lineage.LineageError, opc_feedback.FeedbackError)
+                        ):
+                            opc_lineage.record_event(
+                                fixture.project, event, expected_revision=0,
+                                plan_token=preview["plan_token"],
+                                knowledge_root=fixture.knowledge,
+                                now="2026-07-19T00:00:30Z",
+                            )
+
+                self.assertTrue(closed)
+                for binding in closed:
+                    self.assertTrue(binding.closed)
+                    self.assertIsNone(binding.project_bound.fd)
+                    self.assertIsNone(binding.project_bound.windows_handle)
+                    self.assertIsNone(binding.opc_bound.fd)
+                    self.assertIsNone(binding.opc_bound.windows_handle)
+                moved = fixture.project.with_name(f"private-project-{scenario}-moved")
+                os.replace(fixture.project, moved)
+                os.replace(moved, fixture.project)
 
     def test_default_preview_token_is_stable_across_cli_processes(self) -> None:
         recall, citation = self.one_recall()
@@ -696,6 +1079,11 @@ class KnowledgeLineageTests(unittest.TestCase):
             contract["storage"]["subject_binding"],
             "exact-project-run-instances",
         )
+        self.assertEqual(
+            contract["storage"]["filesystem_subject_binding"],
+            "process-local-project-opc-lineage-directory-objects",
+        )
+        self.assertFalse(contract["storage"]["filesystem_identity_serialized"])
         self.assertEqual(schema["properties"]["events"]["maxItems"], opc_lineage.MAX_EVENTS)
         self.assertFalse(schema["additionalProperties"])
         if importlib.util.find_spec("jsonschema"):

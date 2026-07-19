@@ -11,6 +11,8 @@
     "git_ignored_boundary": ".opc/lineage/",
     "transaction_artifacts": ["final", "lock", "pending", "backup"],
     "subject_binding": "exact-project-run-instances",
+    "filesystem_subject_binding": "process-local-project-opc-lineage-directory-objects",
+    "filesystem_identity_serialized": false,
     "preview_writes": false,
     "canonical_write": false,
     "provider_write": false,

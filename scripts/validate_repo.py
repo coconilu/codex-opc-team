@@ -797,6 +797,9 @@ def validate_knowledge_lineage_contract() -> None:
         and set(storage.get("transaction_artifacts", []))
         == {"final", "lock", "pending", "backup"}
         and storage.get("subject_binding") == "exact-project-run-instances"
+        and storage.get("filesystem_subject_binding")
+        == "process-local-project-opc-lineage-directory-objects"
+        and storage.get("filesystem_identity_serialized") is False
         and storage.get("preview_writes") is False
         and all(
             storage.get(key) is False

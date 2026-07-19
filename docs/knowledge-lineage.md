@@ -47,7 +47,9 @@ python <plugin-root>/scripts/opc_lineage.py record \
   --expected-revision 0 --plan-token <exact-preview-token>
 ```
 
-Preview 零写入，并把 base sidecar 的存在性、原始文件字节 SHA-256 和 project/run 的 exact subject binding（ID + instance Hash）纳入 exact plan token。Record 的 sidecar 与 lock 路径始终从该绑定 run 派生；锁内及发布前重读 project/run 并逐字段比对，主体切换或路径错配一律 fail closed。Git worktree 必须把整个 `.opc/lineage/` 目录设为 ignore 且目录中没有 tracked 内容；只 ignore 最终 JSON 的窄规则不够，因为 final、lock、pending、backup transaction artifacts 都必须落在同一私有边界。Record 使用 base-record CAS + revision CAS、独占 lock、BoundDirectory、单链接检查、随机 pending/backup、`fsync` 和 atomic replace，并在创建 lock 前、写事务产物前和 replace 前复验隐私边界；锁内 base 缺失、出现或同 revision 内容变化都拒绝覆盖。Git worktree/ignore/tracked 探测不可用、超时或异常结果一律 fail closed，只有明确的 non-Git 结果可使用项目私有边界。相同 event ID 与相同内容重试为幂等；不同内容或 stale revision 拒绝。不要把 event/recall 临时文件放进公开仓库、canonical knowledge 或项目源码。
+Preview 零写入，并把 base sidecar 的存在性、原始文件字节 SHA-256 和 project/run 的 exact subject binding（ID + instance Hash）纳入 exact plan token。Record 会在同一进程内重新执行 preview，并继续持有 project root 与 `.opc` 的目录对象绑定，同时记录 lineage 目录对象 identity 或“尚不存在”；打开 lineage、创建 lock、创建 pending/backup、atomic replace 和最终清理前都必须复验同一对象。目录 rename、同字节替换、symlink/junction/reparse 或 ancestor identity 变化一律 fail closed；Windows 8.3 等价别名按 `samefile` identity 接受。目录 token、inode、handle、绝对路径只存在于该次进程内绑定，不进入 plan token 的公开 core、record、view、report 或日志。
+
+Record 的 sidecar 与 lock 路径始终从该绑定 run 派生；锁内及发布前重读 project/run 并逐字段比对，主体切换或路径错配一律 fail closed。Git worktree 必须把整个 `.opc/lineage/` 目录设为 ignore 且目录中没有 tracked 内容；只 ignore 最终 JSON 的窄规则不够，因为 final、lock、pending、backup transaction artifacts 都必须落在同一私有边界。Record 使用 base-record CAS + revision CAS、独占 lock、BoundDirectory、单链接检查、随机 pending/backup、`fsync` 和 atomic replace，并在创建 lock 前、写事务产物前和 replace 前复验隐私边界；锁内 base 缺失、出现或同 revision 内容变化都拒绝覆盖。Git worktree/ignore/tracked 探测不可用、超时或异常结果一律 fail closed，只有明确的 non-Git 结果可使用项目私有边界。相同 event ID 与相同内容重试为幂等；不同内容或 stale revision 拒绝。所有目录 handle/fd 必须在成功、预览失败、锁冲突、主体变化或发布回滚后关闭，不得阻止后续合法 rename/delete。不要把 event/recall 临时文件放进公开仓库、canonical knowledge 或项目源码。
 
 ## 3. Provider 降级与 no-memory
 
