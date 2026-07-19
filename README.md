@@ -15,6 +15,7 @@ Codex remains the harness. The project does not replace Codex's file, browser, w
 | Portable memory | Git-managed files are the durable source of truth. |
 | Optional Mem0 | Mem0 can improve semantic recall, but the full workflow must work without it. |
 | Progressive context | Private, disposable L0/L1 navigation limits canonical L2 reads; every injected leaf is revalidated against current File/Git HEAD. |
+| Auditable use | Private role/step lineage distinguishes recall, injection, adoption, omission, and evidence association without claiming causality. |
 | Controlled learning | Experience moves from candidate to manager-approved knowledge, then becomes recallable only after an exact Git commit is verifiable at the current HEAD; it is never silently promoted. |
 | Independent acceptance | A developer's self-report is not QA evidence. The manager is notified only after an independent gate. |
 | Private by default | Public plugin code is separated from private organizational knowledge and runtime data. |
@@ -62,6 +63,8 @@ Hook/runtime events live in private `PLUGIN_DATA` or a project `.opc` fallback, 
 
 Hierarchical recall is zero-dependency and optional. Its virtual tree, L0/L1 summaries, and index live only under an explicit private data root, are Git-ignored, deletable, and rebuildable, and never become facts. Missing, stale, invalid, disabled, timed-out, or disagreeing derived/provider state falls back to File/Git. The public synthetic comparison reports precision@5 `0.20 → 1.00`, canonical leaf recall@5 `1.00 → 1.00`, median injected tokens `661 → 107`, and zero scope/stale acceptance; this is evidence for that fixture, not a universal performance claim. See [hierarchical recall and ContextPacket](docs/hierarchical-recall.md).
 
+Knowledge lineage is an optional private `.opc` sidecar. It binds exact run/project and ContextPacket/RecallTrace hashes to role/step states, provider degradation, QA, feedback, outcome, Shadow, and evaluation references. Reports revalidate current File/Git provenance and always state `association/evidence only`; they never infer adoption or causality. See [knowledge lineage](docs/knowledge-lineage.md).
+
 ## Documentation
 
 | Document | Purpose |
@@ -81,6 +84,7 @@ Hierarchical recall is zero-dependency and optional. Its virtual tree, L0/L1 sum
 | [Structured feedback](docs/structured-feedback.md) | Private, auditable manager judgment, QA evidence, outcome, and hypothesis records |
 | [Shadow Evaluation](docs/shadow-evaluation.md) | Read-only candidate control/treatment replay with exact provenance and no automatic promotion |
 | [Hierarchical recall](docs/hierarchical-recall.md) | Private L0/L1 navigation, canonical L2 validation, ContextPacket/RecallTrace, and flat comparison |
+| [Knowledge lineage](docs/knowledge-lineage.md) | Private role/step knowledge states, portable outcome links, current-HEAD revalidation, and non-causal reports |
 | [Roadmap](docs/roadmap.md) | Planned delivery stages |
 
 Architecture decisions live under [`docs/adr`](docs/adr/README.md).

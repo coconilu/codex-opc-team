@@ -72,7 +72,7 @@
 - 经验候选的版本化重放、只读 Shadow Evaluation 和证据派生置信度（已实现 v1；不自动晋升）；
 - 跨项目冲突检测、适用范围推断和失效提示；
 - 分层 File recall、严格 ContextPacket/RecallTrace 与预算评测（v1 已实现；公开 synthetic superior 只代表该 fixture，不改变 authority）；
-- 经理反馈与真实产品指标的结构化关联；
+- 经理反馈与真实产品指标的结构化关联，以及角色/步骤知识使用链路（v1 已实现；仅 association/evidence，不证明因果）；
 - 知识导出、合并和审计 UI。
 
 这些能力仍遵守“不得自动晋升”的基础决策。任何自动化批准提议都需要新的 ADR 和安全评估。

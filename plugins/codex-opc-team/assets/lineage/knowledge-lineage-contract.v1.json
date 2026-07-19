@@ -1,0 +1,94 @@
+{
+  "contract_version": "opc-knowledge-lineage-contract-v1",
+  "schema_version": "opc-knowledge-lineage-v1",
+  "view_version": "opc-knowledge-lineage-view-v1",
+  "context_packet_version": "opc-context-packet-v1",
+  "recall_trace_version": "opc-recall-trace-v1",
+  "authority": "file-git-only",
+  "storage": {
+    "project_relative": ".opc/lineage/{run_id}.json",
+    "private_or_git_ignored": true,
+    "preview_writes": false,
+    "canonical_write": false,
+    "provider_write": false,
+    "project_source_write": false,
+    "remote_telemetry": false
+  },
+  "event_types": ["knowledge", "provider", "association"],
+  "knowledge_states": ["recalled", "injected", "adopted", "ignored", "overridden", "contradicted", "omitted"],
+  "provider_states": ["available", "missing", "disabled", "failed", "stale", "no_memory"],
+  "evidence_kinds": ["qa", "feedback", "outcome", "shadow", "evaluation"],
+  "state_rules": {
+    "recalled": [null],
+    "injected": ["recalled"],
+    "adopted": ["injected"],
+    "ignored": ["injected"],
+    "overridden": ["injected", "adopted"],
+    "contradicted": ["injected", "adopted"],
+    "omitted": [null, "recalled", "injected"]
+  },
+  "report_claim": "association/evidence only",
+  "causal_claim_allowed": false,
+  "confounders": [
+    "role capability and implementation quality",
+    "task difficulty and changing requirements",
+    "tooling provider and environment variation",
+    "independent QA and manager intervention"
+  ],
+  "unknowns": [
+    "counterfactual outcome without the knowledge",
+    "unobserved context outside the bounded trace",
+    "whether a later outcome was caused by one revision"
+  ],
+  "retention": {
+    "class": "private-derived-run-evidence",
+    "default_days": 30,
+    "project_policy_may_shorten": true,
+    "automatic_promotion": false,
+    "redaction": "delete the derived lineage artifact; never rewrite canonical knowledge"
+  },
+  "compatibility": {
+    "v0_1_without_lineage": "readable-as-lineage-unavailable",
+    "migration_required": false,
+    "fabricate_defaults": false
+  },
+  "forbidden_content": [
+    "raw_chat",
+    "raw_prompt",
+    "chain_of_thought",
+    "hook_payload",
+    "tool_payload",
+    "credentials",
+    "embeddings",
+    "session_id",
+    "turn_id",
+    "thread_id",
+    "user_home_path",
+    "private_body"
+  ],
+  "forbidden_side_effects": [
+    "candidate_approval",
+    "candidate_rejection",
+    "knowledge_rewrite",
+    "knowledge_promotion",
+    "git_write",
+    "provider_index_write",
+    "external_communication"
+  ],
+  "limits": {
+    "event_input_bytes": 131072,
+    "lineage_bytes": 1048576,
+    "events": 500,
+    "states": 500,
+    "references_per_event": 20,
+    "reason_codes_per_event": 20,
+    "identifier_characters": 128,
+    "portable_reference_characters": 240,
+    "role_characters": 64,
+    "step_characters": 128,
+    "provider_characters": 64,
+    "timestamp_characters": 32,
+    "evidence_file_bytes": 1048576,
+    "context_result_bytes": 2097152
+  }
+}

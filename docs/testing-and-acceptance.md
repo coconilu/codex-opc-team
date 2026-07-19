@@ -63,6 +63,8 @@ Optional Mem0 切片必须在安装依赖前从 `RUNNER_TEMP` 初始化 `MEM0_DI
 
 结构化反馈测试必须覆盖：PASS、FAIL、partial 和 unknown 合成结果；经理判断/独立 QA/假设/未知信息分离；旧 run 无 sidecar 可读；同事件幂等、同 ID 冲突、stale 与并发写入 fail closed；Draft 2020-12 schema 与运行时对非法引用的一致拒绝；事件/sidecar 读取上限；共享凭证规则且错误/报告不泄漏；父目录在 pending 前后、replace 前和最终清理前变化时的回滚；竞争 lock/pending identity 保留；机器记录与确定性人类报告同源。测试还要证明写入只产生项目私有 feedback sidecar，不触发候选批准、Git、索引、发布、付款或外部通信。
 
+知识链路专项必须覆盖：recalled-but-unused、injected、adopted、ignored、overridden、contradicted、omitted；多个 role/step 与 exact Packet/Trace Hash；stale、cross-project、obsolete、unresolved conflict 在报告时降级；missing/disabled/failed/stale/no-memory Provider 不阻塞 File/Git；晚到 QA、feedback、outcome、Shadow、evaluation 引用保持 portable/existing/bounded；同事件幂等、冲突 ID、stale CAS、并发和发布故障无 partial；Windows 原始字节 Hash、8.3 identity、hardlink、symlink/reparse 和父目录变化 fail closed；Schema/runtime/renderer 聚合重算一致；旧 run 显示 lineage unavailable；报告逐字包含 `association/evidence only`、confounders 和 unknowns。测试不得把 recalled/injected 推断为 adopted，也不得产生 canonical、Provider、Git、项目源码或 remote telemetry 写入。
+
 ## 6. Hook 隐私测试
 
 至少包含以下自动化用例：
