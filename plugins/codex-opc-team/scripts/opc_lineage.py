@@ -21,7 +21,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from opc_feedback import (
     FeedbackError,
@@ -118,6 +118,7 @@ EVENT_INPUT_KEYS = {
     "reason_codes", "previous_event_id",
 }
 INSTANCE_KEYS = {"schema_version", "sha256"}
+SUBJECT_KEYS = {"project_ref", "run_ref", "project_instance", "run_instance"}
 PACKET_REF_KEYS = {
     "schema_version", "sha256", "query_sha256", "mode",
     "recall_trace_version", "recall_trace_sha256",
@@ -242,6 +243,7 @@ def _hash(value: Any, label: str) -> str:
 
 def _load_contract() -> tuple[dict[str, Any], str]:
     contract, raw = _read_input(CONTRACT_PATH, maximum=64 * 1024, label="lineage contract")
+    storage = contract.get("storage") or {}
     limits = contract.get("limits")
     expected_limits = {
         "event_input_bytes": MAX_EVENT_INPUT_BYTES,
@@ -268,6 +270,10 @@ def _load_contract() -> tuple[dict[str, Any], str]:
         or contract.get("authority") != "file-git-only"
         or contract.get("causal_claim_allowed") is not False
         or contract.get("evidence_association_only") is not True
+        or storage.get("git_ignored_boundary") != ".opc/lineage/"
+        or set(storage.get("transaction_artifacts", []))
+        != {"final", "lock", "pending", "backup"}
+        or storage.get("subject_binding") != "exact-project-run-instances"
         or contract.get("report_claim") != "association/evidence only"
         or set(contract.get("event_types", [])) != EVENT_TYPES
         or set(contract.get("knowledge_states", [])) != KNOWLEDGE_STATES
@@ -509,6 +515,42 @@ def _read_project_subject(project_root: Path) -> tuple[Path, str, str, dict[str,
     return project, project_id, run_id, project_instance, run_instance
 
 
+def _subject_binding(
+    project_id: str,
+    run_id: str,
+    project_instance: Mapping[str, Any],
+    run_instance: Mapping[str, Any],
+) -> dict[str, Any]:
+    subject = {
+        "project_ref": project_id,
+        "run_ref": run_id,
+        "project_instance": dict(project_instance),
+        "run_instance": dict(run_instance),
+    }
+    _validate_subject_binding(subject)
+    return subject
+
+
+def _validate_subject_binding(value: Any) -> None:
+    _exact(value, SUBJECT_KEYS, "lineage subject")
+    _portable(value["project_ref"], PORTABLE_ID, "subject project_ref")
+    _portable(value["run_ref"], PORTABLE_RUN, "subject run_ref")
+    _validate_instance(value["project_instance"], "subject project instance")
+    _validate_instance(value["run_instance"], "subject run instance")
+
+
+def _assert_subject_unchanged(project: Path, expected: Mapping[str, Any]) -> None:
+    _validate_subject_binding(expected)
+    current_project, project_id, run_id, project_instance, run_instance = (
+        _read_project_subject(project)
+    )
+    if current_project != project:
+        raise LineageError("project root identity changed after preview")
+    current = _subject_binding(project_id, run_id, project_instance, run_instance)
+    if current != expected:
+        raise LineageError("project or run subject changed after preview")
+
+
 def _lineage_path(project: Path, run_id: str) -> Path:
     path = project / ".opc" / "lineage" / f"{run_id}.json"
     _assert_private_containment(project, path)
@@ -516,7 +558,7 @@ def _lineage_path(project: Path, run_id: str) -> Path:
 
 
 def _assert_private_or_ignored(project: Path, path: Path) -> None:
-    """A Git worktree may store lineage only at an ignored .opc path."""
+    """A Git worktree may store lineage only in an ignored lineage directory."""
 
     cursor = project.resolve(strict=True)
     has_git_marker = False
@@ -562,19 +604,31 @@ def _assert_private_or_ignored(project: Path, path: Path) -> None:
         raise LineageError("Git worktree boundary resolution failed closed")
     top = top_result.stdout.strip()
     root = Path(top).resolve()
+    lineage_directory = path.parent.resolve(strict=False)
     try:
-        relative = path.resolve(strict=False).relative_to(root).as_posix()
+        relative = lineage_directory.relative_to(root).as_posix().rstrip("/") + "/"
     except ValueError as exc:
         raise LineageError("lineage path escaped its Git worktree") from exc
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--", relative],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise LineageError("could not verify the private lineage directory contents") from exc
+    if tracked.returncode != 0:
+        raise LineageError("Git tracked-lineage verification failed closed")
+    if tracked.stdout.strip():
+        raise LineageError("project-local lineage directory contains tracked content")
     try:
         ignored = subprocess.run(
             ["git", "-C", str(root), "check-ignore", "-q", "--", relative],
             check=False, capture_output=True, timeout=5,
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
-        raise LineageError("could not verify the ignored .opc boundary") from exc
+        raise LineageError("could not verify the ignored lineage directory boundary") from exc
     if ignored.returncode == 1:
-        raise LineageError("project-local lineage requires an ignored .opc path")
+        raise LineageError("project-local lineage requires an ignored .opc/lineage directory")
     if ignored.returncode != 0:
         raise LineageError("Git ignore verification failed closed")
 
@@ -774,6 +828,9 @@ def preview_event(
     if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
         raise LineageError("expected_revision must be a non-negative integer")
     project, project_id, run_id, project_instance, run_instance = _read_project_subject(project_root)
+    subject = _subject_binding(
+        project_id, run_id, project_instance, run_instance
+    )
     path = _lineage_path(project, run_id)
     _assert_private_or_ignored(project, path)
     existing, existing_sha256 = _read_stored_snapshot(path, project)
@@ -836,6 +893,7 @@ def preview_event(
             if prior != comparable:
                 raise LineageError("event_id already exists with different content")
             core = {
+                "subject": subject,
                 "project_ref": project_id,
                 "run_ref": run_id,
                 "expected_revision": expected_revision,
@@ -869,6 +927,7 @@ def preview_event(
         if reasons:
             raise LineageError("canonical knowledge is not currently usable; record an omission")
     core = {
+        "subject": subject,
         "project_ref": project_id,
         "run_ref": run_id,
         "expected_revision": expected_revision,
@@ -881,7 +940,13 @@ def preview_event(
     return {**core, "plan_token": _sha256(_canonical_bytes(core)), "record": updated}
 
 
-def _atomic_write(bound: _BoundDirectory, target_name: str, record: Mapping[str, Any]) -> None:
+def _atomic_write(
+    bound: _BoundDirectory,
+    target_name: str,
+    record: Mapping[str, Any],
+    *,
+    verify_transaction_boundary: Callable[[], None],
+) -> None:
     nonce = secrets.token_hex(24)
     pending_name = f"{target_name}.pending-{nonce}"
     backup_name = f"{target_name}.backup-{nonce}"
@@ -891,9 +956,11 @@ def _atomic_write(bound: _BoundDirectory, target_name: str, record: Mapping[str,
     had_original = bound.child_identity(target_name) is not None
     descriptor: int | None = None
     try:
+        verify_transaction_boundary()
         if had_original:
             backup_identity = bound.link(target_name, backup_name)
         _verify_checkpoint(bound, "before_pending_creation")
+        verify_transaction_boundary()
         descriptor = bound.open_exclusive(pending_name, binary=True)
         pending_identity = _file_identity(os.fstat(descriptor))
         _verify_checkpoint(bound, "after_pending_creation")
@@ -907,6 +974,7 @@ def _atomic_write(bound: _BoundDirectory, target_name: str, record: Mapping[str,
             os.fsync(handle.fileno())
             pending_identity = _file_identity(os.fstat(handle.fileno()))
         _verify_checkpoint(bound, "before_replace")
+        verify_transaction_boundary()
         bound.replace(pending_name, target_name, expected_source=pending_identity)
         published = True
         _verify_checkpoint(bound, "after_replace")
@@ -946,43 +1014,63 @@ def record_event(
     )
     if preview["plan_token"] != plan_token:
         raise LineageError("lineage plan token no longer matches the exact preview")
-    project, _, run_id, _, _ = _read_project_subject(project_root)
-    path = _lineage_path(project, run_id)
+    subject = preview["subject"]
+    _validate_subject_binding(subject)
+    project = project_root.expanduser().resolve(strict=True)
+    _assert_private_containment(project, project / ".opc" / "placeholder")
+    path = _lineage_path(project, subject["run_ref"])
     parent_existed = path.parent.exists()
     bound: _BoundDirectory | None = None
     try:
-        with _BoundDirectory(path.parent, project) as bound, _exclusive_update_lock(bound, path.name):
+        with _BoundDirectory(path.parent, project) as bound:
             _assert_private_or_ignored(project, path)
-            _verify_checkpoint(bound, "after_lineage_lock")
-            current = None
-            current_sha256 = None
-            if bound.child_identity(path.name) is not None:
-                current_raw = bound.read_bytes(
+            _assert_subject_unchanged(project, subject)
+            with _exclusive_update_lock(bound, path.name):
+                _assert_private_or_ignored(project, path)
+                _assert_subject_unchanged(project, subject)
+                _verify_checkpoint(bound, "after_lineage_lock")
+                current = None
+                current_sha256 = None
+                if bound.child_identity(path.name) is not None:
+                    current_raw = bound.read_bytes(
+                        path.name,
+                        max_bytes=MAX_LINEAGE_BYTES,
+                        require_single_link=True,
+                        binary=True,
+                    )
+                    current = _strict_json_bytes(
+                        current_raw,
+                        label="lineage sidecar",
+                    )
+                    validate_record(current)
+                    current_sha256 = _sha256(current_raw)
+                current_base = {
+                    "exists": current is not None,
+                    "sha256": current_sha256,
+                }
+                if current_base != preview["base_record"]:
+                    raise LineageError("lineage base record changed after preview")
+                if preview["idempotent"]:
+                    _assert_private_or_ignored(project, path)
+                    _assert_subject_unchanged(project, subject)
+                    return {"idempotent": True, "record": current}
+                current_revision = current["revision"] if current else 0
+                if current_revision != expected_revision:
+                    raise LineageError("stale lineage revision")
+
+                def verify_transaction_boundary() -> None:
+                    bound.verify_current()
+                    _assert_private_or_ignored(project, path)
+                    _assert_subject_unchanged(project, subject)
+
+                verify_transaction_boundary()
+                _atomic_write(
+                    bound,
                     path.name,
-                    max_bytes=MAX_LINEAGE_BYTES,
-                    require_single_link=True,
-                    binary=True,
+                    preview["record"],
+                    verify_transaction_boundary=verify_transaction_boundary,
                 )
-                current = _strict_json_bytes(
-                    current_raw,
-                    label="lineage sidecar",
-                )
-                validate_record(current)
-                current_sha256 = _sha256(current_raw)
-            current_base = {
-                "exists": current is not None,
-                "sha256": current_sha256,
-            }
-            if current_base != preview["base_record"]:
-                raise LineageError("lineage base record changed after preview")
-            if preview["idempotent"]:
-                return {"idempotent": True, "record": current}
-            current_revision = current["revision"] if current else 0
-            if current_revision != expected_revision:
-                raise LineageError("stale lineage revision")
-            bound.verify_current()
-            _atomic_write(bound, path.name, preview["record"])
-            bound.verify_current()
+                bound.verify_current()
     except FeedbackError as exc:
         raise LineageError("private lineage transaction failed safely") from exc
     finally:

@@ -1,6 +1,6 @@
 # Manager knowledge-lineage handoff
 
-Use `opc_lineage.py` only for an active OPC project whose `.opc` is private or Git-ignored. Git detection or ignore-check failure is blocking, never evidence of a non-Git project. Preview every event first and apply only the unchanged plan token, which binds base sidecar existence and content hash as well as revision. Keep event and RecallResult inputs private.
+Use `opc_lineage.py` only for an active OPC project whose entire `.opc/lineage/` directory is private or Git-ignored and untracked; an exact-file-only ignore rule is insufficient for lock/pending/backup artifacts. Git detection, tracked-content, or ignore-check failure is blocking, never evidence of a non-Git project. Preview every event first and apply only the unchanged plan token, which binds the exact project/run IDs and instance hashes, base sidecar existence and content hash, and revision. Subject changes fail closed before publication. Keep event and RecallResult inputs private.
 
 | Moment | Event |
 |---|---|

@@ -190,6 +190,15 @@ class KnowledgeLineageTests(unittest.TestCase):
             now="2026-07-19T00:00:30Z",
         )
         self.assertFalse(preview["idempotent"])
+        self.assertEqual(
+            preview["subject"],
+            {
+                "project_ref": "project-alpha",
+                "run_ref": "opc-run-synthetic",
+                "project_instance": preview["record"]["events"][0]["project_instance"],
+                "run_instance": preview["record"]["events"][0]["run_instance"],
+            },
+        )
         event_record = preview["record"]["events"][0]
         self.assertEqual(
             event_record["project_instance"]["sha256"],
@@ -663,6 +672,15 @@ class KnowledgeLineageTests(unittest.TestCase):
         schema = json.loads((ROOT / "plugins/codex-opc-team/assets/lineage/knowledge-lineage.v1.schema.json").read_text(encoding="utf-8"))
         self.assertEqual(contract["limits"]["events"], opc_lineage.MAX_EVENTS)
         self.assertTrue(contract["evidence_association_only"])
+        self.assertEqual(contract["storage"]["git_ignored_boundary"], ".opc/lineage/")
+        self.assertEqual(
+            set(contract["storage"]["transaction_artifacts"]),
+            {"final", "lock", "pending", "backup"},
+        )
+        self.assertEqual(
+            contract["storage"]["subject_binding"],
+            "exact-project-run-instances",
+        )
         self.assertEqual(schema["properties"]["events"]["maxItems"], opc_lineage.MAX_EVENTS)
         self.assertFalse(schema["additionalProperties"])
         if importlib.util.find_spec("jsonschema"):
@@ -979,11 +997,12 @@ class KnowledgeLineageTests(unittest.TestCase):
         top = subprocess.CompletedProcess(
             [], 0, stdout=str(self.fixture.project) + "\n", stderr=""
         )
+        tracked_success = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         ignore_failure = subprocess.CompletedProcess([], 2, stdout=b"", stderr=b"")
         with patch.object(
             opc_lineage.subprocess,
             "run",
-            side_effect=[inside, top, ignore_failure],
+            side_effect=[inside, top, tracked_success, ignore_failure],
         ):
             with self.assertRaisesRegex(opc_lineage.LineageError, "ignore"):
                 opc_lineage._assert_private_or_ignored(self.fixture.project, target)
@@ -1052,6 +1071,223 @@ class KnowledgeLineageTests(unittest.TestCase):
                 )
         self.assertEqual(calls, 2)
         self.assertFalse((self.fixture.project / ".opc" / "lineage").exists())
+
+    def test_record_binds_old_run_path_and_rejects_run_switch_inside_lock(self) -> None:
+        event = self.fixture.event(
+            "lineage-run-switch",
+            event_type="provider",
+            provider={"provider_id": "mem0", "state": "disabled", "authoritative": False},
+            reasons=["provider_disabled"],
+        )
+        preview = opc_lineage.preview_event(
+            self.fixture.project,
+            event,
+            expected_revision=0,
+            knowledge_root=self.fixture.knowledge,
+            now="2026-07-19T00:00:30Z",
+        )
+        original = opc_lineage._verify_checkpoint
+        observed_lock: list[str] = []
+
+        def switch_run(bound, label):
+            if label == "after_lineage_lock":
+                observed_lock.extend(path.name for path in bound.path.iterdir())
+                changed = dict(self.fixture.run_record)
+                changed["run_id"] = "opc-run-next"
+                (self.fixture.project / ".opc" / "run.json").write_text(
+                    json.dumps(changed), encoding="utf-8"
+                )
+            return original(bound, label)
+
+        with patch.object(opc_lineage, "_verify_checkpoint", side_effect=switch_run):
+            with self.assertRaisesRegex(opc_lineage.LineageError, "subject changed"):
+                opc_lineage.record_event(
+                    self.fixture.project,
+                    event,
+                    expected_revision=0,
+                    plan_token=preview["plan_token"],
+                    knowledge_root=self.fixture.knowledge,
+                    now="2026-07-19T00:00:30Z",
+                )
+        self.assertIn("opc-run-synthetic.json.lock", observed_lock)
+        lineage = self.fixture.project / ".opc" / "lineage"
+        self.assertFalse((lineage / "opc-run-synthetic.json").exists())
+        self.assertFalse((lineage / "opc-run-next.json").exists())
+        self.assertEqual([], list(lineage.iterdir()) if lineage.exists() else [])
+
+    def test_record_rejects_project_switch_after_pending_before_publish(self) -> None:
+        event = self.fixture.event(
+            "lineage-project-switch",
+            event_type="provider",
+            provider={"provider_id": "mem0", "state": "disabled", "authoritative": False},
+            reasons=["provider_disabled"],
+        )
+        preview = opc_lineage.preview_event(
+            self.fixture.project,
+            event,
+            expected_revision=0,
+            knowledge_root=self.fixture.knowledge,
+            now="2026-07-19T00:00:30Z",
+        )
+        original = opc_lineage._verify_checkpoint
+        pending_seen = False
+
+        def switch_project(bound, label):
+            nonlocal pending_seen
+            if label == "after_pending_creation":
+                pending_seen = any(".pending-" in path.name for path in bound.path.iterdir())
+                project_record = dict(self.fixture.project_record)
+                project_record["project_id"] = "project-beta"
+                run_record = dict(self.fixture.run_record)
+                run_record["project_id"] = "project-beta"
+                (self.fixture.project / ".opc" / "project.json").write_text(
+                    json.dumps(project_record), encoding="utf-8"
+                )
+                (self.fixture.project / ".opc" / "run.json").write_text(
+                    json.dumps(run_record), encoding="utf-8"
+                )
+            return original(bound, label)
+
+        with patch.object(opc_lineage, "_verify_checkpoint", side_effect=switch_project):
+            with self.assertRaisesRegex(opc_lineage.LineageError, "subject changed"):
+                opc_lineage.record_event(
+                    self.fixture.project,
+                    event,
+                    expected_revision=0,
+                    plan_token=preview["plan_token"],
+                    knowledge_root=self.fixture.knowledge,
+                    now="2026-07-19T00:00:30Z",
+                )
+        self.assertTrue(pending_seen)
+        lineage = self.fixture.project / ".opc" / "lineage"
+        self.assertEqual([], list(lineage.iterdir()) if lineage.exists() else [])
+
+    def test_git_requires_directory_ignore_not_exact_final_file_rule(self) -> None:
+        subprocess.run(
+            ["git", "init", "-b", "main", str(self.fixture.project)],
+            check=True,
+            capture_output=True,
+        )
+        ignore = self.fixture.project / ".gitignore"
+        ignore.write_text(
+            ".opc/lineage/opc-run-synthetic.json\n", encoding="utf-8"
+        )
+        event = self.fixture.event(
+            "lineage-narrow-ignore",
+            event_type="provider",
+            provider={"provider_id": "mem0", "state": "disabled", "authoritative": False},
+            reasons=["provider_disabled"],
+        )
+        with self.assertRaisesRegex(opc_lineage.LineageError, "lineage directory"):
+            opc_lineage.preview_event(
+                self.fixture.project,
+                event,
+                expected_revision=0,
+                knowledge_root=self.fixture.knowledge,
+                now="2026-07-19T00:00:30Z",
+            )
+
+    def test_directory_ignore_covers_final_lock_pending_and_backup_artifacts(self) -> None:
+        subprocess.run(
+            ["git", "init", "-b", "main", str(self.fixture.project)],
+            check=True,
+            capture_output=True,
+        )
+        (self.fixture.project / ".gitignore").write_text(
+            ".opc/lineage/\n", encoding="utf-8"
+        )
+        first = self.fixture.event(
+            "lineage-private-first",
+            event_type="provider",
+            provider={"provider_id": "mem0", "state": "disabled", "authoritative": False},
+            reasons=["provider_disabled"],
+        )
+        self.fixture.append(first, 0)
+        second = self.fixture.event(
+            "lineage-private-second",
+            event_type="provider",
+            role="qa",
+            step="inspect",
+            provider={"provider_id": "mem0", "state": "failed", "authoritative": False},
+            reasons=["provider_error"],
+            minute=1,
+        )
+        preview = opc_lineage.preview_event(
+            self.fixture.project,
+            second,
+            expected_revision=1,
+            knowledge_root=self.fixture.knowledge,
+            now="2026-07-19T00:01:30Z",
+        )
+        original = opc_lineage._verify_checkpoint
+        ignored_artifacts: set[str] = set()
+
+        def inspect_artifacts(bound, label):
+            if label == "after_pending_creation":
+                for artifact in bound.path.iterdir():
+                    relative = artifact.relative_to(self.fixture.project).as_posix()
+                    result = subprocess.run(
+                        ["git", "-C", str(self.fixture.project), "check-ignore", "-q", "--", relative],
+                        check=False,
+                        capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, 0, artifact.name)
+                    ignored_artifacts.add(artifact.name)
+            return original(bound, label)
+
+        with patch.object(opc_lineage, "_verify_checkpoint", side_effect=inspect_artifacts):
+            result = opc_lineage.record_event(
+                self.fixture.project,
+                second,
+                expected_revision=1,
+                plan_token=preview["plan_token"],
+                knowledge_root=self.fixture.knowledge,
+                now="2026-07-19T00:01:30Z",
+            )
+        self.assertFalse(result["idempotent"])
+        self.assertIn("opc-run-synthetic.json", ignored_artifacts)
+        self.assertIn("opc-run-synthetic.json.lock", ignored_artifacts)
+        self.assertTrue(any(".pending-" in name for name in ignored_artifacts))
+        self.assertTrue(any(".backup-" in name for name in ignored_artifacts))
+        self.assertEqual(
+            ["opc-run-synthetic.json"],
+            [path.name for path in (self.fixture.project / ".opc" / "lineage").iterdir()],
+        )
+
+    def test_git_tracked_lineage_and_tracked_probe_failure_close(self) -> None:
+        subprocess.run(
+            ["git", "init", "-b", "main", str(self.fixture.project)],
+            check=True,
+            capture_output=True,
+        )
+        lineage = self.fixture.project / ".opc" / "lineage"
+        lineage.mkdir()
+        tracked = lineage / "tracked.txt"
+        tracked.write_text("must not be public\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(self.fixture.project), "add", "-f", "--", ".opc/lineage/tracked.txt"],
+            check=True,
+            capture_output=True,
+        )
+        (self.fixture.project / ".gitignore").write_text(
+            ".opc/lineage/\n", encoding="utf-8"
+        )
+        target = lineage / "opc-run-synthetic.json"
+        with self.assertRaisesRegex(opc_lineage.LineageError, "tracked content"):
+            opc_lineage._assert_private_or_ignored(self.fixture.project, target)
+
+        inside = subprocess.CompletedProcess([], 0, stdout="true\n", stderr="")
+        top = subprocess.CompletedProcess(
+            [], 0, stdout=str(self.fixture.project) + "\n", stderr=""
+        )
+        failed = subprocess.CompletedProcess([], 2, stdout="", stderr="")
+        with patch.object(
+            opc_lineage.subprocess,
+            "run",
+            side_effect=[inside, top, failed],
+        ):
+            with self.assertRaisesRegex(opc_lineage.LineageError, "tracked-lineage"):
+                opc_lineage._assert_private_or_ignored(self.fixture.project, target)
 
     @unittest.skipUnless(os.name == "nt", "Windows 8.3 aliases only")
     def test_windows_short_path_alias_uses_filesystem_identity(self) -> None:

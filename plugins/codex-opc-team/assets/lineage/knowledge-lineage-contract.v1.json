@@ -8,6 +8,9 @@
   "storage": {
     "project_relative": ".opc/lineage/{run_id}.json",
     "private_or_git_ignored": true,
+    "git_ignored_boundary": ".opc/lineage/",
+    "transaction_artifacts": ["final", "lock", "pending", "backup"],
+    "subject_binding": "exact-project-run-instances",
     "preview_writes": false,
     "canonical_write": false,
     "provider_write": false,

@@ -793,6 +793,10 @@ def validate_knowledge_lineage_contract() -> None:
     require(
         storage.get("project_relative") == ".opc/lineage/{run_id}.json"
         and storage.get("private_or_git_ignored") is True
+        and storage.get("git_ignored_boundary") == ".opc/lineage/"
+        and set(storage.get("transaction_artifacts", []))
+        == {"final", "lock", "pending", "backup"}
+        and storage.get("subject_binding") == "exact-project-run-instances"
         and storage.get("preview_writes") is False
         and all(
             storage.get(key) is False
@@ -884,6 +888,8 @@ def validate_knowledge_lineage_contract() -> None:
         and "lineage unavailable" in guide
         and "30 天" in guide
         and "base-record CAS" in guide
+        and "exact subject binding" in guide
+        and "transaction artifacts" in guide
         and "ID-only RecallTrace" in guide
         and "Evidence ref 只允许" in guide
         and "opc_lineage.py" in guide,

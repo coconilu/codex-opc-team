@@ -9,5 +9,6 @@ Lineage is supporting audit evidence, not independent QA by itself.
 5. Require evidence refs only on association events, then resolve QA/feedback/outcome/shadow/evaluation refs to existing bounded single-link `.opc` files; do not accept copied prose.
 6. Require explicit provider degraded/no-memory events and continued File/Git operation.
 7. Require the exact phrase `association/evidence only`, confounders, and unknowns; reject causal language unsupported by a controlled comparison.
+8. Require the preview token to bind exact project/run IDs and instance hashes, and require the entire untracked `.opc/lineage/` directory—not only the final JSON—to be ignored so final/lock/pending/backup remain private.
 
 Do not write or repair product artifacts while acting as independent QA. A missing v0.1 sidecar means lineage unavailable, not FAIL or PASS.
