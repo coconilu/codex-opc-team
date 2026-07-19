@@ -65,6 +65,8 @@ Hierarchical recall is zero-dependency and optional. Its virtual tree, L0/L1 sum
 
 Knowledge lineage is an optional private `.opc` sidecar. It binds exact run/project and ContextPacket/RecallTrace hashes to role/step states, provider degradation, QA, feedback, outcome, Shadow, and evaluation references. Reports revalidate current File/Git provenance and always state `association/evidence only`; they never infer adoption or causality. See [knowledge lineage](docs/knowledge-lineage.md).
 
+Capability evolution is an evidence-gated private lifecycle for versioned roles, Skills, and organization policies. It requires exact Git blobs, replay/Shadow evidence, independent QA, explicit manager approvals, bounded paired pilots, and a one-path unstaged promotion or rollback followed by explicit commit confirmation. It never changes global Codex config or claims causality. See [controlled capability evolution](docs/capability-evolution.md).
+
 ## Documentation
 
 | Document | Purpose |
@@ -85,6 +87,7 @@ Knowledge lineage is an optional private `.opc` sidecar. It binds exact run/proj
 | [Shadow Evaluation](docs/shadow-evaluation.md) | Read-only candidate control/treatment replay with exact provenance and no automatic promotion |
 | [Hierarchical recall](docs/hierarchical-recall.md) | Private L0/L1 navigation, canonical L2 validation, ContextPacket/RecallTrace, and flat comparison |
 | [Knowledge lineage](docs/knowledge-lineage.md) | Private role/step knowledge states, portable outcome links, current-HEAD revalidation, and non-causal reports |
+| [Capability evolution](docs/capability-evolution.md) | Versioned role/Skill/policy pilots, evidence gates, one-path Git handoff, observation, and rollback |
 | [Roadmap](docs/roadmap.md) | Planned delivery stages |
 
 Architecture decisions live under [`docs/adr`](docs/adr/README.md).

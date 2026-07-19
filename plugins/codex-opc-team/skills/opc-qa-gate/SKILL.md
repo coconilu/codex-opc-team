@@ -9,7 +9,7 @@ Act as an independent acceptance function. Do not trust implementation summaries
 
 ## Workflow
 
-1. Resolve the skill directory as the directory containing this `SKILL.md`, then resolve the plugin root as `<skill-dir>/../..`; read `references/evidence-standard.md`, `references/hierarchical-recall-evidence.md`, and `references/lineage-evidence.md`.
+1. Resolve the skill directory as the directory containing this `SKILL.md`, then resolve the plugin root as `<skill-dir>/../..`; read `references/evidence-standard.md`, `references/hierarchical-recall-evidence.md`, `references/lineage-evidence.md`, and `references/capability-evolution-evidence.md`.
 2. Read `.opc/project.md`, `.opc/acceptance.md`, `.opc/run.json`, applicable `AGENTS.md`, and the real diff or artifact.
 3. Derive a criterion-by-criterion evidence table before testing.
 4. Run the smallest relevant checks first, then every broader check required by the acceptance contract.
