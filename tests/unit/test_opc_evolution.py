@@ -40,16 +40,6 @@ class CapabilityEvolutionTests(unittest.TestCase):
             json.dumps({"schema_version": 1, "project_id": "project-alpha"}),
             encoding="utf-8",
         )
-        self._artifact("evaluation/source.json", {"kind": "synthetic-evaluation"})
-        self._artifact("lineage/source.json", {"kind": "synthetic-lineage"})
-        self._artifact("approvals/pilot-manager.json", {"decision": "pilot-approved"})
-        self._artifact("qa/pilot.json", {"verdict": "pass", "independent": True})
-        self._artifact("shadow/pilot.json", {"conclusion": "beneficial"})
-        self._artifact("approvals/promotion-manager.json", {"decision": "promote-approved"})
-        self._artifact("qa/promotion.json", {"verdict": "pass", "independent": True})
-        self._artifact("shadow/promotion.json", {"conclusion": "beneficial"})
-        self._artifact("decisions/rollback.json", {"decision": "rollback"})
-
         (self.repo / "skills" / "demo").mkdir(parents=True)
         self.target = self.repo / "skills" / "demo" / "SKILL.md"
         self.user_similar = self.repo / "skills" / "demo" / ".SKILL.md.opc-backup-user"
@@ -77,6 +67,18 @@ class CapabilityEvolutionTests(unittest.TestCase):
         self.metric_hash = hashlib.sha256(
             (ROOT / "evaluation" / "contracts" / "baseline-contract.v1.json").read_bytes()
         ).hexdigest()
+        self.current_version = {
+            "version": "unversioned-v0.1", "source_path": "skills/demo/SKILL.md",
+            "source_commit": self.base, "content_sha256": self.current_hash,
+        }
+        self.candidate_version = {
+            "version": "v1.0.0-candidate.1", "source_path": "skills/demo/SKILL.md",
+            "source_commit": self.candidate, "content_sha256": self.candidate_hash,
+        }
+        self.capability = {"kind": "skill", "target_path": "skills/demo/SKILL.md"}
+        self._write_evidence("candidate/source.json", "candidate", "proposed", "not_applicable")
+        self._write_evidence("evaluation/source.json", "evaluation", "beneficial", "safe")
+        self._write_evidence("lineage/source.json", "lineage", "verified", "not_applicable")
         self.proposal = self._proposal()
 
     def _artifact(self, relative: str, value: dict) -> dict:
@@ -84,6 +86,28 @@ class CapabilityEvolutionTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
         return {"ref": f".opc/{relative}", "sha256": digest(path)}
+
+    def _write_evidence(self, relative: str, kind: str, decision: str, safety: str,
+                        *, run_binding: dict | None = None,
+                        pilot_binding: dict | None = None,
+                        recorded_at: str = STAMP) -> dict:
+        value = {
+            "schema_version": opc_evolution.EVIDENCE_VERSION,
+            "evidence_kind": kind,
+            "proposal_id": "cap-demo-v1",
+            "capability": {
+                "kind": self.capability["kind"],
+                "target_path": self.capability["target_path"],
+                "current_version": copy.deepcopy(self.current_version),
+                "candidate_version": copy.deepcopy(self.candidate_version),
+            },
+            "run_binding": copy.deepcopy(run_binding),
+            "pilot_binding": copy.deepcopy(pilot_binding),
+            "decision": decision,
+            "safety": safety,
+            "recorded_at": recorded_at,
+        }
+        return self._artifact(relative, value)
 
     def _windows_short_alias_or_same(self, path: Path) -> Path:
         if os.name != "nt":
@@ -104,6 +128,15 @@ class CapabilityEvolutionTests(unittest.TestCase):
         path = self.project / ".opc" / relative
         return {"kind": kind, "ref": f".opc/{relative}", "sha256": digest(path)}
 
+    def _rewrite_evidence(self, reference: dict, **changes: object) -> dict:
+        path = self.project / Path(*reference["ref"].split("/"))
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value.update(changes)
+        path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+        updated = copy.deepcopy(reference)
+        updated["sha256"] = digest(path)
+        return updated
+
     def _commit(self, message: str) -> str:
         subprocess.run(["git", "-C", str(self.repo), "add", "--", "skills/demo/SKILL.md"], check=True, capture_output=True)
         subprocess.run(
@@ -116,29 +149,33 @@ class CapabilityEvolutionTests(unittest.TestCase):
             text=True, capture_output=True,
         ).stdout.strip()
 
+    def _commit_staged(self, message: str) -> str:
+        subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "user.name=OPC Test", "-c",
+             "user.email=opc-test@example.invalid", "commit", "-m", message],
+            check=True, capture_output=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True,
+            text=True, capture_output=True,
+        ).stdout.strip()
+
     def _proposal(self) -> dict:
-        current = {
-            "version": "unversioned-v0.1", "source_path": "skills/demo/SKILL.md",
-            "source_commit": self.base, "content_sha256": self.current_hash,
-        }
         return {
             "schema_version": opc_evolution.PROPOSAL_VERSION,
             "contract_version": opc_evolution.CONTRACT_VERSION,
             "proposal_id": "cap-demo-v1",
             "project_id": "project-alpha",
             "sources": {
-                "candidate_refs": ["exp-demo-rule"],
+                "candidate_refs": [self._artifact_ref("candidate/source.json")],
                 "feedback_refs": [],
                 "evaluation_refs": [self._artifact_ref("evaluation/source.json")],
                 "lineage_refs": [self._artifact_ref("lineage/source.json")],
             },
-            "capability": {"kind": "skill", "target_path": "skills/demo/SKILL.md"},
-            "current_version": current,
-            "candidate_version": {
-                "version": "v1.0.0-candidate.1", "source_path": "skills/demo/SKILL.md",
-                "source_commit": self.candidate, "content_sha256": self.candidate_hash,
-            },
-            "rollback_target": copy.deepcopy(current),
+            "capability": copy.deepcopy(self.capability),
+            "current_version": copy.deepcopy(self.current_version),
+            "candidate_version": copy.deepcopy(self.candidate_version),
+            "rollback_target": copy.deepcopy(self.current_version),
             "scope": {"kind": "project", "project_id": "project-alpha"},
             "owner": "manager",
             "pilot": {"min_cases": 1, "max_cases": 5, "observation_cases": 1},
@@ -150,10 +187,30 @@ class CapabilityEvolutionTests(unittest.TestCase):
         return {"ref": f".opc/{relative}", "sha256": digest(path)}
 
     def _authorization(self, prefix: str) -> dict:
+        pilot_binding = None
+        if prefix == "promotion":
+            try:
+                record, _ = opc_evolution._read_record(self.project, "cap-demo-v1")
+            except opc_evolution.EvolutionError:
+                record = None
+            if record and record["pilot_cases"]:
+                pilot_binding = opc_evolution._pilot_binding(record["pilot_cases"])
+        manager = self._write_evidence(
+            f"approvals/{prefix}-manager.json", "manager_approval", "approved",
+            "not_applicable", pilot_binding=pilot_binding,
+        )
+        qa = self._write_evidence(
+            f"qa/{prefix}.json", "independent_qa", "pass", "safe",
+            pilot_binding=pilot_binding,
+        )
+        shadow = self._write_evidence(
+            f"shadow/{prefix}.json", "shadow", "beneficial", "safe",
+            pilot_binding=pilot_binding,
+        )
         return {
-            "manager_approval": self._evidence("manager_approval", f"approvals/{prefix}-manager.json"),
-            "independent_qa": self._evidence("independent_qa", f"qa/{prefix}.json"),
-            "shadow": self._evidence("shadow", f"shadow/{prefix}.json"),
+            "manager_approval": {"kind": "manager_approval", **manager},
+            "independent_qa": {"kind": "independent_qa", **qa},
+            "shadow": {"kind": "shadow", **shadow},
             "recorded_at": STAMP,
         }
 
@@ -174,30 +231,44 @@ class CapabilityEvolutionTests(unittest.TestCase):
 
     def _case(self, case_id: str = "case-one", *, control_quality: int = 4,
               candidate_quality: int = 1, candidate_status: str = "completed") -> dict:
-        lineage = self._evidence("lineage", "lineage/source.json")
         common = {
             "evaluation_contract": {"version": "opc-evaluation-contract-v1", "sha256": self.metric_hash},
             "knowledge_versions": [{
                 "record_id": "exp-approved", "source_path": "approved/exp-approved.json",
                 "source_commit": self.base, "content_sha256": "a" * 64,
             }],
-            "lineage": lineage,
         }
-        return {
+        case = {
             "case_id": case_id,
             "control": {
                 **copy.deepcopy(common), "run_id": f"opc-{case_id}-control",
                 "execution_status": "completed",
                 "capability_version": copy.deepcopy(self.proposal["current_version"]),
-                "metrics": self._metrics(quality=control_quality),
+                "measurements": self._metrics(quality=control_quality),
+                "unavailable_reason": None,
             },
             "candidate": {
                 **copy.deepcopy(common), "run_id": f"opc-{case_id}-candidate",
                 "execution_status": candidate_status,
                 "capability_version": copy.deepcopy(self.proposal["candidate_version"]),
-                "metrics": self._metrics(quality=candidate_quality),
+                "measurements": self._metrics(quality=candidate_quality) if candidate_status == "completed" else None,
+                "unavailable_reason": None if candidate_status == "completed" else candidate_status,
             },
         }
+        for arm_name in ("control", "candidate"):
+            arm = case[arm_name]
+            run_binding = {
+                "case_id": case_id, "arm": arm_name, "run_id": arm["run_id"],
+                "capability_version": copy.deepcopy(arm["capability_version"]),
+                "knowledge_versions": copy.deepcopy(arm["knowledge_versions"]),
+            }
+            relative = f"lineage/{case_id}-{arm_name}.json"
+            ref = self._write_evidence(
+                relative, "lineage", "verified", "not_applicable",
+                run_binding=run_binding,
+            )
+            arm["lineage"] = {"kind": "lineage", **ref}
+        return case
 
     def _apply_action(self, revision: int, action: str, payload: dict,
                       now: str = STAMP) -> dict:
@@ -225,7 +296,25 @@ class CapabilityEvolutionTests(unittest.TestCase):
         self._apply_action(2, "record_pilot_case", {
             "case": self._case(candidate_quality=candidate_quality, candidate_status=candidate_status)
         })
-        return self._apply_action(3, "evaluate", {"confounders": ["task-difficulty", "tool-variation"]})
+        return self._apply_action(3, "evaluate", self._evaluation_payload(
+            ["task-difficulty", "tool-variation"]
+        ))
+
+    def _evaluation_payload(self, confounders: list[str]) -> dict:
+        record, _ = opc_evolution._read_record(self.project, "cap-demo-v1")
+        evaluation = opc_evolution.evaluate_cases(
+            record["pilot_cases"], record["proposal"], confounders, now=STAMP,
+        )
+        evidence_ref = self._write_evidence(
+            f"evaluation/pilot-result-{record['revision']}.json",
+            "evaluation", evaluation["conclusion"],
+            "safe" if evaluation["conclusion"] == "beneficial" else "inconclusive",
+            pilot_binding=opc_evolution._pilot_binding(record["pilot_cases"]),
+        )
+        return {
+            "confounders": confounders,
+            "evidence": {"kind": "evaluation", **evidence_ref},
+        }
 
     def test_preview_open_is_zero_write_and_open_is_idempotent(self) -> None:
         preview = opc_evolution.preview_open(self.project, self.repo, self.proposal)
@@ -272,14 +361,14 @@ class CapabilityEvolutionTests(unittest.TestCase):
         with self.assertRaises(opc_evolution.EvolutionError):
             opc_evolution.validate_proposal(over_scoped)
         leaked = self._case(candidate_quality=1)
-        leaked["candidate"]["metrics"]["scope_leakage_acceptances"] = 1
+        leaked["candidate"]["measurements"]["scope_leakage_acceptances"] = 1
         result = opc_evolution.evaluate_cases(
             [leaked], self.proposal, ["task-difficulty"], now=STAMP,
         )
         self.assertEqual(result["conclusion"], "inconclusive")
         self.assertIn("scope_leakage", result["blocking_reasons"])
         privacy = self._case(candidate_quality=1)
-        privacy["candidate"]["metrics"]["privacy_failures"] = 1
+        privacy["candidate"]["measurements"]["privacy_failures"] = 1
         privacy_result = opc_evolution.evaluate_cases(
             [privacy], self.proposal, ["task-difficulty"], now=STAMP,
         )
@@ -346,6 +435,115 @@ class CapabilityEvolutionTests(unittest.TestCase):
                 action="authorize_pilot", payload={"authorization": stale}, now=STAMP,
             )
 
+    def test_typed_evidence_rejects_denied_failed_harmful_wrong_binding_and_late_data(self) -> None:
+        wrong_source = copy.deepcopy(self.proposal)
+        source = {"kind": "candidate", **wrong_source["sources"]["candidate_refs"][0]}
+        source = self._rewrite_evidence(source, proposal_id="cap-other")
+        wrong_source["sources"]["candidate_refs"][0] = {
+            "ref": source["ref"], "sha256": source["sha256"],
+        }
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_open(self.project, self.repo, wrong_source)
+        self._write_evidence("candidate/source.json", "candidate", "proposed", "not_applicable")
+        self.proposal = self._proposal()
+        wrong_version = copy.deepcopy(self.proposal)
+        source = {"kind": "candidate", **wrong_version["sources"]["candidate_refs"][0]}
+        envelope_path = self.project / Path(*source["ref"].split("/"))
+        envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+        envelope["capability"]["candidate_version"]["version"] = "v-stale"
+        envelope_path.write_text(json.dumps(envelope, sort_keys=True), encoding="utf-8")
+        wrong_version["sources"]["candidate_refs"][0]["sha256"] = digest(envelope_path)
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_open(self.project, self.repo, wrong_version)
+        self._write_evidence("candidate/source.json", "candidate", "proposed", "not_applicable")
+        self.proposal = self._proposal()
+        self._open()
+
+        attacks = [
+            ("manager_approval", {"decision": "denied"}),
+            ("independent_qa", {"decision": "fail"}),
+            ("shadow", {"decision": "harmful", "safety": "unsafe"}),
+            ("shadow", {"decision": "inconclusive", "safety": "inconclusive"}),
+            ("manager_approval", {"recorded_at": "2026-07-19T00:59:59Z"}),
+        ]
+        for key, changes in attacks:
+            with self.subTest(key=key, changes=changes):
+                auth = self._authorization("pilot")
+                auth[key] = self._rewrite_evidence(auth[key], **changes)
+                with self.assertRaises(opc_evolution.EvolutionError):
+                    opc_evolution.preview_action(
+                        self.project, "cap-demo-v1", expected_revision=1,
+                        action="authorize_pilot", payload={"authorization": auth}, now=STAMP,
+                    )
+
+    def test_cumulative_evidence_is_revalidated_at_evaluate_promotion_and_confirm(self) -> None:
+        self._open()
+        pilot_auth = self._authorization("pilot")
+        self._apply_action(1, "authorize_pilot", {"authorization": pilot_auth})
+        manager_path = self.project / Path(*pilot_auth["manager_approval"]["ref"].split("/"))
+        manager_bytes = manager_path.read_bytes()
+        manager_path.unlink()
+        case = self._case()
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_action(
+                self.project, "cap-demo-v1", expected_revision=2,
+                action="record_pilot_case", payload={"case": case}, now=STAMP,
+            )
+        manager_path.parent.mkdir(parents=True, exist_ok=True)
+        manager_path.write_bytes(manager_bytes)
+        self._apply_action(2, "record_pilot_case", {"case": case})
+
+        lineage_path = self.project / Path(*case["candidate"]["lineage"]["ref"].split("/"))
+        lineage_bytes = lineage_path.read_bytes()
+        lineage_path.write_text("{}", encoding="utf-8")
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_action(
+                self.project, "cap-demo-v1", expected_revision=3,
+                action="evaluate", payload=self._evaluation_payload(["task-difficulty"]), now=STAMP,
+            )
+        lineage_path.write_bytes(lineage_bytes)
+
+        bad_evaluation = self._evaluation_payload(["task-difficulty"])
+        bad_evaluation["evidence"] = self._rewrite_evidence(
+            bad_evaluation["evidence"], decision="harmful", safety="unsafe"
+        )
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_action(
+                self.project, "cap-demo-v1", expected_revision=3,
+                action="evaluate", payload=bad_evaluation, now=STAMP,
+            )
+        evaluated = self._apply_action(3, "evaluate", self._evaluation_payload(["task-difficulty"]))
+
+        bad_promotion = self._authorization("promotion")
+        bad_promotion["independent_qa"] = self._rewrite_evidence(
+            bad_promotion["independent_qa"], decision="fail", safety="unsafe"
+        )
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_transition(
+                self.project, self.repo, "cap-demo-v1", expected_revision=4,
+                kind="promotion", now=STAMP, authorization=bad_promotion,
+            )
+        auth = self._authorization("promotion")
+        preview = opc_evolution.preview_transition(
+            self.project, self.repo, "cap-demo-v1", expected_revision=4,
+            kind="promotion", now=STAMP, authorization=auth,
+        )
+        opc_evolution.apply_transition(
+            self.project, self.repo, "cap-demo-v1", expected_revision=4,
+            kind="promotion", now=STAMP, authorization=auth,
+            plan_token=preview["plan_token"],
+        )
+        self._commit("explicit promotion commit")
+        evaluation_path = self.project / Path(*evaluated["evaluation_evidence"]["ref"].split("/"))
+        evaluation_bytes = evaluation_path.read_bytes()
+        evaluation_path.unlink()
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_confirm(
+                self.project, self.repo, "cap-demo-v1", expected_revision=5, now=STAMP,
+            )
+        evaluation_path.parent.mkdir(parents=True, exist_ok=True)
+        evaluation_path.write_bytes(evaluation_bytes)
+
     def test_candidate_commit_must_be_narrow_and_target_allowlisted(self) -> None:
         subprocess.run(["git", "-C", str(self.repo), "switch", "candidate"], check=True, capture_output=True)
         (self.repo / "unrelated.txt").write_text("unrelated", encoding="utf-8")
@@ -363,6 +561,123 @@ class CapabilityEvolutionTests(unittest.TestCase):
             outside[key]["source_path"] = "config.toml"
         with self.assertRaises(opc_evolution.EvolutionError):
             opc_evolution.validate_proposal(outside)
+
+    def test_git_object_modes_reject_symlink_gitlink_tree_and_checkout_link(self) -> None:
+        target = "skills/demo/SKILL.md"
+        blob = subprocess.run(
+            ["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+            input=b"linked-target\n", check=True, capture_output=True,
+        ).stdout.decode("ascii").strip()
+        def commit_index(mode: str, object_id: str, label: str, *, child: bool = False) -> str:
+            index = Path(self.temporary.name) / f"index-{label}"
+            env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+            subprocess.run(
+                ["git", "-C", str(self.repo), "read-tree", self.base],
+                env=env, check=True, capture_output=True,
+            )
+            if child:
+                subprocess.run(
+                    ["git", "-C", str(self.repo), "update-index", "--force-remove", "--", target],
+                    env=env, check=True, capture_output=True,
+                )
+                indexed_path = target + "/child.md"
+            else:
+                indexed_path = target
+            subprocess.run(
+                ["git", "-C", str(self.repo), "update-index", "--add", "--cacheinfo",
+                 f"{mode},{object_id},{indexed_path}"],
+                env=env, check=True, capture_output=True,
+            )
+            tree_id = subprocess.run(
+                ["git", "-C", str(self.repo), "write-tree"], env=env,
+                check=True, text=True, capture_output=True,
+            ).stdout.strip()
+            return subprocess.run(
+                ["git", "-C", str(self.repo), "-c", "user.name=OPC Test", "-c",
+                 "user.email=opc-test@example.invalid", "commit-tree", tree_id,
+                 "-p", self.base, "-m", label],
+                check=True, text=True, capture_output=True,
+            ).stdout.strip()
+
+        attacks = [("120000", blob, "symlink"), ("160000", self.base, "gitlink")]
+        for mode, object_id, label in attacks:
+            with self.subTest(mode=mode):
+                bad_commit = commit_index(mode, object_id, label)
+                bad = copy.deepcopy(self.proposal)
+                bad["candidate_version"]["source_commit"] = bad_commit
+                bad["candidate_version"]["content_sha256"] = hashlib.sha256(b"linked-target\n").hexdigest()
+                with self.assertRaises(opc_evolution.EvolutionError):
+                    opc_evolution.preview_open(self.project, self.repo, bad)
+
+        child_blob = subprocess.run(
+            ["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+            input=b"tree object\n", check=True, capture_output=True,
+        ).stdout.decode("ascii").strip()
+        tree_commit = commit_index("100644", child_blob, "tree-typechange", child=True)
+        bad = copy.deepcopy(self.proposal)
+        bad["candidate_version"]["source_commit"] = tree_commit
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_open(self.project, self.repo, bad)
+
+        link = self.repo / "skills" / "demo-link"
+        try:
+            link.symlink_to(self.target.parent, target_is_directory=True)
+        except OSError:
+            pass
+        else:
+            try:
+                with self.assertRaises(opc_evolution.EvolutionError):
+                    opc_evolution._target_path(self.repo, "skills/demo-link/SKILL.md")
+            finally:
+                link.unlink()
+
+    def test_candidate_full_range_rejects_nonancestor_merge_and_intermediate_add_delete(self) -> None:
+        tree = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", f"{self.candidate}^{{tree}}"],
+            check=True, text=True, capture_output=True,
+        ).stdout.strip()
+        disconnected = subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "user.name=OPC Test", "-c",
+             "user.email=opc-test@example.invalid", "commit-tree", tree, "-m", "disconnected"],
+            check=True, text=True, capture_output=True,
+        ).stdout.strip()
+        bad = copy.deepcopy(self.proposal)
+        bad["candidate_version"]["source_commit"] = disconnected
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_open(self.project, self.repo, bad)
+
+        merge = subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "user.name=OPC Test", "-c",
+             "user.email=opc-test@example.invalid", "commit-tree", tree,
+             "-p", self.base, "-p", self.candidate, "-m", "synthetic merge"],
+            check=True, text=True, capture_output=True,
+        ).stdout.strip()
+        bad = copy.deepcopy(self.proposal)
+        bad["candidate_version"]["source_commit"] = merge
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_open(self.project, self.repo, bad)
+
+        subprocess.run(
+            ["git", "-C", str(self.repo), "switch", "-C", "attack-intermediate", self.base],
+            check=True, capture_output=True,
+        )
+        self.target.write_text("intermediate candidate\n", encoding="utf-8")
+        unrelated = self.repo / "sensitive.tmp"
+        unrelated.write_text("temporary secret-like path", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(self.repo), "add", "--", "skills/demo/SKILL.md", "sensitive.tmp"],
+            check=True, capture_output=True,
+        )
+        self._commit_staged("intermediate add")
+        unrelated.unlink()
+        self.target.write_text("---\nname: demo\n---\n\nCandidate behavior.\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "--all"], check=True, capture_output=True)
+        final = self._commit_staged("intermediate delete")
+        subprocess.run(["git", "-C", str(self.repo), "switch", "main"], check=True, capture_output=True)
+        bad = copy.deepcopy(self.proposal)
+        bad["candidate_version"]["source_commit"] = final
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_open(self.project, self.repo, bad)
 
     def test_promotion_confirm_observe_and_rollback_preserve_history(self) -> None:
         record = self._evaluated()
@@ -395,11 +710,18 @@ class CapabilityEvolutionTests(unittest.TestCase):
         self.assertEqual(promoted["state"], "promoted")
         self.assertEqual(promoted["active_version"]["source_commit"], promoted_commit)
 
+        outcome_ref = self._write_evidence(
+            "outcomes/observation.json", "outcome", "observed", "not_applicable"
+        )
         observed = self._apply_action(6, "observe", {
-            "evidence": self._evidence("outcome", "evaluation/source.json")
+            "evidence": {"kind": "outcome", **outcome_ref}
         })
         self.assertEqual(observed["state"], "observing")
-        rollback_evidence = self._evidence("rollback_decision", "decisions/rollback.json")
+        rollback_ref = self._write_evidence(
+            "decisions/rollback.json", "rollback_decision", "rollback_approved",
+            "not_applicable",
+        )
+        rollback_evidence = {"kind": "rollback_decision", **rollback_ref}
         rollback_preview = opc_evolution.preview_transition(
             self.project, self.repo, "cap-demo-v1", expected_revision=7,
             kind="rollback", now=STAMP, rollback_evidence=rollback_evidence,
@@ -424,6 +746,60 @@ class CapabilityEvolutionTests(unittest.TestCase):
         self.assertEqual(rolled_back["evaluation"]["conclusion"], "beneficial")
         self.assertTrue(any(item["action"] == "promotion_confirmed" for item in rolled_back["history"]))
         self.assertEqual(self.user_similar.read_text(encoding="utf-8"), "user-owned similar filename\n")
+
+    def test_confirm_rejects_source_reset_empty_commit_and_intermediate_add_delete(self) -> None:
+        self._evaluated()
+        auth = self._authorization("promotion")
+        preview = opc_evolution.preview_transition(
+            self.project, self.repo, "cap-demo-v1", expected_revision=4,
+            kind="promotion", now=STAMP, authorization=auth,
+        )
+        opc_evolution.apply_transition(
+            self.project, self.repo, "cap-demo-v1", expected_revision=4,
+            kind="promotion", now=STAMP, authorization=auth,
+            plan_token=preview["plan_token"],
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "reset", "--hard", self.candidate],
+            check=True, capture_output=True,
+        )
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_confirm(
+                self.project, self.repo, "cap-demo-v1", expected_revision=5, now=STAMP,
+            )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "reset", "--hard", self.base],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "user.name=OPC Test", "-c",
+             "user.email=opc-test@example.invalid", "commit", "--allow-empty", "-m", "empty"],
+            check=True, capture_output=True,
+        )
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_confirm(
+                self.project, self.repo, "cap-demo-v1", expected_revision=5, now=STAMP,
+            )
+
+        subprocess.run(
+            ["git", "-C", str(self.repo), "reset", "--hard", self.base],
+            check=True, capture_output=True,
+        )
+        self.target.write_bytes(preview["after_bytes"])
+        unrelated = self.repo / "intermediate.tmp"
+        unrelated.write_text("temporary", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(self.repo), "add", "--", "skills/demo/SKILL.md", "intermediate.tmp"],
+            check=True, capture_output=True,
+        )
+        self._commit_staged("target plus intermediate")
+        unrelated.unlink()
+        subprocess.run(["git", "-C", str(self.repo), "add", "--all"], check=True, capture_output=True)
+        self._commit_staged("remove intermediate")
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.preview_confirm(
+                self.project, self.repo, "cap-demo-v1", expected_revision=5, now=STAMP,
+            )
 
     def test_transition_failure_restores_target_and_private_record(self) -> None:
         self._evaluated()
@@ -566,7 +942,7 @@ class CapabilityEvolutionTests(unittest.TestCase):
                 action="authorize_pilot", payload={"authorization": self._authorization("pilot")}, now=STAMP,
             )
         self._apply_action(2, "record_pilot_case", {"case": self._case(candidate_quality=4)})
-        neutral = self._apply_action(3, "evaluate", {"confounders": ["task-difficulty"]})
+        neutral = self._apply_action(3, "evaluate", self._evaluation_payload(["task-difficulty"]))
         self.assertEqual(neutral["evaluation"]["conclusion"], "neutral")
         with self.assertRaises(opc_evolution.EvolutionError):
             opc_evolution.preview_transition(
@@ -578,6 +954,99 @@ class CapabilityEvolutionTests(unittest.TestCase):
         corrupted["history"][-1]["state"] = "promoted"
         with self.assertRaises(opc_evolution.EvolutionError):
             opc_evolution.validate_record(corrupted)
+
+    def test_record_history_rejects_jumps_duplicates_wrong_kinds_and_time_reversal(self) -> None:
+        candidate = self._open()
+        attacks = []
+        jump = copy.deepcopy(candidate)
+        jump["revision"] = 2
+        jump["state"] = "promoted"
+        jump["updated_at"] = STAMP
+        jump["history"].append(opc_evolution._history(2, "promoted", "promotion_confirmed", STAMP))
+        attacks.append(jump)
+        duplicate = copy.deepcopy(candidate)
+        duplicate["revision"] = 2
+        duplicate["history"].append(opc_evolution._history(2, "candidate", "opened", STAMP))
+        attacks.append(duplicate)
+        reversed_time = copy.deepcopy(candidate)
+        reversed_time["revision"] = 2
+        reversed_time["state"] = "rejected"
+        reversed_time["updated_at"] = STAMP
+        reject_ref = self._write_evidence(
+            "decisions/rejected.json", "rollback_decision", "rollback_denied", "not_applicable"
+        )
+        reversed_time["history"].append(opc_evolution._history(
+            2, "rejected", "rejected", "2026-07-19T00:59:59Z",
+            [{"kind": "rollback_decision", **reject_ref}],
+        ))
+        attacks.append(reversed_time)
+        wrong_kind = copy.deepcopy(candidate)
+        wrong_kind["revision"] = 2
+        wrong_kind["state"] = "pilot_approved"
+        auth = self._authorization("pilot")
+        wrong_kind["pilot_authorization"] = auth
+        wrong_kind["history"].append(opc_evolution._history(
+            2, "pilot_approved", "pilot_authorized", STAMP,
+            [auth["manager_approval"], auth["independent_qa"],
+             {"kind": "outcome", "ref": auth["shadow"]["ref"], "sha256": auth["shadow"]["sha256"]}],
+        ))
+        attacks.append(wrong_kind)
+        forged = copy.deepcopy(candidate)
+        forged["history"][0]["action"] = "promotion_confirmed"
+        attacks.append(forged)
+        for index, record in enumerate(attacks):
+            with self.subTest(index=index):
+                with self.assertRaises(opc_evolution.EvolutionError):
+                    opc_evolution.validate_record(record)
+                with self.assertRaises(opc_evolution.EvolutionError):
+                    opc_evolution.render_report(record)
+
+    def test_unavailable_arms_have_no_measurements_and_never_enter_aggregation(self) -> None:
+        available = self._case("case-available", candidate_quality=1)
+        unavailable = self._case(
+            "case-unavailable", candidate_quality=999999,
+            candidate_status="provider_unavailable",
+        )
+        result = opc_evolution.evaluate_cases(
+            [available, unavailable], self.proposal, ["provider-variation"], now=STAMP,
+        )
+        baseline = opc_evolution.evaluate_cases(
+            [available], self.proposal, ["provider-variation"], now=STAMP,
+        )
+        self.assertEqual(result["case_count"], 2)
+        self.assertEqual(result["measured_case_count"], 1)
+        self.assertEqual(result["comparisons"], baseline["comparisons"])
+        self.assertEqual(result["conclusion"], "inconclusive")
+        self.assertIsNone(unavailable["candidate"]["measurements"])
+
+        forged = copy.deepcopy(unavailable)
+        forged["candidate"]["measurements"] = self._metrics(quality=1)
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.validate_pilot_case(forged, self.proposal)
+        wrong_reason = copy.deepcopy(unavailable)
+        wrong_reason["candidate"]["unavailable_reason"] = "timeout"
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.validate_pilot_case(wrong_reason, self.proposal)
+        missing = copy.deepcopy(available)
+        missing["candidate"]["measurements"] = None
+        with self.assertRaises(opc_evolution.EvolutionError):
+            opc_evolution.validate_pilot_case(missing, self.proposal)
+        for key, value in (
+            ("latency_ms", float("nan")),
+            ("latency_ms", True),
+            ("latency_ms", opc_evolution.MAX_LATENCY + 1),
+            ("context_tokens_per_task", True),
+            ("context_tokens_per_task", opc_evolution.MAX_CONTEXT + 1),
+        ):
+            extreme = copy.deepcopy(available)
+            extreme["candidate"]["measurements"][key] = value
+            with self.subTest(key=key, value=value):
+                with self.assertRaises(opc_evolution.EvolutionError):
+                    opc_evolution.validate_pilot_case(extreme, self.proposal)
+
+        record = self._evaluated(candidate_status="timeout")
+        report = opc_evolution.render_report(record)
+        self.assertIn("not measured (timeout)", report)
 
     def test_dirty_tree_head_drift_and_stale_cas_fail_closed(self) -> None:
         self._evaluated()

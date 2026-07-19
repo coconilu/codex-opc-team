@@ -65,6 +65,14 @@ python <plugin-root>/scripts/opc_evolution.py transition ... --plan-token <sha25
 
 Rollback 使用 `--kind rollback --rollback-evidence <private-ref.json>`，然后同样由用户显式提交与 confirm。History、pilot、evaluation 和 approved knowledge 不删除。
 
+## Strict evidence and Git confirmation hardening
+
+- Every source candidate, feedback, evaluation, lineage, manager, QA, Shadow, observation, and rollback reference resolves to `capability-evolution-evidence.v1.schema.json`. The envelope binds the proposal, target, current/candidate versions, optional exact run, the complete pilot/lineage set, decision, safety verdict, and timestamp.
+- `evaluate`, promotion, and `confirm` re-read every cumulative source, pilot authorization, pilot lineage, evaluation, QA, and Shadow envelope. Deleted, replaced, stale, denied, failed, harmful, unsafe, inconclusive, or mismatched evidence fails closed.
+- A non-completed arm has `measurements=null` plus an exact `unavailable_reason`. It never contributes to metric aggregation; reports say `not measured (<reason>)` instead of fabricating zero metrics.
+- Git objects must be regular `blob` objects in mode `100644` or `100755`. Candidate and confirmation ranges must be strict linear descendants: merge commits, symlinks, gitlinks, trees, type changes, renames/copies, empty commits, source-history resets, and any intermediate non-target path are rejected.
+- Record history uses the contract's exact action/from/to mapping, contiguous revisions, non-decreasing bounded timestamps, single-use action rules, and action-specific evidence kinds. Reports reject invalid history before rendering.
+
 ## v0.1 compatibility
 
 没有 `.opc/evolution/` record 的旧项目保持可读，`show` 返回 `unversioned-v0.1 / unavailable`；旧角色和 Skill 照常使用。`migration-preview` 从当前 HEAD 与 candidate commit 生成确定性 proposal，重复调用得到相同 token，且 `writes=false`：

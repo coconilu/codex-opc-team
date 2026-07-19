@@ -2,6 +2,7 @@
   "contract_version": "opc-capability-evolution-contract-v1",
   "proposal_schema_version": "opc-capability-change-proposal-v1",
   "record_schema_version": "opc-capability-evolution-record-v1",
+  "evidence_schema_version": "opc-capability-evolution-evidence-v1",
   "authority": "file-git-only",
   "storage": {
     "project_relative": ".opc/evolution/{proposal_id}.json",
@@ -19,6 +20,26 @@
     "organization_policy": ["AGENTS.md", "policies/<name>.md", "docs/policies/<name>.md"]
   },
   "lifecycle_states": ["candidate", "pilot_approved", "piloting", "evaluated", "promotion_pending", "promoted", "observing", "rollback_pending", "rolled_back", "rejected"],
+  "history_transitions": {
+    "opened": {"from": null, "to": "candidate"},
+    "pilot_authorized": {"from": ["candidate"], "to": "pilot_approved"},
+    "pilot_case_recorded": {"from": ["pilot_approved", "piloting"], "to": "piloting"},
+    "evaluated": {"from": ["piloting"], "to": "evaluated"},
+    "promotion_authorized": {"from": ["evaluated"], "to": "evaluated"},
+    "promotion_applied": {"from": ["evaluated"], "to": "promotion_pending"},
+    "promotion_confirmed": {"from": ["promotion_pending"], "to": "promoted"},
+    "observation_started": {"from": ["observing", "promoted"], "to": "observing"},
+    "rollback_applied": {"from": ["observing", "promoted"], "to": "rollback_pending"},
+    "rollback_confirmed": {"from": ["rollback_pending"], "to": "rolled_back"},
+    "rejected": {"from": ["candidate", "evaluated", "pilot_approved", "piloting"], "to": "rejected"}
+  },
+  "history_invariants": ["revision_contiguous", "timestamp_non_decreasing", "timestamp_bounded_by_record", "action_state_exact", "evidence_kind_exact", "single_use_actions_unique"],
+  "evidence_envelope": {
+    "strict": true,
+    "bindings": ["proposal_id", "capability_kind", "target_path", "current_version", "candidate_version", "run", "pilot", "lineage"],
+    "semantic_gates": {"manager_approval": "approved", "independent_qa": "pass", "shadow": "beneficial_and_safe", "evaluation": "matches_computed_conclusion"},
+    "cumulative_revalidation_stages": ["evaluate", "promotion", "confirm"]
+  },
   "required_evidence": {
     "pilot": ["shadow", "independent_qa", "manager_approval"],
     "promotion": ["beneficial_pilot", "independent_qa", "manager_approval"],
@@ -33,6 +54,8 @@
     "same_contract_for_control_and_candidate": true,
     "required_confounders": true,
     "allowed_conclusions": ["beneficial", "neutral", "harmful", "inconclusive"]
+    ,"unavailable_measurements": "null-with-exact-reason",
+    "unavailable_arms_excluded_from_aggregation": true
   },
   "promotion_policy": {
     "manager_approval_explicit": true,
@@ -47,6 +70,12 @@
     "single_allowlisted_path": true,
     "candidate_is_exact_git_blob": true,
     "candidate_commit_diff_is_single_target": true,
+    "allowed_git_blob_modes": ["100644", "100755"],
+    "git_object_type": "blob",
+    "strict_linear_commit_range": true,
+    "merge_commits_allowed": false,
+    "every_commit_changes_only_target": true,
+    "confirm_requires_strict_descendant_commit": true,
     "stage_or_commit": false,
     "automatic_global_config_write": false
   },

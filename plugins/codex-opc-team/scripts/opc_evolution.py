@@ -42,11 +42,13 @@ ASSET_ROOT = PLUGIN_ROOT / "assets" / "evolution"
 CONTRACT_PATH = ASSET_ROOT / "capability-evolution-contract.v1.json"
 PROPOSAL_SCHEMA_PATH = ASSET_ROOT / "capability-change-proposal.v1.schema.json"
 RECORD_SCHEMA_PATH = ASSET_ROOT / "capability-evolution-record.v1.schema.json"
+EVIDENCE_SCHEMA_PATH = ASSET_ROOT / "capability-evolution-evidence.v1.schema.json"
 EVALUATION_CONTRACT_PATH = PLUGIN_ROOT.parents[1] / "evaluation" / "contracts" / "baseline-contract.v1.json"
 
 CONTRACT_VERSION = "opc-capability-evolution-contract-v1"
 PROPOSAL_VERSION = "opc-capability-change-proposal-v1"
 RECORD_VERSION = "opc-capability-evolution-record-v1"
+EVIDENCE_VERSION = "opc-capability-evolution-evidence-v1"
 METRIC_CONTRACT_VERSION = "opc-evaluation-contract-v1"
 REPORT_CLAIM = "association/evidence only"
 METRIC_CONTRACT_SHA256 = "f7eda22695e25f91f15031d6a94d0183e399fc3b52b34a21130b7f567180444d"
@@ -104,7 +106,7 @@ AUTH_KEYS = {"manager_approval", "independent_qa", "shadow", "recorded_at"}
 CASE_KEYS = {"case_id", "control", "candidate"}
 ARM_KEYS = {
     "run_id", "execution_status", "evaluation_contract", "capability_version",
-    "knowledge_versions", "lineage", "metrics",
+    "knowledge_versions", "lineage", "measurements", "unavailable_reason",
 }
 KNOWLEDGE_KEYS = {"record_id", "source_path", "source_commit", "content_sha256"}
 METRIC_CONTRACT_KEYS = {"version", "sha256"}
@@ -136,13 +138,72 @@ HISTORY_ACTIONS = {
     "promotion_authorized", "promotion_applied", "promotion_confirmed",
     "observation_started", "rollback_applied", "rollback_confirmed", "rejected",
 }
+HISTORY_TRANSITIONS = {
+    "opened": (None, "candidate"),
+    "pilot_authorized": ("candidate", "pilot_approved"),
+    "pilot_case_recorded": ({"pilot_approved", "piloting"}, "piloting"),
+    "evaluated": ("piloting", "evaluated"),
+    "promotion_authorized": ("evaluated", "evaluated"),
+    "promotion_applied": ("evaluated", "promotion_pending"),
+    "promotion_confirmed": ("promotion_pending", "promoted"),
+    "observation_started": ({"promoted", "observing"}, "observing"),
+    "rollback_applied": ({"promoted", "observing"}, "rollback_pending"),
+    "rollback_confirmed": ("rollback_pending", "rolled_back"),
+    "rejected": ({"candidate", "pilot_approved", "piloting", "evaluated"}, "rejected"),
+}
+HISTORY_EVIDENCE_KINDS = {
+    "opened": (),
+    "pilot_authorized": ("independent_qa", "manager_approval", "shadow"),
+    "pilot_case_recorded": ("lineage", "lineage"),
+    "evaluated": ("evaluation",),
+    "promotion_authorized": ("independent_qa", "manager_approval", "shadow"),
+    "promotion_applied": ("independent_qa", "manager_approval", "shadow"),
+    "promotion_confirmed": (),
+    "observation_started": None,
+    "rollback_applied": None,
+    "rollback_confirmed": (),
+    "rejected": None,
+}
+UNIQUE_HISTORY_ACTIONS = {
+    "opened", "pilot_authorized", "evaluated", "promotion_authorized",
+    "promotion_applied", "promotion_confirmed", "rollback_applied",
+    "rollback_confirmed", "rejected",
+}
 EXECUTION_STATES = {
     "completed", "timeout", "provider_unavailable", "provider_error", "failed",
 }
 EVIDENCE_KINDS = {
-    "manager_approval", "independent_qa", "shadow", "evaluation", "lineage",
+    "candidate", "manager_approval", "independent_qa", "shadow", "evaluation", "lineage",
     "outcome", "rollback_decision",
 }
+EVIDENCE_ENVELOPE_KEYS = {
+    "schema_version", "evidence_kind", "proposal_id", "capability",
+    "run_binding", "pilot_binding", "decision", "safety", "recorded_at",
+}
+EVIDENCE_CAPABILITY_KEYS = {
+    "kind", "target_path", "current_version", "candidate_version",
+}
+RUN_BINDING_KEYS = {
+    "case_id", "arm", "run_id", "capability_version", "knowledge_versions",
+}
+PILOT_BINDING_KEYS = {
+    "case_ids", "control_run_ids", "candidate_run_ids", "lineage_refs",
+}
+LINEAGE_BINDING_KEYS = {"case_id", "arm", "run_id", "ref", "sha256"}
+EVIDENCE_DECISIONS = {
+    "proposed", "observed", "verified", "approved", "denied", "pass", "fail",
+    "beneficial", "neutral", "harmful", "inconclusive", "regression_detected",
+    "rollback_approved", "rollback_denied",
+}
+EVIDENCE_SAFETY = {"safe", "unsafe", "inconclusive", "not_applicable"}
+SOURCE_EVIDENCE_POLICY = {
+    "candidate": ({"proposed"}, {"not_applicable"}),
+    "outcome": ({"observed"}, {"safe", "unsafe", "inconclusive", "not_applicable"}),
+    "evaluation": ({"beneficial", "neutral", "harmful", "inconclusive"}, {"safe", "unsafe", "inconclusive"}),
+    "lineage": ({"verified"}, {"not_applicable"}),
+}
+UNAVAILABLE_REASONS = {"timeout", "provider_unavailable", "provider_error", "failed"}
+ALLOWED_GIT_BLOB_MODES = {"100644", "100755"}
 
 
 class EvolutionError(RuntimeError):
@@ -248,6 +309,7 @@ def _load_contract() -> tuple[dict[str, Any], str]:
         value.get("contract_version") != CONTRACT_VERSION
         or value.get("proposal_schema_version") != PROPOSAL_VERSION
         or value.get("record_schema_version") != RECORD_VERSION
+        or value.get("evidence_schema_version") != EVIDENCE_VERSION
         or value.get("authority") != "file-git-only"
         or value.get("report_claim") != REPORT_CLAIM
         or value.get("causal_claim_allowed") is not False
@@ -325,10 +387,7 @@ def validate_proposal(value: Mapping[str, Any]) -> None:
     candidates = sources["candidate_refs"]
     if not isinstance(candidates, list) or not 1 <= len(candidates) <= MAX_REFS:
         raise EvolutionError("candidate_refs must contain 1..20 items")
-    candidate_ids = [_portable(item, re.compile(r"^exp-[A-Za-z0-9._-]+$"), "candidate_ref") for item in candidates]
-    if len(set(candidate_ids)) != len(candidate_ids):
-        raise EvolutionError("candidate_refs must be unique")
-    for key, minimum in (("feedback_refs", 0), ("evaluation_refs", 1), ("lineage_refs", 1)):
+    for key, minimum in (("candidate_refs", 1), ("feedback_refs", 0), ("evaluation_refs", 1), ("lineage_refs", 1)):
         refs = sources[key]
         if not isinstance(refs, list) or not minimum <= len(refs) <= MAX_REFS:
             raise EvolutionError(f"{key} has an invalid bounded count")
@@ -406,25 +465,86 @@ def _git_head(root: Path) -> str:
     return _commit(head, "repository HEAD")
 
 
-def _git_blob(root: Path, commit: str, path: str) -> bytes:
+def _git_blob_info(root: Path, commit: str, path: str) -> tuple[str, str, bytes]:
     _commit(commit, "blob commit")
     _portable(path, PORTABLE_REF, "blob path", MAX_REF)
-    result = _git(root, ["show", f"{commit}:{path}"], binary=True)
-    if result.returncode != 0 or len(result.stdout) > MAX_CAPABILITY_BYTES:
+    listing = _git(root, ["ls-tree", "-z", commit, "--", path], binary=True)
+    raw_listing = bytes(listing.stdout)
+    entries = [item for item in raw_listing.split(b"\0") if item]
+    if listing.returncode != 0 or len(entries) != 1 or b"\t" not in entries[0]:
+        raise EvolutionError("managed capability Git object is unavailable or ambiguous")
+    header, encoded_path = entries[0].split(b"\t", 1)
+    try:
+        mode, object_type, object_id = header.decode("ascii").split(" ", 2)
+        listed_path = encoded_path.decode("utf-8")
+    except (UnicodeError, ValueError) as exc:
+        raise EvolutionError("managed capability Git object metadata is invalid") from exc
+    if listed_path.replace("\\", "/") != path:
+        raise EvolutionError("managed capability Git object path does not match")
+    if mode not in ALLOWED_GIT_BLOB_MODES or object_type != "blob":
+        raise EvolutionError("managed capability must be a regular Git blob")
+    size = _git(root, ["cat-file", "-s", object_id])
+    try:
+        object_size = int(size.stdout.strip()) if size.returncode == 0 else -1
+    except ValueError as exc:
+        raise EvolutionError("managed capability Git blob size is invalid") from exc
+    if not 0 <= object_size <= MAX_CAPABILITY_BYTES:
         raise EvolutionError("managed capability Git blob is unavailable or oversized")
-    return bytes(result.stdout)
+    content = _git(root, ["cat-file", "blob", object_id], binary=True)
+    if content.returncode != 0 or len(content.stdout) != object_size:
+        raise EvolutionError("managed capability Git blob could not be read exactly")
+    return mode, object_id, bytes(content.stdout)
+
+
+def _git_blob(root: Path, commit: str, path: str) -> bytes:
+    return _git_blob_info(root, commit, path)[2]
+
+
+def _strict_linear_target_range(root: Path, base: str, head: str, target: str,
+                                *, label: str) -> list[str]:
+    _commit(base, f"{label} base")
+    _commit(head, f"{label} head")
+    if base == head:
+        raise EvolutionError(f"{label} requires an explicit new commit")
+    ancestor = _git(root, ["merge-base", "--is-ancestor", base, head])
+    if ancestor.returncode != 0:
+        raise EvolutionError(f"{label} head must strictly descend from its base")
+    listing = _git(root, ["rev-list", "--reverse", "--topo-order", f"{base}..{head}"])
+    commits = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+    if listing.returncode != 0 or not commits:
+        raise EvolutionError(f"{label} commit range is unavailable")
+    expected_parent = base
+    for commit_id in commits:
+        _commit(commit_id, f"{label} commit")
+        parents = _git(root, ["rev-list", "--parents", "-n", "1", commit_id])
+        tokens = parents.stdout.strip().split() if parents.returncode == 0 else []
+        if len(tokens) != 2 or tokens[0] != commit_id or tokens[1] != expected_parent:
+            raise EvolutionError(f"{label} range must be linear and cannot contain merge commits")
+        changed = _git(
+            root,
+            ["diff-tree", "--no-commit-id", "--name-status", "-r", "-z",
+             "--no-renames", expected_parent, commit_id, "--"],
+            binary=True,
+        )
+        fields = [item for item in bytes(changed.stdout).split(b"\0") if item]
+        if changed.returncode != 0 or len(fields) != 2:
+            raise EvolutionError(f"{label} commit must change exactly the managed target")
+        try:
+            status = fields[0].decode("ascii")
+            changed_path = fields[1].decode("utf-8").replace("\\", "/")
+        except UnicodeError as exc:
+            raise EvolutionError(f"{label} commit path metadata is invalid") from exc
+        if status != "M" or changed_path != target:
+            raise EvolutionError(
+                f"{label} rejects add/delete/rename/copy/typechange and non-target paths"
+            )
+        _git_blob_info(root, commit_id, target)
+        expected_parent = commit_id
+    return commits
 
 
 def _candidate_is_narrow(root: Path, current: str, candidate: str, target: str) -> None:
-    ancestor = _git(root, ["merge-base", "--is-ancestor", current, candidate])
-    if ancestor.returncode != 0:
-        raise EvolutionError("candidate commit must descend from the current version commit")
-    changed = _git(root, ["diff", "--name-only", current, candidate, "--"])
-    if changed.returncode != 0:
-        raise EvolutionError("candidate commit diff could not be verified")
-    paths = [line.strip().replace("\\", "/") for line in changed.stdout.splitlines() if line.strip()]
-    if paths != [target]:
-        raise EvolutionError("candidate commit diff must contain exactly the managed target")
+    _strict_linear_target_range(root, current, candidate, target, label="candidate")
 
 
 def _assert_clean(root: Path) -> None:
@@ -627,7 +747,102 @@ def _assert_private_or_ignored(project: Path, directory: Path) -> None:
         raise EvolutionError("private evolution ignore verification failed closed")
 
 
-def _private_ref(project: Path, reference: Mapping[str, Any], *, expected_kind: str | None = None) -> None:
+_UNSET = object()
+
+
+def _validate_knowledge_versions(value: Any, label: str) -> None:
+    if not isinstance(value, list) or len(value) > MAX_KNOWLEDGE:
+        raise EvolutionError(f"{label} exceeds bounds")
+    identities: set[tuple[str, str, str, str]] = set()
+    for index, item in enumerate(value):
+        obj = _exact(item, KNOWLEDGE_KEYS, f"{label}[{index}]")
+        _portable(obj["record_id"], PORTABLE_ID, "record_id")
+        _portable(obj["source_path"], PORTABLE_REF, "knowledge source_path", MAX_REF)
+        _commit(obj["source_commit"], "knowledge source_commit")
+        _hash(obj["content_sha256"], "knowledge content_sha256")
+        identity = tuple(str(obj[key]) for key in sorted(KNOWLEDGE_KEYS))
+        if identity in identities:
+            raise EvolutionError("knowledge_versions must be unique")
+        identities.add(identity)
+
+
+def _validate_run_binding(value: Any, label: str) -> None:
+    binding = _exact(value, RUN_BINDING_KEYS, label)
+    _portable(binding["case_id"], PORTABLE_ID, f"{label}.case_id")
+    if binding["arm"] not in {"control", "candidate"}:
+        raise EvolutionError(f"{label}.arm is unsupported")
+    _portable(binding["run_id"], PORTABLE_RUN, f"{label}.run_id")
+    _validate_version(binding["capability_version"], f"{label}.capability_version")
+    _validate_knowledge_versions(binding["knowledge_versions"], f"{label}.knowledge_versions")
+
+
+def _validate_pilot_binding(value: Any, label: str) -> None:
+    binding = _exact(value, PILOT_BINDING_KEYS, label)
+    for key in ("case_ids", "control_run_ids", "candidate_run_ids"):
+        values = binding[key]
+        if not isinstance(values, list) or not 1 <= len(values) <= MAX_CASES:
+            raise EvolutionError(f"{label}.{key} exceeds bounds")
+        pattern = PORTABLE_RUN if key != "case_ids" else PORTABLE_ID
+        normalized = [_portable(item, pattern, f"{label}.{key}") for item in values]
+        if normalized != sorted(set(normalized)):
+            raise EvolutionError(f"{label}.{key} must be sorted and unique")
+    refs = binding["lineage_refs"]
+    if not isinstance(refs, list) or not 2 <= len(refs) <= MAX_CASES * 2:
+        raise EvolutionError(f"{label}.lineage_refs exceeds bounds")
+    identities: list[tuple[str, str, str, str, str]] = []
+    for item in refs:
+        obj = _exact(item, LINEAGE_BINDING_KEYS, f"{label}.lineage_ref")
+        _portable(obj["case_id"], PORTABLE_ID, "lineage case_id")
+        if obj["arm"] not in {"control", "candidate"}:
+            raise EvolutionError("lineage binding arm is unsupported")
+        _portable(obj["run_id"], PORTABLE_RUN, "lineage run_id")
+        _portable(obj["ref"], PORTABLE_REF, "lineage ref", MAX_REF)
+        _hash(obj["sha256"], "lineage sha256")
+        identities.append((obj["case_id"], obj["arm"], obj["run_id"], obj["ref"], obj["sha256"]))
+    if identities != sorted(set(identities)):
+        raise EvolutionError(f"{label}.lineage_refs must be sorted and unique")
+
+
+def _validate_evidence_envelope(value: Any, proposal: Mapping[str, Any], label: str) -> None:
+    envelope = _exact(value, EVIDENCE_ENVELOPE_KEYS, label)
+    if envelope["schema_version"] != EVIDENCE_VERSION:
+        raise EvolutionError(f"{label}.schema_version is unsupported")
+    if envelope["evidence_kind"] not in EVIDENCE_KINDS:
+        raise EvolutionError(f"{label}.evidence_kind is unsupported")
+    if envelope["proposal_id"] != proposal["proposal_id"]:
+        raise EvolutionError(f"{label} belongs to another proposal")
+    capability = _exact(envelope["capability"], EVIDENCE_CAPABILITY_KEYS, f"{label}.capability")
+    if (
+        capability["kind"] != proposal["capability"]["kind"]
+        or capability["target_path"] != proposal["capability"]["target_path"]
+        or capability["current_version"] != proposal["current_version"]
+        or capability["candidate_version"] != proposal["candidate_version"]
+    ):
+        raise EvolutionError(f"{label} capability or version binding is stale")
+    if envelope["run_binding"] is not None:
+        _validate_run_binding(envelope["run_binding"], f"{label}.run_binding")
+    if envelope["pilot_binding"] is not None:
+        _validate_pilot_binding(envelope["pilot_binding"], f"{label}.pilot_binding")
+    if envelope["decision"] not in EVIDENCE_DECISIONS:
+        raise EvolutionError(f"{label}.decision is unsupported")
+    if envelope["safety"] not in EVIDENCE_SAFETY:
+        raise EvolutionError(f"{label}.safety is unsupported")
+    _timestamp(envelope["recorded_at"], f"{label}.recorded_at")
+
+
+def _private_ref(
+    project: Path,
+    reference: Mapping[str, Any],
+    *,
+    proposal: Mapping[str, Any],
+    expected_kind: str | None = None,
+    expected_run_binding: Any = _UNSET,
+    expected_pilot_binding: Any = _UNSET,
+    allowed_decisions: set[str] | None = None,
+    allowed_safety: set[str] | None = None,
+    not_before: str | None = None,
+    not_after: str | None = None,
+) -> dict[str, Any]:
     _validate_evidence(reference, "evidence")
     if expected_kind is not None and reference["kind"] != expected_kind:
         raise EvolutionError("evidence kind does not match the required gate")
@@ -648,6 +863,24 @@ def _private_ref(project: Path, reference: Mapping[str, Any], *, expected_kind: 
         raise EvolutionError("required private evidence could not be verified") from exc
     if len(raw) > MAX_RECORD_BYTES or _sha(raw) != reference["sha256"]:
         raise EvolutionError("private evidence hash or size does not match")
+    envelope = _decode_json(raw, maximum=MAX_RECORD_BYTES, label="private evidence envelope")
+    _validate_evidence_envelope(envelope, proposal, "private evidence envelope")
+    if envelope["evidence_kind"] != reference["kind"]:
+        raise EvolutionError("evidence reference kind differs from its envelope")
+    if expected_run_binding is not _UNSET and envelope["run_binding"] != expected_run_binding:
+        raise EvolutionError("evidence run binding is missing or stale")
+    if expected_pilot_binding is not _UNSET and envelope["pilot_binding"] != expected_pilot_binding:
+        raise EvolutionError("evidence pilot or lineage binding is missing or stale")
+    if allowed_decisions is not None and envelope["decision"] not in allowed_decisions:
+        raise EvolutionError("evidence decision does not satisfy the required gate")
+    if allowed_safety is not None and envelope["safety"] not in allowed_safety:
+        raise EvolutionError("evidence safety verdict does not satisfy the required gate")
+    recorded = _timestamp(envelope["recorded_at"], "evidence recorded_at")
+    if not_before is not None and recorded < _timestamp(not_before, "evidence not_before"):
+        raise EvolutionError("evidence predates the lifecycle stage it claims to authorize")
+    if not_after is not None and recorded > _timestamp(not_after, "evidence not_after"):
+        raise EvolutionError("evidence was recorded after the bounded lifecycle decision")
+    return envelope
 
 
 def _source_ref_to_evidence(kind: str, value: Mapping[str, Any]) -> dict[str, str]:
@@ -676,6 +909,70 @@ def _validate_authorization(value: Any, label: str) -> None:
     ):
         raise EvolutionError(f"{label} evidence kinds do not satisfy the gates")
     _timestamp(auth["recorded_at"], f"{label}.recorded_at")
+
+
+def _expected_run_binding(case_id: str, arm_name: str, arm: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "case_id": case_id,
+        "arm": arm_name,
+        "run_id": arm["run_id"],
+        "capability_version": dict(arm["capability_version"]),
+        "knowledge_versions": [dict(item) for item in arm["knowledge_versions"]],
+    }
+
+
+def _pilot_binding(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    case_ids = sorted(case["case_id"] for case in cases)
+    control_run_ids = sorted(case["control"]["run_id"] for case in cases)
+    candidate_run_ids = sorted(case["candidate"]["run_id"] for case in cases)
+    lineage_refs = []
+    for case in cases:
+        for arm_name in ("control", "candidate"):
+            arm = case[arm_name]
+            lineage_refs.append({
+                "case_id": case["case_id"], "arm": arm_name, "run_id": arm["run_id"],
+                "ref": arm["lineage"]["ref"], "sha256": arm["lineage"]["sha256"],
+            })
+    lineage_refs.sort(key=lambda item: (
+        item["case_id"], item["arm"], item["run_id"], item["ref"], item["sha256"]
+    ))
+    binding = {
+        "case_ids": case_ids,
+        "control_run_ids": control_run_ids,
+        "candidate_run_ids": candidate_run_ids,
+        "lineage_refs": lineage_refs,
+    }
+    _validate_pilot_binding(binding, "pilot binding")
+    return binding
+
+
+def _verify_authorization(
+    project: Path,
+    proposal: Mapping[str, Any],
+    authorization: Mapping[str, Any],
+    *,
+    pilot_binding: Mapping[str, Any] | None,
+    now: str,
+    not_before: str,
+) -> None:
+    _validate_authorization(authorization, "authorization")
+    auth_time = authorization["recorded_at"]
+    if _timestamp(auth_time, "authorization.recorded_at") > _timestamp(now, "authorization now"):
+        raise EvolutionError("authorization is dated after the requested lifecycle action")
+    if _timestamp(auth_time, "authorization.recorded_at") < _timestamp(not_before, "authorization not_before"):
+        raise EvolutionError("authorization predates the evidence it claims to govern")
+    requirements = (
+        ("manager_approval", {"approved"}, {"safe", "not_applicable"}),
+        ("independent_qa", {"pass"}, {"safe"}),
+        ("shadow", {"beneficial"}, {"safe"}),
+    )
+    for key, decisions, safety in requirements:
+        _private_ref(
+            project, authorization[key], proposal=proposal, expected_kind=key,
+            expected_run_binding=None, expected_pilot_binding=pilot_binding,
+            allowed_decisions=decisions, allowed_safety=safety,
+            not_before=not_before, not_after=auth_time,
+        )
 
 
 def _validate_metrics(value: Any, label: str) -> None:
@@ -710,24 +1007,19 @@ def _validate_arm(value: Any, label: str) -> None:
     if _hash(contract["sha256"], f"{label}.evaluation_contract.sha256") != METRIC_CONTRACT_SHA256:
         raise EvolutionError("pilot arm evaluation contract hash drifted")
     _validate_version(arm["capability_version"], f"{label}.capability_version")
-    knowledge = arm["knowledge_versions"]
-    if not isinstance(knowledge, list) or len(knowledge) > MAX_KNOWLEDGE:
-        raise EvolutionError(f"{label}.knowledge_versions exceeds bounds")
-    identities: set[tuple[str, str, str, str]] = set()
-    for index, item in enumerate(knowledge):
-        obj = _exact(item, KNOWLEDGE_KEYS, f"{label}.knowledge_versions[{index}]")
-        _portable(obj["record_id"], PORTABLE_ID, "record_id")
-        _portable(obj["source_path"], PORTABLE_REF, "knowledge source_path", MAX_REF)
-        _commit(obj["source_commit"], "knowledge source_commit")
-        _hash(obj["content_sha256"], "knowledge content_sha256")
-        identity = tuple(str(obj[key]) for key in sorted(KNOWLEDGE_KEYS))
-        if identity in identities:
-            raise EvolutionError("knowledge_versions must be unique")
-        identities.add(identity)
+    _validate_knowledge_versions(arm["knowledge_versions"], f"{label}.knowledge_versions")
     _validate_evidence(arm["lineage"], f"{label}.lineage")
     if arm["lineage"]["kind"] != "lineage":
         raise EvolutionError("pilot run requires a lineage evidence ref")
-    _validate_metrics(arm["metrics"], f"{label}.metrics")
+    if arm["execution_status"] == "completed":
+        if arm["unavailable_reason"] is not None:
+            raise EvolutionError("completed pilot arm cannot claim an unavailable reason")
+        _validate_metrics(arm["measurements"], f"{label}.measurements")
+    else:
+        if arm["measurements"] is not None:
+            raise EvolutionError("unavailable pilot arm must not contain measurements")
+        if arm["unavailable_reason"] != arm["execution_status"] or arm["unavailable_reason"] not in UNAVAILABLE_REASONS:
+            raise EvolutionError("unavailable pilot arm requires its exact bounded reason")
 
 
 def validate_pilot_case(value: Mapping[str, Any], proposal: Mapping[str, Any]) -> None:
@@ -750,7 +1042,7 @@ def validate_pilot_case(value: Mapping[str, Any], proposal: Mapping[str, Any]) -
 def _validate_evaluation(value: Any, label: str) -> None:
     result = _exact(
         value,
-        {"status", "conclusion", "case_count", "comparisons", "blocking_reasons",
+        {"status", "conclusion", "case_count", "measured_case_count", "comparisons", "blocking_reasons",
          "confounders", "claim", "evaluated_at"},
         label,
     )
@@ -763,8 +1055,14 @@ def _validate_evaluation(value: Any, label: str) -> None:
     count = result["case_count"]
     if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= MAX_CASES:
         raise EvolutionError(f"{label}.case_count exceeds bounds")
+    measured_count = result["measured_case_count"]
+    if (
+        isinstance(measured_count, bool) or not isinstance(measured_count, int)
+        or not 0 <= measured_count <= count
+    ):
+        raise EvolutionError(f"{label}.measured_case_count exceeds bounds")
     comparisons = result["comparisons"]
-    expected = set() if count == 0 else METRICS_KEYS
+    expected = set() if measured_count == 0 else METRICS_KEYS
     if not isinstance(comparisons, Mapping) or set(comparisons) != expected:
         raise EvolutionError(f"{label}.comparisons do not match the metric contract")
     if any(direction not in {"improved", "equal", "regressed"} for direction in comparisons.values()):
@@ -799,7 +1097,8 @@ def validate_record(record: Mapping[str, Any]) -> None:
         "schema_version", "contract_version", "contract_sha256", "proposal",
         "proposal_sha256", "revision", "state", "created_at", "updated_at",
         "pilot_authorization", "pilot_cases", "evaluation",
-        "promotion_authorization", "pending_transition", "active_version", "history",
+        "evaluation_evidence", "promotion_authorization", "pending_transition",
+        "active_version", "history",
     }
     obj = _exact(record, keys, "evolution record")
     if obj["schema_version"] != RECORD_VERSION or obj["contract_version"] != CONTRACT_VERSION:
@@ -822,19 +1121,59 @@ def validate_record(record: Mapping[str, Any]) -> None:
     updated = _timestamp(obj["updated_at"], "updated_at")
     if updated < created:
         raise EvolutionError("evolution updated_at precedes created_at")
+    previous_state: str | None = None
+    previous_time = created
+    seen_unique: set[str] = set()
     for index, entry in enumerate(history, start=1):
         _exact(entry, {"revision", "state", "action", "recorded_at", "evidence_refs"}, "history entry")
         if entry["revision"] != index or entry["state"] not in STATES:
             raise EvolutionError("evolution history is not append-only")
         if entry["action"] not in HISTORY_ACTIONS:
             raise EvolutionError("evolution history action is unsupported")
-        _timestamp(entry["recorded_at"], "history timestamp")
+        recorded = _timestamp(entry["recorded_at"], "history timestamp")
+        if recorded < previous_time or recorded < created or recorded > updated:
+            raise EvolutionError("evolution history timestamps are not monotonic and bounded")
+        transition = HISTORY_TRANSITIONS[entry["action"]]
+        allowed_from, expected_to = transition
+        if index == 1:
+            if entry["action"] != "opened" or previous_state is not None:
+                raise EvolutionError("evolution history must start with opened")
+        else:
+            if allowed_from is None:
+                raise EvolutionError("opened can only be the first history action")
+            allowed = allowed_from if isinstance(allowed_from, set) else {allowed_from}
+            if previous_state not in allowed:
+                raise EvolutionError("evolution history contains an illegal state transition")
+        if entry["state"] != expected_to:
+            raise EvolutionError("evolution history action and destination state disagree")
+        if entry["action"] in UNIQUE_HISTORY_ACTIONS:
+            if entry["action"] in seen_unique:
+                raise EvolutionError("evolution history repeats a single-use action")
+            seen_unique.add(entry["action"])
         if not isinstance(entry["evidence_refs"], list) or len(entry["evidence_refs"]) > MAX_REFS:
             raise EvolutionError("history evidence refs exceed bounds")
         for ref in entry["evidence_refs"]:
             _validate_evidence(ref, "history evidence")
+        expected_kinds = HISTORY_EVIDENCE_KINDS[entry["action"]]
+        actual_kinds = tuple(sorted(ref["kind"] for ref in entry["evidence_refs"]))
+        if expected_kinds is not None and actual_kinds != expected_kinds:
+            raise EvolutionError("history evidence kinds do not match the action")
+        if entry["action"] == "observation_started" and (
+            len(actual_kinds) != 1 or actual_kinds[0] not in {"evaluation", "outcome", "lineage"}
+        ):
+            raise EvolutionError("observation history evidence kind is invalid")
+        if entry["action"] == "rollback_applied" and (
+            len(actual_kinds) != 1 or actual_kinds[0] not in {"rollback_decision", "evaluation", "outcome"}
+        ):
+            raise EvolutionError("rollback history evidence kind is invalid")
+        if entry["action"] == "rejected" and len(actual_kinds) != 1:
+            raise EvolutionError("rejection history requires exactly one evidence ref")
+        previous_state = entry["state"]
+        previous_time = recorded
     if history[-1]["state"] != obj["state"] or history[-1]["recorded_at"] != obj["updated_at"]:
         raise EvolutionError("record state must match the last history entry")
+    if history[0]["recorded_at"] != obj["created_at"]:
+        raise EvolutionError("opened history timestamp must equal record created_at")
     if obj["pilot_authorization"] is not None:
         _validate_authorization(obj["pilot_authorization"], "pilot_authorization")
     if not isinstance(obj["pilot_cases"], list) or len(obj["pilot_cases"]) > obj["proposal"]["pilot"]["max_cases"]:
@@ -849,18 +1188,30 @@ def validate_record(record: Mapping[str, Any]) -> None:
         _validate_evaluation(obj["evaluation"], "evaluation")
         if obj["evaluation"]["case_count"] != len(obj["pilot_cases"]):
             raise EvolutionError("evaluation case count differs from the immutable pilot cases")
+        measured = sum(
+            1 for case in obj["pilot_cases"]
+            if case["control"]["execution_status"] == "completed"
+            and case["candidate"]["execution_status"] == "completed"
+        )
+        if obj["evaluation"]["measured_case_count"] != measured:
+            raise EvolutionError("evaluation measured case count differs from available pilot arms")
+    if obj["evaluation_evidence"] is not None:
+        _validate_evidence(obj["evaluation_evidence"], "evaluation_evidence")
+        if obj["evaluation_evidence"]["kind"] != "evaluation":
+            raise EvolutionError("evaluation_evidence must have evaluation kind")
     if obj["promotion_authorization"] is not None:
         _validate_authorization(obj["promotion_authorization"], "promotion_authorization")
     _validate_version(obj["active_version"], "active_version")
     if obj["pending_transition"] is not None:
         transition = _exact(
             obj["pending_transition"],
-            {"kind", "base_head", "target_path", "before_sha256", "after_sha256", "diff_sha256", "plan_token"},
+            {"kind", "base_head", "source_commit", "target_path", "before_sha256", "after_sha256", "diff_sha256", "plan_token"},
             "pending_transition",
         )
         if transition["kind"] not in {"promotion", "rollback"}:
             raise EvolutionError("pending transition kind is unsupported")
         _commit(transition["base_head"], "pending base_head")
+        _commit(transition["source_commit"], "pending source_commit")
         _portable(transition["target_path"], PORTABLE_REF, "pending target_path", MAX_REF)
         for key in ("before_sha256", "after_sha256", "diff_sha256", "plan_token"):
             _hash(transition[key], f"pending_transition.{key}")
@@ -868,7 +1219,7 @@ def validate_record(record: Mapping[str, Any]) -> None:
     proposal = obj["proposal"]
     if state == "candidate" and any(
         value is not None and value != []
-        for value in (obj["pilot_authorization"], obj["pilot_cases"], obj["evaluation"], obj["promotion_authorization"], obj["pending_transition"])
+        for value in (obj["pilot_authorization"], obj["pilot_cases"], obj["evaluation"], obj["evaluation_evidence"], obj["promotion_authorization"], obj["pending_transition"])
     ):
         raise EvolutionError("candidate state contains evidence from a later lifecycle stage")
     if state in {"pilot_approved", "piloting", "evaluated", "promotion_pending", "promoted", "observing", "rollback_pending", "rolled_back"} and obj["pilot_authorization"] is None:
@@ -879,6 +1230,8 @@ def validate_record(record: Mapping[str, Any]) -> None:
         raise EvolutionError("post-pilot state requires bounded pilot cases")
     if state in {"evaluated", "promotion_pending", "promoted", "observing", "rollback_pending", "rolled_back"} and obj["evaluation"] is None:
         raise EvolutionError("post-pilot state requires an evaluation")
+    if state in {"evaluated", "promotion_pending", "promoted", "observing", "rollback_pending", "rolled_back"} and obj["evaluation_evidence"] is None:
+        raise EvolutionError("post-pilot state requires bound evaluation evidence")
     if state in {"promotion_pending", "promoted", "observing", "rollback_pending", "rolled_back"} and obj["promotion_authorization"] is None:
         raise EvolutionError("promotion lifecycle requires explicit authorization")
     if state == "promotion_pending" and (obj["pending_transition"] or {}).get("kind") != "promotion":
@@ -916,10 +1269,18 @@ def _read_record(project: Path, proposal_id: str) -> tuple[dict[str, Any] | None
 
 
 def _verify_source_refs(project: Path, proposal: Mapping[str, Any]) -> None:
-    for field, kind in (("feedback_refs", "outcome"), ("evaluation_refs", "evaluation"), ("lineage_refs", "lineage")):
+    for field, kind in (
+        ("candidate_refs", "candidate"), ("feedback_refs", "outcome"),
+        ("evaluation_refs", "evaluation"), ("lineage_refs", "lineage"),
+    ):
+        decisions, safety = SOURCE_EVIDENCE_POLICY[kind]
         for ref in proposal["sources"][field]:
             evidence = _source_ref_to_evidence(kind, ref)
-            _private_ref(project, evidence)
+            _private_ref(
+                project, evidence, proposal=proposal, expected_kind=kind,
+                allowed_decisions=set(decisions), allowed_safety=set(safety),
+                not_after=proposal["created_at"],
+            )
 
 
 def preview_open(project_root: Path, repository_root: Path,
@@ -953,6 +1314,7 @@ def preview_open(project_root: Path, repository_root: Path,
             "pilot_authorization": None,
             "pilot_cases": [],
             "evaluation": None,
+            "evaluation_evidence": None,
             "promotion_authorization": None,
             "pending_transition": None,
             "active_version": dict(proposal["current_version"]),
@@ -1050,9 +1412,63 @@ def open_proposal(project_root: Path, repository_root: Path,
         return _write_previewed(binding, preview, plan_token)
 
 
-def _check_refs(project: Path, refs: Sequence[Mapping[str, Any]]) -> None:
-    for ref in refs:
-        _private_ref(project, ref)
+def _verify_pilot_lineage(project: Path, proposal: Mapping[str, Any],
+                          cases: Sequence[Mapping[str, Any]], *, now: str) -> None:
+    for case in cases:
+        for arm_name in ("control", "candidate"):
+            arm = case[arm_name]
+            _private_ref(
+                project, arm["lineage"], proposal=proposal, expected_kind="lineage",
+                expected_run_binding=_expected_run_binding(case["case_id"], arm_name, arm),
+                expected_pilot_binding=None, allowed_decisions={"verified"},
+                allowed_safety={"not_applicable"}, not_after=now,
+            )
+
+
+def _verify_evaluation_evidence(project: Path, proposal: Mapping[str, Any],
+                                evidence: Mapping[str, Any], evaluation: Mapping[str, Any],
+                                cases: Sequence[Mapping[str, Any]], *, now: str,
+                                not_before: str) -> None:
+    safety = {"safe"} if evaluation["conclusion"] == "beneficial" else {"safe", "unsafe", "inconclusive"}
+    _private_ref(
+        project, evidence, proposal=proposal, expected_kind="evaluation",
+        expected_run_binding=None, expected_pilot_binding=_pilot_binding(cases),
+        allowed_decisions={evaluation["conclusion"]}, allowed_safety=safety,
+        not_before=not_before, not_after=now,
+    )
+
+
+def _revalidate_cumulative_evidence(project: Path, record: Mapping[str, Any], *, now: str,
+                                    include_promotion: bool) -> None:
+    proposal = record["proposal"]
+    _verify_source_refs(project, proposal)
+    if record["pilot_authorization"] is None:
+        raise EvolutionError("pilot authorization evidence is missing")
+    _verify_authorization(
+        project, proposal, record["pilot_authorization"], pilot_binding=None,
+        now=now, not_before=proposal["created_at"],
+    )
+    if not record["pilot_cases"]:
+        raise EvolutionError("pilot lineage evidence is missing")
+    _verify_pilot_lineage(project, proposal, record["pilot_cases"], now=now)
+    if record["evaluation"] is None or record["evaluation_evidence"] is None:
+        raise EvolutionError("bound evaluation evidence is missing")
+    pilot_recorded_at = max(
+        entry["recorded_at"] for entry in record["history"]
+        if entry["action"] == "pilot_case_recorded"
+    )
+    _verify_evaluation_evidence(
+        project, proposal, record["evaluation_evidence"], record["evaluation"],
+        record["pilot_cases"], now=now, not_before=pilot_recorded_at,
+    )
+    if include_promotion:
+        if record["promotion_authorization"] is None:
+            raise EvolutionError("promotion authorization evidence is missing")
+        _verify_authorization(
+            project, proposal, record["promotion_authorization"],
+            pilot_binding=_pilot_binding(record["pilot_cases"]), now=now,
+            not_before=record["evaluation"]["evaluated_at"],
+        )
 
 
 def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: int,
@@ -1071,6 +1487,8 @@ def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: 
     _project_context(project, record["proposal"]["project_id"])
     if record["revision"] != expected_revision:
         raise EvolutionError("stale evolution revision")
+    if _timestamp(now, "now") < _timestamp(record["updated_at"], "record.updated_at"):
+        raise EvolutionError("lifecycle action timestamp cannot move backward")
     updated = json.loads(json.dumps(record))
     refs: list[Mapping[str, Any]] = []
     state = record["state"]
@@ -1080,15 +1498,25 @@ def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: 
         auth = payload.get("authorization")
         _validate_authorization(auth, "authorization")
         refs = [auth["manager_approval"], auth["independent_qa"], auth["shadow"]]
-        _check_refs(project, refs)
         if action == "authorize_pilot":
             if state != "candidate":
                 raise EvolutionError("pilot authorization requires candidate state")
+            _verify_source_refs(project, record["proposal"])
+            _verify_authorization(
+                project, record["proposal"], auth, pilot_binding=None, now=now,
+                not_before=record["proposal"]["created_at"],
+            )
             updated["pilot_authorization"] = dict(auth)
             new_state, history_action = "pilot_approved", "pilot_authorized"
         else:
             if state != "evaluated" or not record["evaluation"] or record["evaluation"]["conclusion"] != "beneficial":
                 raise EvolutionError("promotion requires a beneficial conclusive pilot")
+            _revalidate_cumulative_evidence(project, record, now=now, include_promotion=False)
+            _verify_authorization(
+                project, record["proposal"], auth,
+                pilot_binding=_pilot_binding(record["pilot_cases"]), now=now,
+                not_before=record["evaluation"]["evaluated_at"],
+            )
             updated["promotion_authorization"] = dict(auth)
             new_state, history_action = "evaluated", "promotion_authorized"
     elif action == "record_pilot_case":
@@ -1096,8 +1524,13 @@ def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: 
             raise EvolutionError("pilot case requires explicit pilot authorization")
         case = payload.get("case")
         validate_pilot_case(case, record["proposal"])
-        _private_ref(project, case["control"]["lineage"], expected_kind="lineage")
-        _private_ref(project, case["candidate"]["lineage"], expected_kind="lineage")
+        _verify_source_refs(project, record["proposal"])
+        _verify_authorization(
+            project, record["proposal"], record["pilot_authorization"],
+            pilot_binding=None, now=now, not_before=record["proposal"]["created_at"],
+        )
+        _verify_pilot_lineage(project, record["proposal"], record["pilot_cases"], now=now)
+        _verify_pilot_lineage(project, record["proposal"], [case], now=now)
         for existing in record["pilot_cases"]:
             if existing["case_id"] == case["case_id"]:
                 if existing != case:
@@ -1118,24 +1551,54 @@ def _preview_update(project_root: Path, proposal_id: str, *, expected_revision: 
     elif action == "evaluate":
         if state != "piloting":
             raise EvolutionError("evaluation requires recorded pilot cases")
+        _verify_source_refs(project, record["proposal"])
+        _verify_authorization(
+            project, record["proposal"], record["pilot_authorization"],
+            pilot_binding=None, now=now, not_before=record["proposal"]["created_at"],
+        )
+        _verify_pilot_lineage(project, record["proposal"], record["pilot_cases"], now=now)
         confounders = payload.get("confounders")
         evaluation = evaluate_cases(record["pilot_cases"], record["proposal"], confounders, now=now)
+        evidence = payload.get("evidence")
+        _validate_evidence(evidence, "evaluation evidence")
+        if evidence["kind"] != "evaluation":
+            raise EvolutionError("evaluation action requires evaluation evidence")
+        pilot_recorded_at = max(
+            entry["recorded_at"] for entry in record["history"]
+            if entry["action"] == "pilot_case_recorded"
+        )
+        _verify_evaluation_evidence(
+            project, record["proposal"], evidence, evaluation, record["pilot_cases"],
+            now=now, not_before=pilot_recorded_at,
+        )
         updated["evaluation"] = evaluation
+        updated["evaluation_evidence"] = dict(evidence)
+        refs = [evidence]
         new_state, history_action = "evaluated", "evaluated"
     elif action == "observe":
         if state not in {"promoted", "observing"}:
             raise EvolutionError("observation requires a confirmed promotion")
+        _revalidate_cumulative_evidence(project, record, now=now, include_promotion=True)
         evidence = payload.get("evidence")
         _validate_evidence(evidence, "observation evidence")
         if evidence["kind"] not in {"evaluation", "outcome", "lineage"}:
             raise EvolutionError("observation evidence kind is unsupported")
-        _private_ref(project, evidence)
+        allowed = SOURCE_EVIDENCE_POLICY[evidence["kind"]]
+        _private_ref(
+            project, evidence, proposal=record["proposal"],
+            allowed_decisions=set(allowed[0]), allowed_safety=set(allowed[1]),
+            not_after=now,
+        )
         refs = [evidence]
         new_state, history_action = "observing", "observation_started"
     elif action == "reject":
         evidence = payload.get("evidence")
         _validate_evidence(evidence, "rejection evidence")
-        _private_ref(project, evidence)
+        _private_ref(
+            project, evidence, proposal=record["proposal"],
+            allowed_decisions={"denied", "fail", "harmful", "inconclusive", "rollback_denied"},
+            allowed_safety={"unsafe", "inconclusive", "not_applicable"}, not_after=now,
+        )
         refs = [evidence]
         new_state, history_action = "rejected", "rejected"
     else:
@@ -1176,12 +1639,12 @@ def apply_action(project_root: Path, proposal_id: str, *, expected_revision: int
 
 def _aggregate(cases: Sequence[Mapping[str, Any]], arm: str, metric: str) -> Fraction:
     if metric in RATIO_METRICS:
-        numerator = sum(case[arm]["metrics"][metric]["numerator"] for case in cases)
-        denominator = sum(case[arm]["metrics"][metric]["denominator"] for case in cases)
+        numerator = sum(case[arm]["measurements"][metric]["numerator"] for case in cases)
+        denominator = sum(case[arm]["measurements"][metric]["denominator"] for case in cases)
         if denominator <= 0 or numerator > MAX_METRIC * MAX_CASES or denominator > MAX_METRIC * MAX_CASES:
             raise EvolutionError("pilot ratio aggregate exceeds bounds")
         return Fraction(numerator, denominator)
-    total = sum(Fraction(str(case[arm]["metrics"][metric])) for case in cases)
+    total = sum(Fraction(str(case[arm]["measurements"][metric])) for case in cases)
     return total / len(cases)
 
 
@@ -1206,13 +1669,18 @@ def evaluate_cases(cases: Sequence[Mapping[str, Any]], proposal: Mapping[str, An
             status = case[arm]["execution_status"]
             if status != "completed":
                 reasons.append(status)
+    measured_cases = [
+        case for case in cases
+        if case["control"]["execution_status"] == "completed"
+        and case["candidate"]["execution_status"] == "completed"
+    ]
     comparisons: dict[str, str] = {}
     improved = False
     regressed = False
-    if cases:
+    if measured_cases:
         for metric in sorted(METRICS_KEYS):
-            control = _aggregate(cases, "control", metric)
-            candidate = _aggregate(cases, "candidate", metric)
+            control = _aggregate(measured_cases, "control", metric)
+            candidate = _aggregate(measured_cases, "candidate", metric)
             if candidate == control:
                 direction = "equal"
             elif metric in HIGHER_IS_BETTER:
@@ -1223,7 +1691,7 @@ def evaluate_cases(cases: Sequence[Mapping[str, Any]], proposal: Mapping[str, An
             improved = improved or direction == "improved"
             regressed = regressed or direction == "regressed"
         for metric in SAFETY_METRICS:
-            if _aggregate(cases, "candidate", metric) > 0:
+            if _aggregate(measured_cases, "candidate", metric) > 0:
                 reasons.append({
                     "scope_leakage_acceptances": "scope_leakage",
                     "stale_obsolete_acceptances": "regression",
@@ -1240,6 +1708,7 @@ def evaluate_cases(cases: Sequence[Mapping[str, Any]], proposal: Mapping[str, An
         status, conclusion = "conclusive", "neutral"
     return {
         "status": status, "conclusion": conclusion, "case_count": len(cases),
+        "measured_case_count": len(measured_cases),
         "comparisons": comparisons, "blocking_reasons": reasons,
         "confounders": sorted(normalized), "claim": REPORT_CLAIM,
         "evaluated_at": now,
@@ -1266,6 +1735,8 @@ def preview_transition(project_root: Path, repository_root: Path, proposal_id: s
     record, base_hash = _read_record(project, proposal_id)
     if record is None or record["revision"] != expected_revision:
         raise EvolutionError("evolution record is unavailable or stale")
+    if _timestamp(now, "now") < _timestamp(record["updated_at"], "record.updated_at"):
+        raise EvolutionError("transition timestamp cannot move backward")
     root = _git_root(repository_root)
     _assert_clean(root)
     proposal = record["proposal"]
@@ -1273,11 +1744,22 @@ def preview_transition(project_root: Path, repository_root: Path, proposal_id: s
     if kind == "promotion":
         if record["state"] != "evaluated" or not record["evaluation"] or record["evaluation"]["conclusion"] != "beneficial":
             raise EvolutionError("promotion requires beneficial pilot evidence")
-        if authorization is None:
+        _revalidate_cumulative_evidence(project, record, now=now, include_promotion=False)
+        if authorization is None and record["promotion_authorization"] is None:
             raise EvolutionError("promotion requires explicit authorization")
-        _validate_authorization(authorization, "promotion authorization")
-        refs = [authorization["manager_approval"], authorization["independent_qa"], authorization["shadow"]]
-        _check_refs(project, refs)
+        chosen_authorization = authorization or record["promotion_authorization"]
+        if record["promotion_authorization"] is not None and chosen_authorization != record["promotion_authorization"]:
+            raise EvolutionError("promotion authorization differs from the recorded exact evidence")
+        _verify_authorization(
+            project, proposal, chosen_authorization,
+            pilot_binding=_pilot_binding(record["pilot_cases"]), now=now,
+            not_before=record["evaluation"]["evaluated_at"],
+        )
+        refs = [
+            chosen_authorization["manager_approval"],
+            chosen_authorization["independent_qa"],
+            chosen_authorization["shadow"],
+        ]
         before_version, after_version = record["active_version"], proposal["candidate_version"]
         new_state, action = "promotion_pending", "promotion_applied"
     elif kind == "rollback":
@@ -1288,12 +1770,25 @@ def preview_transition(project_root: Path, repository_root: Path, proposal_id: s
         _validate_evidence(rollback_evidence, "rollback evidence")
         if rollback_evidence["kind"] not in {"rollback_decision", "evaluation", "outcome"}:
             raise EvolutionError("rollback evidence kind is unsupported")
-        _private_ref(project, rollback_evidence)
+        _revalidate_cumulative_evidence(project, record, now=now, include_promotion=True)
+        rollback_decisions = {
+            "rollback_decision": {"rollback_approved", "regression_detected"},
+            "evaluation": {"harmful", "inconclusive"},
+            "outcome": {"observed", "regression_detected"},
+        }[rollback_evidence["kind"]]
+        _private_ref(
+            project, rollback_evidence, proposal=proposal,
+            expected_kind=rollback_evidence["kind"],
+            allowed_decisions=rollback_decisions,
+            allowed_safety={"unsafe", "inconclusive", "not_applicable"},
+            not_after=now,
+        )
         refs = [rollback_evidence]
         before_version, after_version = record["active_version"], proposal["rollback_target"]
         new_state, action = "rollback_pending", "rollback_applied"
     else:
         raise EvolutionError("transition kind is unsupported")
+    _verify_proposal_git(root, proposal, require_head=False)
     head = _git_head(root)
     if head != before_version["source_commit"]:
         raise EvolutionError("repository HEAD drifted from the active version")
@@ -1310,7 +1805,8 @@ def preview_transition(project_root: Path, repository_root: Path, proposal_id: s
     diff = _unified_diff(target, before, after)
     diff_hash = _sha(diff.encode("utf-8"))
     transition_core = {
-        "kind": kind, "base_head": head, "target_path": target,
+        "kind": kind, "base_head": head, "source_commit": after_version["source_commit"],
+        "target_path": target,
         "before_sha256": before_version["content_sha256"], "after_sha256": _sha(after),
         "diff_sha256": diff_hash,
     }
@@ -1323,7 +1819,7 @@ def preview_transition(project_root: Path, repository_root: Path, proposal_id: s
     }
     updated = json.loads(json.dumps(record))
     if kind == "promotion":
-        updated["promotion_authorization"] = dict(authorization)
+        updated["promotion_authorization"] = dict(chosen_authorization)
     updated["pending_transition"] = transition
     updated["revision"] = expected_revision + 1
     updated["state"] = new_state
@@ -1654,20 +2150,31 @@ def preview_confirm(project_root: Path, repository_root: Path, proposal_id: str,
     record, base_hash = _read_record(project, proposal_id)
     if record is None or record["revision"] != expected_revision or record["pending_transition"] is None:
         raise EvolutionError("pending transition is unavailable or stale")
+    if _timestamp(now, "now") < _timestamp(record["updated_at"], "record.updated_at"):
+        raise EvolutionError("confirmation timestamp cannot move backward")
+    _revalidate_cumulative_evidence(project, record, now=now, include_promotion=True)
     root = _git_root(repository_root)
     _assert_clean(root)
+    _verify_proposal_git(root, record["proposal"], require_head=False)
     head = _git_head(root)
     transition = record["pending_transition"]
-    if head == transition["base_head"]:
-        raise EvolutionError("transition has not been committed explicitly")
+    if head == transition["source_commit"]:
+        raise EvolutionError("confirmation requires a newly created commit, not a reset to source history")
     target = transition["target_path"]
-    changed = _git(root, ["diff", "--name-only", transition["base_head"], head, "--"])
-    paths = [line.strip().replace("\\", "/") for line in changed.stdout.splitlines() if line.strip()]
-    if changed.returncode != 0 or paths != [target]:
-        raise EvolutionError("confirmation commit range contains paths outside the managed target")
-    after = _git_blob(root, head, target)
+    _strict_linear_target_range(
+        root, transition["base_head"], head, target,
+        label=f"{transition['kind']} confirmation",
+    )
+    _, _, after = _git_blob_info(root, head, target)
     if _sha(after) != transition["after_sha256"]:
         raise EvolutionError("confirmed commit does not contain the previewed capability bytes")
+    path = _target_path(root, target)
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise EvolutionError("confirmed checkout target could not be inspected") from exc
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or _is_reparse(path) or metadata.st_nlink != 1:
+        raise EvolutionError("confirmed checkout target must remain a single-link regular file")
     updated = json.loads(json.dumps(record))
     if transition["kind"] == "promotion":
         active = dict(record["proposal"]["candidate_version"])
@@ -1725,7 +2232,7 @@ def migration_preview(repository_root: Path, *, kind: str, target_path: str,
         "proposal_id": proposal_id,
         "project_id": project_id,
         "sources": {
-            "candidate_refs": ["exp-v0.1-migration"],
+            "candidate_refs": [{"ref": ".opc/evolution/migration-candidate.json", "sha256": "0" * 64}],
             "feedback_refs": [],
             "evaluation_refs": [{"ref": ".opc/evaluation/migration.json", "sha256": "0" * 64}],
             "lineage_refs": [{"ref": ".opc/lineage/migration.json", "sha256": "0" * 64}],
@@ -1750,13 +2257,20 @@ def render_report(record: Mapping[str, Any]) -> str:
     evaluation = record["evaluation"] or {
         "status": "not_evaluated", "conclusion": "inconclusive",
         "blocking_reasons": ["missing_evidence"], "confounders": [],
+        "measured_case_count": 0,
     }
+    unavailable = sorted({
+        arm["unavailable_reason"]
+        for case in record["pilot_cases"] for arm in (case["control"], case["candidate"])
+        if arm["measurements"] is None
+    })
     lines = [
         f"# Capability evolution {record['proposal']['proposal_id']}", "",
         f"- State: `{record['state']}`",
         f"- Capability: `{record['proposal']['capability']['kind']}` / `{record['proposal']['capability']['target_path']}`",
         f"- Active version: `{record['active_version']['version']}` @ `{record['active_version']['source_commit']}`",
         f"- Pilot cases: `{len(record['pilot_cases'])}` / `{record['proposal']['pilot']['max_cases']}`",
+        f"- Measured paired cases: `{evaluation['measured_case_count']}`; unavailable arms: `{'not measured (' + ', '.join(unavailable) + ')' if unavailable else 'none'}`",
         f"- Evaluation: `{evaluation['status']}` / `{evaluation['conclusion']}`",
         f"- Blocking reasons: `{', '.join(evaluation['blocking_reasons']) or 'none'}`",
         f"- Known confounders: `{', '.join(evaluation['confounders']) or 'not recorded'}`",

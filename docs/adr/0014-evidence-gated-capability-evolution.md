@@ -31,6 +31,12 @@ Promotion/rollback 只把一个已验证 Git blob 原子写成 **unstaged** work
 
 所有报告固定声明 `association/evidence only`。对照结果支持决策证据，但不证明单一 capability 导致结果，也不证明可以泛化到其他项目。
 
+### Reviewer hardening clarification
+
+Evidence is not an untyped file-existence check. Every private reference uses a strict evidence envelope that binds proposal and capability versions, optional exact run, the complete pilot/lineage set, a typed decision, safety verdict, and bounded time. Evaluation, promotion, and confirmation cumulatively revalidate source, pilot authorization, lineage, evaluation, independent-QA, and Shadow evidence. Manager denial, QA failure, harmful/unsafe/inconclusive Shadow evidence, stale bindings, or missing/replaced evidence fails closed.
+
+Only regular Git blobs with mode `100644` or `100755` are eligible. Governed candidate and confirmation ranges are strict, linear descendants; merge commits and every per-commit add/delete/rename/copy/type change, non-target path, empty commit, or reset to pre-existing source history are rejected. Rollback therefore creates and confirms a new rollback commit rather than moving HEAD to an ancestor. Non-completed pilot arms contain no measurements and are excluded from aggregation.
+
 ## Consequences
 
 - current、candidate 和 rollback 都有 exact File/Git provenance；未提交工作树不是 active version。

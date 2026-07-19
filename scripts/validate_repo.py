@@ -906,6 +906,7 @@ def validate_capability_evolution_contract() -> None:
     contract_path = asset_root / "capability-evolution-contract.v1.json"
     proposal_schema_path = asset_root / "capability-change-proposal.v1.schema.json"
     record_schema_path = asset_root / "capability-evolution-record.v1.schema.json"
+    evidence_schema_path = asset_root / "capability-evolution-evidence.v1.schema.json"
     runtime_path = PLUGIN / "scripts" / "opc_evolution.py"
     metric_path = ROOT / "evaluation" / "contracts" / "baseline-contract.v1.json"
     adr_path = ROOT / "docs" / "adr" / "0014-evidence-gated-capability-evolution.md"
@@ -917,7 +918,7 @@ def validate_capability_evolution_contract() -> None:
         PLUGIN / "skills" / "opc-retrospective" / "references" / "capability-evolution.md",
     )
     for path in (
-        contract_path, proposal_schema_path, record_schema_path, runtime_path,
+        contract_path, proposal_schema_path, record_schema_path, evidence_schema_path, runtime_path,
         metric_path, adr_path, guide_path, *skill_refs,
     ):
         require(path.is_file(), f"missing capability-evolution artifact: {path}")
@@ -934,11 +935,13 @@ def validate_capability_evolution_contract() -> None:
         sys.path.pop(0)
     proposal_schema = load_json(proposal_schema_path)
     record_schema = load_json(record_schema_path)
+    evidence_schema = load_json(evidence_schema_path)
     metric_hash = hashlib.sha256(metric_path.read_bytes()).hexdigest()
     require(
         contract.get("contract_version") == "opc-capability-evolution-contract-v1"
         and contract.get("proposal_schema_version") == "opc-capability-change-proposal-v1"
         and contract.get("record_schema_version") == "opc-capability-evolution-record-v1"
+        and contract.get("evidence_schema_version") == runtime.EVIDENCE_VERSION
         and contract.get("authority") == "file-git-only"
         and contract.get("causal_claim_allowed") is False
         and contract.get("report_claim") == "association/evidence only",
@@ -965,6 +968,28 @@ def validate_capability_evolution_contract() -> None:
         and set(contract.get("lifecycle_states", [])) == runtime.STATES,
         "capability-evolution kinds or lifecycle states drifted",
     )
+    normalized_transitions = {}
+    for action, (source, destination) in runtime.HISTORY_TRANSITIONS.items():
+        if source is None:
+            sources = None
+        elif isinstance(source, set):
+            sources = sorted(source)
+        else:
+            sources = [source]
+        normalized_transitions[action] = {"from": sources, "to": destination}
+    evidence_contract = contract.get("evidence_envelope") or {}
+    require(
+        contract.get("history_transitions") == normalized_transitions
+        and set(contract.get("history_invariants", []))
+        == {"revision_contiguous", "timestamp_non_decreasing", "timestamp_bounded_by_record", "action_state_exact", "evidence_kind_exact", "single_use_actions_unique"}
+        and evidence_contract.get("strict") is True
+        and set(evidence_contract.get("bindings", []))
+        == {"proposal_id", "capability_kind", "target_path", "current_version", "candidate_version", "run", "pilot", "lineage"}
+        and evidence_contract.get("semantic_gates")
+        == {"manager_approval": "approved", "independent_qa": "pass", "shadow": "beneficial_and_safe", "evaluation": "matches_computed_conclusion"}
+        and evidence_contract.get("cumulative_revalidation_stages") == ["evaluate", "promotion", "confirm"],
+        "capability-evolution history or evidence semantics drifted",
+    )
     evaluation = contract.get("evaluation") or {}
     require(
         evaluation.get("metric_contract") == "opc-evaluation-contract-v1"
@@ -973,7 +998,9 @@ def validate_capability_evolution_contract() -> None:
         and evaluation.get("same_contract_for_control_and_candidate") is True
         and evaluation.get("required_confounders") is True
         and set(evaluation.get("allowed_conclusions", []))
-        == {"beneficial", "neutral", "harmful", "inconclusive"},
+        == {"beneficial", "neutral", "harmful", "inconclusive"}
+        and evaluation.get("unavailable_measurements") == "null-with-exact-reason"
+        and evaluation.get("unavailable_arms_excluded_from_aggregation") is True,
         "capability-evolution evaluation contract drifted",
     )
     promotion = contract.get("promotion_policy") or {}
@@ -986,8 +1013,13 @@ def validate_capability_evolution_contract() -> None:
                 "preview_before_write", "exact_head_required",
                 "clean_worktree_required", "single_allowlisted_path",
                 "candidate_is_exact_git_blob", "candidate_commit_diff_is_single_target",
+                "strict_linear_commit_range", "every_commit_changes_only_target",
+                "confirm_requires_strict_descendant_commit",
             )
         )
+        and promotion.get("allowed_git_blob_modes") == ["100644", "100755"]
+        and promotion.get("git_object_type") == "blob"
+        and promotion.get("merge_commits_allowed") is False
         and all(
             promotion.get(key) is False
             for key in (
@@ -1054,7 +1086,10 @@ def validate_capability_evolution_contract() -> None:
         and proposal_schema.get("additionalProperties") is False
         and set(proposal_schema.get("required", [])) == runtime.PROPOSAL_KEYS
         and record_schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema"
-        and record_schema.get("additionalProperties") is False,
+        and record_schema.get("additionalProperties") is False
+        and evidence_schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema"
+        and evidence_schema.get("additionalProperties") is False
+        and set(evidence_schema.get("required", [])) == runtime.EVIDENCE_ENVELOPE_KEYS,
         "capability-evolution top-level schemas are not strict",
     )
     for name in (
@@ -1074,6 +1109,12 @@ def validate_capability_evolution_contract() -> None:
         )
     proposal_defs = proposal_schema.get("$defs", {})
     record_defs = record_schema.get("$defs", {})
+    evidence_defs = evidence_schema.get("$defs", {})
+    for name in ("capability", "version", "knowledgeVersion", "runBinding", "lineageBinding", "pilotBinding"):
+        require(
+            evidence_defs.get(name, {}).get("additionalProperties") is False,
+            f"capability evidence schema {name} must reject extra fields",
+        )
     require(
         proposal_defs.get("id", {}).get("maxLength") == runtime.MAX_ID
         and proposal_defs.get("ref", {}).get("maxLength") == runtime.MAX_REF
@@ -1105,7 +1146,17 @@ def validate_capability_evolution_contract() -> None:
         and set(record_defs.get("evidence", {}).get("properties", {}).get("kind", {}).get("enum", []))
         == runtime.EVIDENCE_KINDS
         and set(record_defs.get("history", {}).get("properties", {}).get("action", {}).get("enum", []))
-        == runtime.HISTORY_ACTIONS,
+        == runtime.HISTORY_ACTIONS
+        and set(evidence_schema.get("properties", {}).get("evidence_kind", {}).get("enum", []))
+        == runtime.EVIDENCE_KINDS
+        and set(evidence_schema.get("properties", {}).get("decision", {}).get("enum", []))
+        == runtime.EVIDENCE_DECISIONS
+        and set(evidence_schema.get("properties", {}).get("safety", {}).get("enum", []))
+        == runtime.EVIDENCE_SAFETY
+        and set(record_defs.get("evaluation", {}).get("required", []))
+        == {"status", "conclusion", "case_count", "measured_case_count", "comparisons", "blocking_reasons", "confounders", "claim", "evaluated_at"}
+        and "evaluation_evidence" in set(record_schema.get("required", []))
+        and "source_commit" in set(record_defs.get("transition", {}).get("required", [])),
         "capability-evolution schema/runtime states, refs, or metrics drifted",
     )
     guide = guide_path.read_text(encoding="utf-8")
