@@ -1,0 +1,94 @@
+{
+  "contract_version": "opc-v0.2-release-contract-v1",
+  "release": "v0.2.0",
+  "title": "Evaluated Feedback Loop",
+  "authority": "file-git-only",
+  "public_evidence": {
+    "mode": "public-synthetic",
+    "baseline_contract": "opc-evaluation-contract-v1",
+    "hierarchical_contract": "opc-hierarchical-recall-evaluation-v1",
+    "required_scenarios": [
+      "file_git_baseline",
+      "context_packet",
+      "structured_feedback",
+      "shadow_evaluation",
+      "conflict_governance",
+      "knowledge_lineage",
+      "capability_evolution",
+      "optional_provider_fallback"
+    ],
+    "performance_scope": "versioned-synthetic-fixture-only"
+  },
+  "private_pilot": {
+    "schema_version": "opc-v0.2-private-pilot-aggregate-v1",
+    "evidence_envelope_schema_version": "opc-v0.2-private-evidence-envelope-v1",
+    "task_count": {"minimum": 3, "maximum": 5},
+    "evidence_class": "representative-private-pilot",
+    "same_evaluation_contract_for_arms": true,
+    "quality_rule": "at-least-one-strict-improvement-and-no-quality-regression",
+    "safety_thresholds": {
+      "scope_leakage_acceptances": 0,
+      "stale_obsolete_acceptances": 0,
+      "privacy_failures": 0
+    },
+    "required_capability_coverage": [
+      "context_packets",
+      "structured_feedback_records",
+      "lineage_records",
+      "shadow_pairs",
+      "conflicts_seeded",
+      "conflicts_rejected",
+      "evolution_pilot_cases",
+      "rollback_drills",
+      "exact_rollback_restores"
+    ],
+    "required_attestations": [
+      "manager_approval",
+      "independent_qa",
+      "shadow_evaluation",
+      "capability_evolution"
+    ],
+    "raw_data_boundary": "approved-private-project-only",
+    "public_export": "none"
+  },
+  "release_gates": [
+    "public_synthetic_evidence_pass",
+    "representative_private_pilot_pass",
+    "file_git_disable_rebuild_pass",
+    "windows_ci_pass",
+    "linux_ci_pass",
+    "repository_validation_pass",
+    "privacy_current_and_history_pass",
+    "official_plugin_validator_pass",
+    "all_skill_quick_validators_pass",
+    "independent_release_qa_pass",
+    "rollback_evidence_pass"
+  ],
+  "release_check_envelope_schema_version": "opc-v0.2-release-check-envelope-v1",
+  "status_policy": {
+    "missing_private_pilot": "blocked",
+    "synthetic_cannot_substitute_for_private": true,
+    "template_cannot_substitute_for_private": true,
+    "unknown_or_missing_gate": "blocked",
+    "release_ready_requires_all_gates": true
+  },
+  "claims": {
+    "causal_claim_allowed": false,
+    "generalization_claim_allowed": false,
+    "autonomous_self_improvement_claim_allowed": false,
+    "required_qualifier": "association/evidence only"
+  },
+  "forbidden_public_content": [
+    "raw_chat",
+    "raw_prompt",
+    "hook_payload",
+    "tool_payload",
+    "credentials",
+    "session_id",
+    "turn_id",
+    "thread_id",
+    "user_home_path",
+    "private_task_body",
+    "private_artifact_body"
+  ]
+}

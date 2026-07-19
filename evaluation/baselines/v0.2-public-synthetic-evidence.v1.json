@@ -1,0 +1,140 @@
+{
+  "schema_version": "opc-v0.2-public-release-evidence-v1",
+  "contract_version": "opc-v0.2-release-contract-v1",
+  "contract_sha256": "c716a11790a1f9f7e83b1b299ed0b63f787a9151a72b44cf5e6216e682d59479",
+  "mode": "public-synthetic",
+  "delivery_artifacts": [
+    {
+      "issue": 2,
+      "path": "docs/installation-and-distribution.md",
+      "sha256": "2be8162f5dfa6803b84b23f563b7014a3beaba3808a8820bec58645148430e6e"
+    },
+    {
+      "issue": 3,
+      "path": "docs/installed-lifecycle-acceptance.md",
+      "sha256": "85ecfca5c8ba8e7a7ca77a73fe6a36f49703050912660f2592de29d4b54bf4ca"
+    },
+    {
+      "issue": 4,
+      "path": "evaluation/contracts/baseline-contract.v1.json",
+      "sha256": "f7eda22695e25f91f15031d6a94d0183e399fc3b52b34a21130b7f567180444d"
+    },
+    {
+      "issue": 5,
+      "path": "plugins/codex-opc-team/assets/feedback/structured-feedback-contract.v1.json",
+      "sha256": "6fb3980a8e29120599a5c3e59c50c1c010d885f41717535d33e489a1e07293d4"
+    },
+    {
+      "issue": 6,
+      "path": "plugins/codex-opc-team/assets/evaluation/shadow-evaluation-contract.v1.json",
+      "sha256": "d63bb2cc4ca9f4d545810f83256856f9e904e765de4bd591945df42bc9992d0d"
+    },
+    {
+      "issue": 7,
+      "path": "plugins/codex-opc-team/assets/knowledge/knowledge-governance-contract.v1.json",
+      "sha256": "804d1c471831d815c0072f70576486f29d14178b49e4ed2cea2b48990b6bc178"
+    },
+    {
+      "issue": 1,
+      "path": "plugins/codex-opc-team/assets/context/hierarchical-context-contract.v1.json",
+      "sha256": "03202407d9179619f5547930776fbf8c3f207b84cddea9f6a417712a7a39caa9"
+    },
+    {
+      "issue": 8,
+      "path": "plugins/codex-opc-team/assets/lineage/knowledge-lineage-contract.v1.json",
+      "sha256": "8d5b3f15b43428486ae196056dc046c866bb3065a6fb45715e9c23427135b988"
+    },
+    {
+      "issue": 9,
+      "path": "plugins/codex-opc-team/assets/evolution/capability-evolution-contract.v1.json",
+      "sha256": "16ec183ced64c553257443a1f86ed8c2465adee6632efeb114d5b62a8ab876ee"
+    }
+  ],
+  "executed_scenarios": [
+    {
+      "scenario": "context_packet",
+      "test_id": "tests.unit.test_opc_hierarchical.HierarchicalRecallTests.test_hierarchical_packet_has_canonical_l2_and_trace_has_no_body",
+      "status": "pass"
+    },
+    {
+      "scenario": "structured_feedback",
+      "test_id": "tests.unit.test_opc_feedback.StructuredFeedbackTests.test_synthetic_pass_fail_partial_and_unknown_end_to_end",
+      "status": "pass"
+    },
+    {
+      "scenario": "shadow_evaluation",
+      "test_id": "tests.unit.test_opc_shadow.ShadowEvaluationTests.test_beneficial_candidate_is_only_recommended_for_separate_curation",
+      "status": "pass"
+    },
+    {
+      "scenario": "conflict_governance",
+      "test_id": "tests.unit.test_opc_governance.KnowledgeGovernanceTests.test_unresolved_conflict_withholds_both_bodies_and_preserves_citations",
+      "status": "pass"
+    },
+    {
+      "scenario": "knowledge_lineage",
+      "test_id": "tests.unit.test_opc_lineage.KnowledgeLineageTests.test_recalled_but_unused_and_all_terminal_states_across_roles_steps",
+      "status": "pass"
+    },
+    {
+      "scenario": "capability_evolution",
+      "test_id": "tests.unit.test_opc_evolution.CapabilityEvolutionTests.test_promotion_confirm_observe_and_rollback_preserve_history",
+      "status": "pass"
+    },
+    {
+      "scenario": "provider_degradation",
+      "test_id": "tests.unit.test_opc_hierarchical.HierarchicalRecallTests.test_provider_failure_timeout_and_disagreement_do_not_block",
+      "status": "pass"
+    },
+    {
+      "scenario": "provider_delete_rebuild",
+      "test_id": "tests.unit.test_opc_hierarchical.HierarchicalRecallTests.test_delete_and_rebuild_require_exact_tokens",
+      "status": "pass"
+    }
+  ],
+  "versioned_results": {
+    "file_git_baseline": {
+      "sha256": "be26bee4ffd4e73bef3ba024d337dee7fdc43f35dff434727fb223386cfb9137",
+      "task_count": 6,
+      "scope_leakage_acceptances": 0,
+      "stale_obsolete_acceptances": 0
+    },
+    "hierarchical_context": {
+      "sha256": "085099e37599d9252c16d56d13b8f5be1b6fe12df21331e19a99f9d430f5520a",
+      "query_count": 5,
+      "flat_precision_at_5": 0.2,
+      "treatment_precision_at_5": 1.0,
+      "flat_canonical_recall_at_5": 1.0,
+      "treatment_canonical_recall_at_5": 1.0,
+      "flat_median_tokens": 661,
+      "treatment_median_tokens": 107,
+      "latency_artifact_sha256": "8643e6fc88f50d51c074a7f68cd4804ec0da1429870cfae35dccf28774d4c392",
+      "scope_leakage_acceptances": 0,
+      "stale_obsolete_acceptances": 0
+    }
+  },
+  "authority_and_fallback": {
+    "file_git_authoritative": true,
+    "optional_provider_disabled_core_pass": true,
+    "derived_index_delete_rebuild_pass": true
+  },
+  "public_evidence_status": "pass",
+  "release_status": "blocked",
+  "release_blockers": [
+    "representative_private_3_to_5_task_pilot_required",
+    "exact_release_commit_gate_attestation_required"
+  ],
+  "measured_scope": "public synthetic fixtures only",
+  "inference": "the implemented contracts interoperate under the named synthetic tests",
+  "known_limitations": [
+    "no representative private pilot result is committed or implied",
+    "wall-clock latency is environment-dependent",
+    "one synthetic suite is not statistically general"
+  ],
+  "non_claims": [
+    "no causal attribution",
+    "no autonomous self-improvement",
+    "no generalization beyond the fixtures",
+    "association/evidence only"
+  ]
+}

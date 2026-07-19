@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:evaluation:v0.2-release-gates:v1",
+  "title": "OPC v0.2 exact release commit gate attestation",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "release_commit", "private_pilot_sha256", "checks"],
+  "properties": {
+    "schema_version": {"const": "opc-v0.2-release-gates-v1"},
+    "contract_version": {"const": "opc-v0.2-release-contract-v1"},
+    "release_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "private_pilot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "checks": {
+      "type": "object",
+      "required": [
+        "windows_ci",
+        "linux_ci",
+        "repository_validation",
+        "privacy_current_and_history",
+        "official_plugin_validator",
+        "all_skill_quick_validators",
+        "independent_release_qa",
+        "rollback_evidence"
+      ],
+      "properties": {
+        "windows_ci": {"$ref": "#/$defs/check"},
+        "linux_ci": {"$ref": "#/$defs/check"},
+        "repository_validation": {"$ref": "#/$defs/check"},
+        "privacy_current_and_history": {"$ref": "#/$defs/check"},
+        "official_plugin_validator": {"$ref": "#/$defs/check"},
+        "all_skill_quick_validators": {"$ref": "#/$defs/check"},
+        "independent_release_qa": {"$ref": "#/$defs/independentCheck"},
+        "rollback_evidence": {"$ref": "#/$defs/check"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "evidenceRef": {
+      "type": "object",
+      "required": ["ref", "sha256"],
+      "properties": {
+        "ref": {"type": "string", "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))evidence/[A-Za-z0-9._/-]{1,220}$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "check": {
+      "type": "object",
+      "required": ["status", "evidence"],
+      "properties": {
+        "status": {"const": "pass"},
+        "evidence": {"$ref": "#/$defs/evidenceRef"}
+      },
+      "additionalProperties": false
+    },
+    "independentCheck": {
+      "type": "object",
+      "required": ["status", "independent_from_implementer", "evidence"],
+      "properties": {
+        "status": {"const": "pass"},
+        "independent_from_implementer": {"const": true},
+        "evidence": {"$ref": "#/$defs/evidenceRef"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

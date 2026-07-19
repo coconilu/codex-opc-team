@@ -67,6 +67,8 @@ Optional Mem0 切片必须在安装依赖前从 `RUNNER_TEMP` 初始化 `MEM0_DI
 
 能力进化专项必须在 Windows/Linux CI 覆盖 beneficial、neutral、harmful、over-scoped、failed/timeout/provider-unavailable pilot 与 rollback；control/candidate 必须使用同一 exact evaluation contract，并并列检查质量、安全、经理介入、context cost、latency 和 confounders；每个 arm 必须绑定 exact capability、knowledge versions 与 lineage ref。测试必须证明 pilot/promotion 各自缺少 manager、independent QA 或 Shadow 任一 evidence 即阻断；privacy/scope/regression/missing evidence 均不得 positive；非法状态跳转、stale revision、base CAS、HEAD/worktree drift、candidate 多路径 commit、非 allowlisted target、hardlink/symlink/reparse、project/`.opc`/evolution/target parent replacement 均 fail closed。Preview 零写入，apply 只产生一个 unstaged path；`KeyboardInterrupt`/`SystemExit` 或 private record 失败必须恢复 target，不得删除用户预置同名/相似 transaction 文件；恢复本身失败必须显式报告且不得前进 private record。Schema/runtime/renderer/validator 对状态、refs、metrics、数值和大小上限保持一致。旧 v0.1 asset 继续显示 `unversioned-v0.1`，migration preview 重复执行同 token、零写入；promotion/rollback 不得 stage、commit、push、merge、修改全局 Codex 配置或删除 approved knowledge，报告固定为 `association/evidence only`。
 
+v0.2 发布级验证另执行 `python scripts/v0_2_release_evidence.py verify-public`。Public PASS 只表示命名 synthetic scenarios、baseline 和已提交机器结果可复现，runner 仍必须输出 release `BLOCKED`，直到真实私有 3–5 task paired pilot 与 exact clean release commit gates 同时通过。Private aggregate 必须可由 task count 对应的正数样本实现，所有 quality 指标按版本化方向比较，至少一项改善且无回退；typed evidence envelope 绑定 pilot core/decision/safety，release envelope 绑定 private summary SHA-256/exact HEAD/check kind。ref traversal、double separator、反斜杠、symlink/reparse、hardlink、错 subject、旧 Hash 或任意未知字段都 fail closed。完整流程见 [v0.2 发布就绪度](release-readiness-v0.2.0.md)。
+
 ## 6. Hook 隐私测试
 
 至少包含以下自动化用例：
@@ -129,6 +131,8 @@ sequenceDiagram
 G1–G7 未全部通过不得创建稳定 Release；G8 在发布动作中完成。
 
 G5/G7 的发布证据必须使用两个不同的固定 Ref；本地路径对同一版本执行的重装只证明包生命周期与幂等性，不证明版本回滚。候选标签尚未存在时，应把固定标签回滚 Gate 标记为待发布执行，不能用当前工作区结果替代。
+
+对 v0.2，G1–G8 之外还必须持有 `opc-v0.2-release-verdict-v1`：它只在 public synthetic、代表性 private pilot、File/Git disable/rebuild、Windows/Linux、当前与历史 privacy、官方 Plugin Validator、全部 Skill quick validators、独立 QA 和 rollback 全部绑定同一 exact clean release commit 后才为 `ready`。缺一项就是 `BLOCKED`，不能把 CI 分支结果、公开模板或 synthetic 数据改名为私有证据。
 
 ## 10. 验收证据格式
 

@@ -1,0 +1,22 @@
+{
+  "$instructions": "Copy outside this public repository. Remove this field and replace every null only after a real approved private 3-5 task paired pilot. This template is intentionally invalid and can never satisfy the release gate.",
+  "schema_version": "TEMPLATE-NOT-EVIDENCE",
+  "contract_version": "opc-v0.2-release-contract-v1",
+  "pilot_id": null,
+  "evidence_class": null,
+  "task_count": null,
+  "task_selection": {
+    "fixed_before_execution": null,
+    "risk_class_count": null,
+    "work_type_count": null
+  },
+  "arms": {
+    "same_evaluation_contract": "opc-evaluation-contract-v1",
+    "control": {"counts": null, "context_tokens": null, "latency_ms": null},
+    "treatment": {"counts": null, "context_tokens": null, "latency_ms": null}
+  },
+  "capability_coverage": null,
+  "provider_fallback": null,
+  "attestations": null,
+  "confounders": null
+}

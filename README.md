@@ -40,6 +40,8 @@ flowchart LR
 
 `v0.1.1-rc.1` is the public release candidate for stricter runtime-data isolation and installed-plugin lifecycle acceptance. It is pre-release software, not the stable channel. Reviewers and release testers may install the immutable candidate snapshot with `codex plugin marketplace add coconilu/codex-opc-team --ref v0.1.1-rc.1`; production users should remain on `v0.1.0` until the stable release Gate passes. See the [release-candidate notes](docs/release-notes-v0.1.1-rc.1.en.md).
 
+The v0.2 context, feedback, evaluation, conflict, lineage, and governed capability-evolution components are implemented on `main`, and their public synthetic release evidence passes. **v0.2.0 is not release-ready:** the required representative private 3–5 task pilot and exact-release-commit gates do not yet exist. Public fixtures or templates cannot substitute for that evidence. See [v0.2 release readiness](docs/release-readiness-v0.2.0.md).
+
 ## Installation
 
 Prerequisites: Codex CLI, Git, and Python 3.10 or newer. Mem0 is not required.
@@ -88,6 +90,7 @@ Capability evolution is an evidence-gated private lifecycle for versioned roles,
 | [Hierarchical recall](docs/hierarchical-recall.md) | Private L0/L1 navigation, canonical L2 validation, ContextPacket/RecallTrace, and flat comparison |
 | [Knowledge lineage](docs/knowledge-lineage.md) | Private role/step knowledge states, portable outcome links, current-HEAD revalidation, and non-causal reports |
 | [Capability evolution](docs/capability-evolution.md) | Versioned role/Skill/policy pilots, evidence gates, one-path Git handoff, observation, and rollback |
+| [v0.2 release readiness](docs/release-readiness-v0.2.0.md) | Public synthetic evidence, private 3–5 task pilot protocol, exact-commit gates, blockers, and non-claims |
 | [Roadmap](docs/roadmap.md) | Planned delivery stages |
 
 Architecture decisions live under [`docs/adr`](docs/adr/README.md).

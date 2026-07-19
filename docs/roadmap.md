@@ -10,7 +10,7 @@
 | R1 v0.1 核心闭环 | 完成 | Codex 原生团队、File/Git 记忆、独立 QA |
 | R2 v0.1 可选 Mem0 | 完成 | 可引导安装、可降级、可卸载的 OSS Adapter |
 | R3 v0.1 发布 | 完成 | Windows/Linux CI、固定标签安装和 Release |
-| R4 反馈成长增强 | 进行中 | 评估、冲突治理、知识链路与受控能力版本已实现 v1；导出/审计 UI 待定 |
+| R4 反馈成长增强 | 发布验证阻断 | 组件与 public synthetic evidence 已完成；真实 private 3–5 task pilot 和 exact-commit Gate 尚缺 |
 | R5 生态与企业能力 | 候选 | 角色包、策略层、更多后端和官方分发探索 |
 
 ## R0：开源基础与安全切换
@@ -67,14 +67,15 @@
 
 ## R4：反馈与成长增强
 
-候选方向：
+已交付组件：
 
 - 经验候选的版本化重放、只读 Shadow Evaluation 和证据派生置信度（已实现 v1；不自动晋升）；
 - 跨项目冲突检测、适用范围推断和失效提示；
 - 分层 File recall、严格 ContextPacket/RecallTrace 与预算评测（v1 已实现；公开 synthetic superior 只代表该 fixture，不改变 authority）；
 - 经理反馈与真实产品指标的结构化关联，以及角色/步骤知识使用链路（v1 已实现；仅 association/evidence，不证明因果）；
 - 角色、Skill 与组织策略的版本化候选、同合同 paired pilot、经理/独立 QA 门禁、单路径 Git 晋升、观察与回滚（v1 已实现；不自动 stage/commit，不改全局 Codex 配置）；
-- 知识导出、合并和审计 UI。
+
+v0.2 release-level contract、公开 synthetic runner 和严格私有 aggregate/envelope Gate 已实现，当前状态明确为 `BLOCKED`。退出 R4 还必须完成[代表性私有 3–5 task pilot 与 exact release commit 验证](release-readiness-v0.2.0.md)；公开 fixture、模板、Developer 自测或单项 token/latency 改善都不能替代。知识导出、合并和审计 UI 仍是后续候选，不属于 v0.2 发布阻断项。
 
 这些能力仍遵守“不得自动晋升”的基础决策。任何自动化批准提议都需要新的 ADR 和安全评估。
 

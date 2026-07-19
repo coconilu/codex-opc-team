@@ -31,6 +31,8 @@ jobs:
         run: python scripts/evaluation_baseline.py verify
       - name: Verify hierarchical recall evaluation
         run: python scripts/hierarchical_evaluation.py verify
+      - name: Verify v0.2 public release evidence
+        run: python scripts/v0_2_release_evidence.py verify-public
       - name: Run tests without Mem0
         run: python -m unittest discover -s tests -p "test_*.py" -v
 

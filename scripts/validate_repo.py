@@ -1208,6 +1208,179 @@ def validate_capability_evolution_contract() -> None:
     )
 
 
+def validate_v02_release_evidence_contract() -> None:
+    """Bind public replay, private pilot, exact-commit gates, schemas, ADR, and docs."""
+    contract_path = ROOT / "evaluation" / "contracts" / "v0.2-release-contract.v1.json"
+    private_schema_path = ROOT / "evaluation" / "schemas" / "v0.2-private-pilot-aggregate.v1.schema.json"
+    gates_schema_path = ROOT / "evaluation" / "schemas" / "v0.2-release-gates.v1.schema.json"
+    pilot_envelope_path = ROOT / "evaluation" / "schemas" / "v0.2-private-evidence-envelope.v1.schema.json"
+    release_envelope_path = ROOT / "evaluation" / "schemas" / "v0.2-release-check-envelope.v1.schema.json"
+    pilot_template_path = ROOT / "evaluation" / "private-pilot-v0.2.template.json"
+    gates_template_path = ROOT / "evaluation" / "release-gates-v0.2.template.json"
+    result_path = ROOT / "evaluation" / "baselines" / "v0.2-public-synthetic-evidence.v1.json"
+    report_path = ROOT / "evaluation" / "baselines" / "v0.2-public-synthetic-evidence.v1.md"
+    runtime_path = ROOT / "scripts" / "v0_2_release_evidence.py"
+    guide_path = ROOT / "docs" / "release-readiness-v0.2.0.md"
+    adr_path = ROOT / "docs" / "adr" / "0015-release-evidence-separates-public-fixtures-and-private-pilots.md"
+    workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
+    for path in (
+        contract_path, private_schema_path, gates_schema_path, pilot_envelope_path,
+        release_envelope_path, pilot_template_path, gates_template_path, result_path,
+        report_path, runtime_path, guide_path, adr_path, workflow_path,
+    ):
+        require(path.is_file(), f"missing v0.2 release evidence artifact: {path}")
+
+    contract = load_json(contract_path)
+    require(
+        contract.get("contract_version") == "opc-v0.2-release-contract-v1"
+        and contract.get("release") == "v0.2.0"
+        and contract.get("authority") == "file-git-only",
+        "v0.2 release identity or authority drifted",
+    )
+    private_policy = contract.get("private_pilot") or {}
+    status = contract.get("status_policy") or {}
+    claims = contract.get("claims") or {}
+    require(
+        private_policy.get("schema_version") == "opc-v0.2-private-pilot-aggregate-v1"
+        and private_policy.get("evidence_envelope_schema_version")
+        == "opc-v0.2-private-evidence-envelope-v1"
+        and private_policy.get("task_count") == {"minimum": 3, "maximum": 5}
+        and private_policy.get("same_evaluation_contract_for_arms") is True
+        and private_policy.get("quality_rule")
+        == "at-least-one-strict-improvement-and-no-quality-regression"
+        and private_policy.get("raw_data_boundary") == "approved-private-project-only"
+        and private_policy.get("public_export") == "none",
+        "v0.2 private pilot contract is incomplete",
+    )
+    require(
+        contract.get("release_check_envelope_schema_version")
+        == "opc-v0.2-release-check-envelope-v1"
+        and status.get("missing_private_pilot") == "blocked"
+        and status.get("synthetic_cannot_substitute_for_private") is True
+        and status.get("template_cannot_substitute_for_private") is True
+        and status.get("unknown_or_missing_gate") == "blocked"
+        and status.get("release_ready_requires_all_gates") is True,
+        "v0.2 release status must fail closed",
+    )
+    require(
+        claims.get("causal_claim_allowed") is False
+        and claims.get("generalization_claim_allowed") is False
+        and claims.get("autonomous_self_improvement_claim_allowed") is False
+        and claims.get("required_qualifier") == "association/evidence only",
+        "v0.2 release non-claim boundary drifted",
+    )
+    require(
+        {
+            "public_synthetic_evidence_pass", "representative_private_pilot_pass",
+            "file_git_disable_rebuild_pass", "windows_ci_pass", "linux_ci_pass",
+            "repository_validation_pass", "privacy_current_and_history_pass",
+            "official_plugin_validator_pass", "all_skill_quick_validators_pass",
+            "independent_release_qa_pass", "rollback_evidence_pass",
+        }
+        == set(contract.get("release_gates", [])),
+        "v0.2 release gate set drifted",
+    )
+
+    schemas = {
+        "private": load_json(private_schema_path),
+        "gates": load_json(gates_schema_path),
+        "pilot envelope": load_json(pilot_envelope_path),
+        "release envelope": load_json(release_envelope_path),
+    }
+    for name, schema in schemas.items():
+        require(
+            schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema"
+            and schema.get("additionalProperties") is False,
+            f"v0.2 {name} schema must be strict Draft 2020-12",
+        )
+        for definition_name, definition in schema.get("$defs", {}).items():
+            if definition.get("type") == "object":
+                require(
+                    definition.get("additionalProperties") is False,
+                    f"v0.2 {name} schema {definition_name} must reject extra fields",
+                )
+    for name in ("pilot envelope", "release envelope"):
+        envelope = schemas[name]
+        require(
+            {"source_ref", "source_sha256"} <= set(envelope.get("required", []))
+            and "?!.*//" in envelope.get("properties", {}).get("source_ref", {}).get("pattern", "")
+            and "\\.\\." in envelope.get("properties", {}).get("source_ref", {}).get("pattern", ""),
+            f"v0.2 {name} must bind a traversal-safe source artifact",
+        )
+    private_schema = schemas["private"]
+    gates_schema = schemas["gates"]
+    require(
+        private_schema.get("properties", {}).get("schema_version", {}).get("const")
+        == "opc-v0.2-private-pilot-aggregate-v1"
+        and private_schema.get("properties", {}).get("task_count", {}).get("minimum") == 3
+        and private_schema.get("properties", {}).get("task_count", {}).get("maximum") == 5
+        and private_schema.get("$defs", {}).get("counts", {}).get("properties", {})
+        .get("scope_leakage_acceptances", {}).get("const") == 0
+        and private_schema.get("$defs", {}).get("counts", {}).get("properties", {})
+        .get("stale_obsolete_acceptances", {}).get("const") == 0
+        and private_schema.get("$defs", {}).get("counts", {}).get("properties", {})
+        .get("privacy_failures", {}).get("const") == 0,
+        "v0.2 private schema task or safety bounds drifted",
+    )
+    for pattern in (
+        private_schema.get("$defs", {}).get("evidenceRef", {}).get("properties", {})
+        .get("ref", {}).get("pattern", ""),
+        gates_schema.get("$defs", {}).get("evidenceRef", {}).get("properties", {})
+        .get("ref", {}).get("pattern", ""),
+    ):
+        require(
+            "?!.*//" in pattern and "\\.\\." in pattern and "\\\\" not in pattern,
+            "v0.2 evidence ref schema must reject traversal and double separators",
+        )
+    require(
+        load_json(pilot_template_path).get("schema_version") == "TEMPLATE-NOT-EVIDENCE"
+        and load_json(gates_template_path).get("schema_version") == "TEMPLATE-NOT-EVIDENCE",
+        "v0.2 public templates must remain intentionally invalid",
+    )
+
+    spec = importlib.util.spec_from_file_location("v0_2_release_contract", runtime_path)
+    require(spec is not None and spec.loader is not None, "cannot load v0.2 release runner")
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    require(
+        runtime.CONTRACT_VERSION == contract["contract_version"]
+        and runtime.PRIVATE_VERSION == private_policy["schema_version"]
+        and runtime.GATES_VERSION == "opc-v0.2-release-gates-v1"
+        and runtime.PILOT_EVIDENCE_VERSION
+        == private_policy["evidence_envelope_schema_version"]
+        and runtime.RELEASE_CHECK_VERSION
+        == contract["release_check_envelope_schema_version"],
+        "v0.2 schema/runtime versions drifted",
+    )
+    public = runtime.build_public_evidence(execute=False)
+    require(
+        runtime._json_bytes(public) == result_path.read_bytes()
+        and runtime._public_report(public) == report_path.read_bytes(),
+        "v0.2 committed public release evidence drifted",
+    )
+    require(
+        public.get("public_evidence_status") == "pass"
+        and public.get("release_status") == "blocked"
+        and "representative_private_3_to_5_task_pilot_required"
+        in public.get("release_blockers", [])
+        and "association/evidence only" in public.get("non_claims", []),
+        "v0.2 public PASS must not be represented as release ready",
+    )
+    guide = guide_path.read_text(encoding="utf-8")
+    adr = adr_path.read_text(encoding="utf-8")
+    workflow = workflow_path.read_text(encoding="utf-8")
+    require(
+        "BLOCKED" in guide
+        and "association/evidence only" in guide
+        and "private-pilot" in guide
+        and "exact clean release commit" in guide
+        and "synthetic" in adr
+        and "private" in adr
+        and "python scripts/v0_2_release_evidence.py verify-public" in workflow,
+        "v0.2 docs or cross-platform public CI gate is incomplete",
+    )
+
+
 def main() -> int:
     checks = [
         validate_manifest,
@@ -1225,6 +1398,7 @@ def main() -> int:
         validate_hierarchical_recall_contract,
         validate_knowledge_lineage_contract,
         validate_capability_evolution_contract,
+        validate_v02_release_evidence_contract,
         validate_markdown_links,
     ]
     try:
