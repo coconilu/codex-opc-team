@@ -1,0 +1,172 @@
+{
+  "aggregate": {
+    "flat": {
+      "canonical_leaf_recall_at_5": 1.0,
+      "injected_tokens_median": 661,
+      "injected_tokens_per_query": [
+        667,
+        661,
+        655,
+        661,
+        0
+      ],
+      "latency_p95_ms": 22223.0894,
+      "support_precision_at_5": 0.2
+    },
+    "hierarchical": {
+      "canonical_leaf_recall_at_5": 1.0,
+      "injected_tokens_median": 107,
+      "injected_tokens_per_query": [
+        109,
+        107,
+        107,
+        107,
+        0
+      ],
+      "latency_p95_ms": 5660.6363,
+      "support_precision_at_5": 1.0
+    },
+    "safety": {
+      "scope_leakage_acceptances": 0,
+      "stale_obsolete_acceptances": 0
+    }
+  },
+  "cases": [
+    {
+      "flat": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 667,
+        "leaf_ids": [
+          "exp-syn-hier-alpha-target",
+          "exp-syn-hier-alpha-decoy-a",
+          "exp-syn-hier-alpha-decoy-b",
+          "exp-syn-hier-alpha-decoy-c",
+          "exp-syn-hier-alpha-decoy-d"
+        ],
+        "support_precision_at_5": 0.2
+      },
+      "hierarchical": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 109,
+        "leaf_ids": [
+          "exp-syn-hier-alpha-target"
+        ],
+        "support_precision_at_5": 1.0
+      },
+      "query_id": "query-alpha",
+      "support_ids": [
+        "exp-syn-hier-alpha-target"
+      ]
+    },
+    {
+      "flat": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 661,
+        "leaf_ids": [
+          "exp-syn-hier-beta-target",
+          "exp-syn-hier-beta-decoy-a",
+          "exp-syn-hier-beta-decoy-b",
+          "exp-syn-hier-beta-decoy-c",
+          "exp-syn-hier-beta-decoy-d"
+        ],
+        "support_precision_at_5": 0.2
+      },
+      "hierarchical": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 107,
+        "leaf_ids": [
+          "exp-syn-hier-beta-target"
+        ],
+        "support_precision_at_5": 1.0
+      },
+      "query_id": "query-beta",
+      "support_ids": [
+        "exp-syn-hier-beta-target"
+      ]
+    },
+    {
+      "flat": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 655,
+        "leaf_ids": [
+          "exp-syn-hier-global-target",
+          "exp-syn-hier-global-decoy-a",
+          "exp-syn-hier-global-decoy-b",
+          "exp-syn-hier-global-decoy-c",
+          "exp-syn-hier-global-decoy-d"
+        ],
+        "support_precision_at_5": 0.2
+      },
+      "hierarchical": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 107,
+        "leaf_ids": [
+          "exp-syn-hier-global-target"
+        ],
+        "support_precision_at_5": 1.0
+      },
+      "query_id": "query-global-cross-directory",
+      "support_ids": [
+        "exp-syn-hier-global-target"
+      ]
+    },
+    {
+      "flat": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 661,
+        "leaf_ids": [
+          "exp-syn-hier-renew-target",
+          "exp-syn-hier-renew-decoy-a",
+          "exp-syn-hier-renew-decoy-b",
+          "exp-syn-hier-renew-decoy-c",
+          "exp-syn-hier-renew-decoy-d"
+        ],
+        "support_precision_at_5": 0.2
+      },
+      "hierarchical": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 107,
+        "leaf_ids": [
+          "exp-syn-hier-renew-target"
+        ],
+        "support_precision_at_5": 1.0
+      },
+      "query_id": "query-renew-relations",
+      "support_ids": [
+        "exp-syn-hier-renew-target"
+      ]
+    },
+    {
+      "flat": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 0,
+        "leaf_ids": [],
+        "support_precision_at_5": 1.0
+      },
+      "hierarchical": {
+        "canonical_leaf_recall_at_5": 1.0,
+        "injected_tokens": 0,
+        "leaf_ids": [],
+        "support_precision_at_5": 1.0
+      },
+      "query_id": "query-conflict",
+      "support_ids": []
+    }
+  ],
+  "claim": "hierarchical recall is superior on this public synthetic fixture",
+  "comparison_rule": "precision_not_lower_and_median_tokens_reduced_at_least_20_percent",
+  "comparison_status": "superior",
+  "contract_sha256": "6b6edd7c51605278f8360db491356ddc71bad3f8633a5e7a7af8194c9a82bfa6",
+  "contract_version": "opc-hierarchical-recall-evaluation-v1",
+  "dataset_id": "dataset-syn-hierarchical-recall-v1",
+  "degradation_probes": {
+    "missing_index": "flat-file-git-fallback",
+    "provider_scenarios": "covered-by-runtime-contract-tests",
+    "stale_head": "flat-file-git-fallback"
+  },
+  "fixture_sha256": "79844ed1a11036ea0aac0cb355d26a528b1a5259f28292179e4a3e579b74030d",
+  "latency_artifact": "hierarchical-recall-latency.v1.json",
+  "latency_reproducibility": "nondeterministic-versioned-separate-artifact",
+  "latency_sha256": "8643e6fc88f50d51c074a7f68cd4804ec0da1429870cfae35dccf28774d4c392",
+  "schema_version": "opc-hierarchical-evaluation-result-v1"
+}

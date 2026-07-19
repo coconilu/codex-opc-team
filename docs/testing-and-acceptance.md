@@ -49,9 +49,15 @@ Optional Mem0 切片必须在安装依赖前从 `RUNNER_TEMP` 初始化 `MEM0_DI
 | 同名冲突条目 | Context Packet 标识冲突，不静默选一个 |
 | 卸载 Mem0 | File/Git 内容、历史和基线召回不变 |
 
+分层 File recall 另需覆盖：global/多项目隔离、role/type、obsolete、未解决冲突、stale index、index delete/rebuild、无 Mem0、disabled/provider timeout/error/disagreement、预算截断、canonical citations、omission、trace 无正文、L0/L1 不作为事实、导航与注入之间 canonical 变化、symlink/junction/reparse/hardlink、parent replacement/rollback、超限文件、重复 ID、strict schema/runtime parity 与 non-claim 阈值。
+
 ## 5. 评测基线
 
 当前 File/Git、无成长增强工作流使用[版本化评测基线](evaluation-baseline.md)。公开纯合成 fixture 会在临时独立 Git 仓库中实际驱动 `FileGitBackend.query(...)` 与 provenance 校验，输出机器 JSON 和由其确定性生成的 Markdown；Windows/Linux CI 必须逐字节复现这两个产物。
+
+分层比较另执行 `python scripts/hierarchical_evaluation.py verify`。它在同一新 fixture 上运行当前 flat 与 hierarchical，实现 result/report 逐字节复现；实际 wall-clock latency 保存在单独 versioned artifact，verify 严格校验其有限数值和可实现聚合，但不伪装为跨机器可重现测量。
+
+分层专项还必须覆盖：derived relation 删除/替换/伪造不释放受治理正文；metadata snapshot 封锁完整 record parser、不得将 content sentinel 传给 `json.loads`，且只有最终 L2 调用 `read_authoritative(...)`；flat/hierarchical 在 chain、branch、diamond、mixed、inverse 与 ID/file/edge 排列下结果一致；mkdir/open/write/fsync/replace 每个发布故障点恢复调用前 tree；Packet/Trace 单体与联合 schema/runtime 损坏拒绝；evaluation case/aggregate/hash/threshold/status/claim 损坏在 renderer 前拒绝。
 
 真实项目试点固定为 3–5 tasks。原始源码、对话、路径、运行标识、组织知识和逐任务结果留在私有项目证据边界，不进入公开仓库或 canonical knowledge；跨边界只允许严格 schema 的整体聚合。scope leakage 与 stale/obsolete acceptance 为零容忍，缺字段、零分母或不可验证结果不得记为 PASS。质量、context tokens 和 latency 必须并列报告，任何单项都不足以证明产品改进。
 

@@ -71,7 +71,7 @@
 
 - 经验候选的版本化重放、只读 Shadow Evaluation 和证据派生置信度（已实现 v1；不自动晋升）；
 - 跨项目冲突检测、适用范围推断和失效提示；
-- Context Packet 的效果评估与预算优化；
+- 分层 File recall、严格 ContextPacket/RecallTrace 与预算评测（v1 已实现；公开 synthetic superior 只代表该 fixture，不改变 authority）；
 - 经理反馈与真实产品指标的结构化关联；
 - 知识导出、合并和审计 UI。
 

@@ -1,0 +1,36 @@
+{
+  "contract_version": "opc-hierarchical-recall-evaluation-v1",
+  "dataset_schema_version": "opc-hierarchical-synthetic-suite-v1",
+  "result_schema_version": "opc-hierarchical-evaluation-result-v1",
+  "baseline": "current-flat-file-git",
+  "treatment": "hierarchical-file-git",
+  "top_k": 5,
+  "metrics": [
+    "support_precision_at_5",
+    "canonical_leaf_recall_at_5",
+    "injected_tokens_median",
+    "injected_tokens_per_query",
+    "latency_p95_ms",
+    "scope_leakage_acceptances",
+    "stale_obsolete_acceptances"
+  ],
+  "safety_thresholds": {
+    "scope_leakage_acceptances": 0,
+    "stale_obsolete_acceptances": 0
+  },
+  "superiority_rule": {
+    "path_a": "precision_not_lower_and_median_tokens_reduced_at_least_20_percent",
+    "path_b": "median_tokens_not_higher_and_precision_improved_at_least_0.10",
+    "otherwise": "not_superior"
+  },
+  "numeric_policy": {
+    "strict_json": true,
+    "nan_or_infinity_rejected": true,
+    "impossible_aggregate_rejected": true
+  },
+  "reproducibility": {
+    "retrieval_golden_byte_reproducible": true,
+    "latency_measurement_nondeterministic": true,
+    "latency_artifact_versioned_and_separate": true
+  }
+}

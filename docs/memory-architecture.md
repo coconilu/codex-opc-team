@@ -98,7 +98,9 @@ ContextPacket
 └─ omitted_summary       因预算或敏感边界未注入的说明
 ```
 
-当前仍未发布独立 `ContextPacket` 类；`MemoryService.export_decision_context(...)` 输出治理后的 Markdown 子集，而 `query-context`/`FileGitBackend.query_context(...)` 提供版本化机器结果：`records`、不含正文的 `conflicts`、带 reason code/citation 的 `omissions` 和 `omitted_summary`。这些字段不是 Provider 的自由输出，必须由 File/Git authoritative pass 生成。
+`opc_hierarchical.py` 现已发布严格的 `opc-context-packet-v1` 机器产物：facts、decisions、experiences、procedures、canonical citations、不含冲突正文的 conflicts、显式 budget 与 omitted summary。配套 `opc-recall-trace-v1` 记录 root、expansion、discard/fallback、`canonical_reads`、final leaves 和 read/token cost，不记录正文或原始运行内容。两个产物还必须通过联合 validator 的 identity、citation、token/budget/read 交叉校验。原有 `MemoryService.export_decision_context(...)` 与 `query-context`/`FileGitBackend.query_context(...)` 继续作为兼容的 flat File/Git 表面。
+
+分层正常路径使用与 flat 相同的共享 #7 冻结关系图引擎，并在导航前/L2 前以不暴露正文的 canonical governance metadata snapshot 绑定 private derived metadata，再用 `opc://global` / `opc://projects/{project_id}` 的 L0/L1 导航，只读取少量最终 L2 canonical bodies。snapshot 为 provenance 可扫描底层 canonical bytes，但严格跳过 `content` 的对象构造：正文不进入 Python 字符串、评分、Trace 或 Token 上下文；只有最终 L2 的 `read_authoritative(...)` 才 materialize 正文。每个 L2 在注入前重复 exact HEAD/commit/hash/status/scope/sensitivity/applicability/relations 验证。L0/L1、虚拟树和索引都不可作为事实；缺失、非法、过期或 governance mismatch 时显式降级 flat File/Git。完整契约见[分层召回与 ContextPacket](hierarchical-recall.md)和 [ADR-0012](adr/0012-hierarchical-file-recall-context-packet.md)。
 
 hard filter 不参与排序权衡：作用域、状态、current HEAD、敏感授权、适用性和关系任一失败就排除。通过后才按文本相关度和稳定 ID 进行确定性排序；Provider rank 永远不参与 canonical 顺序。
 
@@ -131,6 +133,7 @@ stateDiagram-v2
 - 外部嵌入或模型服务必须由用户显式选择，并说明数据边界；
 - 公开仓库只有空白 Schema 和合成示例；
 - Mem0 索引目录、虚拟环境和配置不得进入插件包或用户项目 Git。
+- 分层 L0/L1 索引只进入显式 private `data_root/.opc/derived/hierarchical-recall-v1`；preview 零写，build/delete 绑定 exact token，且拒绝任何 Git worktree、canonical knowledge 或 plugin overlap。
 
 ## 10. 健康状态
 

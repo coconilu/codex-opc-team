@@ -88,3 +88,5 @@ Runner 要求 3–5 tasks、所有质量分母大于零、计数自洽，并对 
 ## 6. 比较与发布解释
 
 后续反馈、冲突治理或 Context Packet 实验必须复用同一 contract 和 fixture 版本；若改变指标定义，应发布新 contract/schema/baseline 版本，不能覆盖 v1。比较至少同时展示安全、质量、context cost 和 latency，并保留任务选择、顺序效应、学习效应和人工 oracle 偏差等限制。此基线只提供比较坐标，不自动批准知识、功能或 Release。
+
+分层实验发布独立的 `opc-hierarchical-recall-evaluation-v1`，并在同一新 fixture 上实际运行当前 flat `FileGitBackend.query_context(...)` 与 hierarchical treatment；它不覆盖本页 #4 baseline bytes。结果至少包含 precision@5、canonical leaf recall@5、每 query/median tokens、p95 latency、scope leakage 与 stale/obsolete acceptance。非确定性 wall-clock latency 使用单独 versioned artifact，golden verify 只在固定该 artifact 时逐字节复现 retrieval JSON/Markdown。详见[分层召回](hierarchical-recall.md)。

@@ -1,0 +1,95 @@
+{
+  "contract_version": "opc-hierarchical-context-contract-v1",
+  "index_version": "opc-hierarchical-index-v1",
+  "context_packet_version": "opc-context-packet-v1",
+  "recall_trace_version": "opc-recall-trace-v1",
+  "authority": "file-git-only",
+  "derived_data_authoritative": false,
+  "provider_authoritative": false,
+  "preview_writes": false,
+  "hard_filter_before_navigation": true,
+  "l2_revalidation_required": true,
+  "shared_relation_governance": true,
+  "canonical_governance_snapshot_required": true,
+  "canonical_content_materialization_l2_only": true,
+  "joint_packet_trace_validation": true,
+  "publish_failure_restores_pre_call_tree": true,
+  "virtual_namespaces": [
+    "opc://global/{knowledge_type}/{record_id}",
+    "opc://projects/{project_id}/{knowledge_type}/{record_id}"
+  ],
+  "node_contract": {
+    "L0": "approved canonical summary and bounded navigation metadata; never an injectable fact",
+    "L1": "deterministic child aggregation for navigation only; never an injectable fact",
+    "L2": "current-HEAD canonical File/Git bytes after repeated governance validation",
+    "single_parent": true,
+    "scope_is_explicit": true,
+    "parent_child_portable": true
+  },
+  "context_packet_fields": [
+    "facts",
+    "decisions",
+    "experiences",
+    "procedures",
+    "citations",
+    "conflicts",
+    "budget",
+    "omitted_summary"
+  ],
+  "recall_trace_fields": [
+    "root_selection",
+    "expansions",
+    "discards",
+    "fallbacks",
+    "final_leaves",
+    "canonical_reads",
+    "canonical_read_count",
+    "injected_token_cost"
+  ],
+  "trace_forbidden_content": [
+    "canonical_body",
+    "credentials",
+    "raw_chat",
+    "hook_payload",
+    "session_or_turn_id",
+    "user_home_path",
+    "unauthorized_private_knowledge"
+  ],
+  "hard_filter_order": [
+    "scope_and_project_id",
+    "approved_status",
+    "current_head_commit_and_content_hash",
+    "sensitivity_authorization",
+    "explicit_applicability",
+    "invalidation_and_supersession",
+    "unresolved_conflicts"
+  ],
+  "fallbacks": [
+    "missing_index_to_flat_file_git",
+    "stale_index_to_flat_file_git",
+    "invalid_index_to_flat_file_git",
+    "provider_disabled_to_file_hierarchy",
+    "provider_timeout_or_error_to_file_hierarchy",
+    "provider_disagreement_to_file_hierarchy"
+  ],
+  "derived_storage": {
+    "relative_to_explicit_private_data_root": ".opc/derived/hierarchical-recall-v1/index.json",
+    "git_ignored": true,
+    "deletable": true,
+    "rebuildable": true,
+    "canonical_write": false,
+    "provider_write": false,
+    "project_source_write": false,
+    "automatic_approval": false
+  },
+  "limits": {
+    "index_bytes": 16777216,
+    "records": 5000,
+    "canonical_reads": 64,
+    "budget_tokens": 200000,
+    "packet_items": 1000,
+    "trace_items": 10002,
+    "omitted_items": 20000,
+    "navigation_score": 1000000
+  }
+}

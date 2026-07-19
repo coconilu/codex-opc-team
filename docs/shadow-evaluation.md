@@ -33,6 +33,8 @@ flowchart LR
 
 Shadow contract 用版本和 SHA-256 绑定 `opc-evaluation-contract-v1`。仓库 validator 会从 #4 contract 重新计算 metric 分类并逐项比较；破坏性变化必须发布新版本，不能覆盖 v1。
 
+分层召回是另一个 consumer，不改变 Shadow 权限。Shadow 仍可只读 candidate 以生成证据；candidate、Shadow positive 或 derived L0/L1 都不能进入正式 ContextPacket。正式注入必须重新通过 `opc-knowledge-governance-v1` 并从 current-HEAD L2 回读。分层评测不得把 Shadow evidence 当成自动 promotion。
+
 ## 3. 输入与预检
 
 Replay 只保存候选引用，不复制候选正文：portable candidate ID、canonical 相对路径、exact current-HEAD commit 和内容 SHA-256。candidate 可使用受治理 runtime 支持的 Schema 1 或 Schema 2，但 Shadow 只评估候选证据，不消解关系、不授予 context 资格；正式召回仍必须通过 `opc-knowledge-governance-v1` 的完整 hard filter。每个 case 的 control/treatment 字段完全一致，唯一契约差异是 `candidate_applied=false/true`。两 arm 共享已版本化 engine/determinism/seed。

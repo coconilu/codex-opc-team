@@ -10,7 +10,7 @@ Manage recall without weakening the canonical File/Git knowledge boundary. Mem0 
 ## Establish the boundary
 
 1. Resolve the skill directory as the directory containing this `SKILL.md`, then resolve the plugin root as `<skill-dir>/../..`; never assume a machine-specific install path.
-2. Read `references/python-runtime.md`. Use base Python for the initial `status`, derive `data_root`, and select `<memory-python>` before every other memory command.
+2. Read `references/python-runtime.md` and `references/hierarchical-recall.md`. Use base Python for the initial `status`, derive `data_root`, and select `<memory-python>` before every other memory command.
 3. Use `<memory-python> "<plugin-root>/scripts/opc_memory.py"`. Run `--help` when the installed CLI version is uncertain.
 4. Resolve canonical knowledge from `--knowledge-root`, then `OPC_KNOWLEDGE_HOME`, then the CLI default.
 5. Resolve provider configuration, outbox, virtual environment, and rebuildable indexes from `--data-root`, then `OPC_MEMORY_DATA_HOME`, then `PLUGIN_DATA/opc-memory`.
