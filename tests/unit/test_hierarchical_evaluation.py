@@ -21,6 +21,7 @@ SPEC.loader.exec_module(hierarchical_evaluation)
 class HierarchicalEvaluationTests(unittest.TestCase):
     def test_committed_result_meets_safety_and_superiority_rule(self) -> None:
         result = json.loads(hierarchical_evaluation.RESULT.read_text(encoding="utf-8"))
+        hierarchical_evaluation.validate_result(result)
         self.assertEqual(result["comparison_status"], "superior")
         self.assertEqual(result["aggregate"]["safety"]["scope_leakage_acceptances"], 0)
         self.assertEqual(result["aggregate"]["safety"]["stale_obsolete_acceptances"], 0)
@@ -60,6 +61,39 @@ class HierarchicalEvaluationTests(unittest.TestCase):
         fixture["unexpected"] = True
         with self.assertRaises(hierarchical_evaluation.EvaluationError):
             hierarchical_evaluation._validate_fixture(fixture)
+
+    def test_result_and_renderer_reject_case_aggregate_hash_threshold_and_claim_corruption(self) -> None:
+        original = json.loads(hierarchical_evaluation.RESULT.read_text(encoding="utf-8"))
+        corruptions = []
+        value = json.loads(json.dumps(original))
+        value["cases"][0]["hierarchical"]["support_precision_at_5"] = -999
+        corruptions.append(value)
+        value = json.loads(json.dumps(original))
+        value["aggregate"]["hierarchical"]["injected_tokens_median"] += 1
+        corruptions.append(value)
+        for field in ("fixture_sha256", "contract_sha256", "latency_sha256"):
+            value = json.loads(json.dumps(original))
+            value[field] = "0" * 64
+            corruptions.append(value)
+        for field, replacement in (
+            ("comparison_status", "not_superior"),
+            ("comparison_rule", "threshold_not_met"),
+            ("claim", "secret-claim-that-must-not-be-echoed"),
+        ):
+            value = json.loads(json.dumps(original))
+            value[field] = replacement
+            corruptions.append(value)
+        for value in corruptions:
+            with self.assertRaises(hierarchical_evaluation.EvaluationError) as caught:
+                hierarchical_evaluation.validate_result(value)
+            self.assertNotIn("secret-claim-that-must-not-be-echoed", str(caught.exception))
+            with self.assertRaises(hierarchical_evaluation.EvaluationError):
+                hierarchical_evaluation.render_report(value)
+
+        contract = json.loads(hierarchical_evaluation.CONTRACT.read_text(encoding="utf-8"))
+        contract["superiority_rule"]["path_a"] = "forged-threshold"
+        with self.assertRaises(hierarchical_evaluation.EvaluationError):
+            hierarchical_evaluation.validate_result(original, contract=contract)
 
 
 if __name__ == "__main__":

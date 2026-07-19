@@ -58,9 +58,15 @@ python <plugin-root>/scripts/opc_hierarchical.py \
 | Provider timeout/error | File hierarchy，本次 trace 标明 provider fallback |
 | Provider 返回越权/陈旧 ID | 丢弃该 ID，File hierarchy 继续 |
 | L2 在导航与注入之间变化 | `l2_revalidation_failed`，正文不进入 packet |
+| derived relations 被删除、替换或伪造 | canonical governance snapshot 不匹配，显式 flat File/Git fallback |
+| build 的 mkdir/open/write/fsync/replace 任一点失败 | 恢复调用前 private data tree；不遗留新 marker、目录、index 或 temp |
+
+flat 与 hierarchical 共用 ADR-0011 的冻结关系图算法，不分别解释 supersession、invalidation 或 conflicts。查询在导航前和 L2 前各核对一次不含正文对象的 canonical governance metadata snapshot；snapshot 为 HEAD/hash provenance 可流式扫描底层字节，但不会 materialize `content`、用于评分、写入 Trace 或计入 Token。正文只由最终选中的 L2 `read_authoritative(...)` materialize。Packet/Trace 联合 validator 会重算 item token、budget、top citations、`canonical_reads`、final leaves 与 injected cost，任何跨产物矛盾都在 consumer 返回前拒绝。
 
 ## 公开评测
 
 `hierarchical-recall-comparison.v1` 使用同一 public synthetic corpus 同时驱动当前 flat 与 hierarchical 实现。它覆盖 global、两个主要 project ID、role/type、approved/obsolete、未解决冲突、过期 index、相似但越权条目、跨目录 procedure 与 relations。
+
+result/report renderer 不信任 committed aggregate：它从每个 case 与 fixture support 重新计算 precision、recall、tokens、scope/stale safety，再按照 contract 阈值重算 comparison status/rule/claim；case、aggregate、hash、threshold 或 claim 任一损坏都会失败关闭。
 
 当前提交结果：precision@5 `0.20 → 1.00`，canonical leaf recall@5 均为 `1.00`，median injected tokens `661 → 107`（下降 `83.81%`），scope leakage 与 stale/obsolete acceptance 都为 `0`。实际本机延迟单独保存在 versioned artifact；它不是跨机器性能承诺，也不参与 golden byte 重测。完整结果见[评测报告](../evaluation/baselines/hierarchical-recall-comparison.v1.md)。

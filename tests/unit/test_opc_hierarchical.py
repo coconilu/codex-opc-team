@@ -101,6 +101,25 @@ class HierarchicalRecallTests(unittest.TestCase):
         index.build(approval_token=plan["approval_token"])
         return opc_hierarchical.HierarchicalRecall(self.backend, self.data)
 
+    def rewrite_relations(self, record: Mapping[str, Any], relations: list[dict[str, Any]]) -> None:
+        path = self.knowledge / str(record["_source_path"])
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["relations"] = relations
+        path.write_bytes(opc_memory.canonical_record_bytes(value))
+
+    @staticmethod
+    def tree_snapshot(root: Path) -> Any:
+        if not root.exists():
+            return None
+        result: list[tuple[str, str, bytes | None]] = []
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root).as_posix()
+            if path.is_dir():
+                result.append((relative, "dir", None))
+            else:
+                result.append((relative, "file", path.read_bytes()))
+        return result
+
     def test_preview_is_zero_write_and_build_is_private(self) -> None:
         self.add_approved(summary="alpha deployment", content="canonical-only-body")
         self.commit()
@@ -128,6 +147,77 @@ class HierarchicalRecallTests(unittest.TestCase):
         self.assertNotIn("canonical-only-body", json.dumps(trace))
         self.assertEqual(trace["final_leaves"], [record["id"]])
         self.assertTrue(packet["citations"][0]["source_commit"])
+
+    def test_governance_snapshot_never_materializes_content(self) -> None:
+        sentinel = "DO-NOT-MATERIALIZE-CANONICAL-BODY-7d91"
+        record = self.add_approved(
+            summary="metadata only audit",
+            content=sentinel + " unicode-正文-🔥\nquoted-\"value\"",
+        )
+        self.commit()
+        recall = self.build()
+        original_loads = opc_memory.json.loads
+        decoded_payloads: list[str] = []
+
+        def guarded_loads(value: Any, *args: Any, **kwargs: Any) -> Any:
+            if isinstance(value, bytes):
+                rendered = value.decode("utf-8")
+            elif isinstance(value, str):
+                rendered = value
+            else:
+                rendered = ""
+            decoded_payloads.append(rendered)
+            if sentinel in rendered:
+                raise AssertionError("governance snapshot decoded canonical content")
+            return original_loads(value, *args, **kwargs)
+
+        blocked = AssertionError("full canonical record parser used during governance snapshot")
+        with (
+            patch.object(self.backend, "_load_record", side_effect=blocked),
+            patch.object(opc_memory, "_read_bounded_record", side_effect=blocked),
+            patch.object(opc_memory, "_strict_record_json", side_effect=blocked),
+            patch.object(opc_memory.json, "loads", side_effect=guarded_loads),
+        ):
+            snapshot = self.backend.governance_snapshot()
+        self.assertIn(record["id"], snapshot["inventory"])
+        self.assertNotIn("content", snapshot["inventory"][record["id"]])
+        self.assertTrue(decoded_payloads)
+        self.assertFalse(any(sentinel in payload for payload in decoded_payloads))
+
+        original_read = self.backend.read_authoritative
+        with patch.object(
+            self.backend, "read_authoritative", wraps=original_read
+        ) as authoritative_read:
+            result = recall.query(
+                "metadata only audit",
+                project_id="project-alpha",
+                role="developer",
+            )
+        self.assertEqual(authoritative_read.call_count, 1)
+        self.assertEqual(
+            result["context_packet"]["decisions"][0]["content"],
+            sentinel + " unicode-正文-🔥\nquoted-\"value\"",
+        )
+
+    def test_governance_scanner_rejects_malformed_or_duplicate_content(self) -> None:
+        record = self.add_approved(summary="strict scanner", content="body")
+        path = self.knowledge / record["_source_path"]
+        original = path.read_bytes()
+        needle = b'  "content": "body",'
+        self.assertIn(needle, original)
+        corruptions = {
+            "empty": b'  "content": "",',
+            "wrong-type": b'  "content": 7,',
+            "bad-escape": b'  "content": "bad\\q",',
+            "duplicate": needle + b'\n  "content": "duplicate",',
+            "invalid-utf8": b'  "content": "bad\xff",',
+        }
+        for label, replacement in corruptions.items():
+            with self.subTest(label=label):
+                path.write_bytes(original.replace(needle, replacement, 1))
+                with self.assertRaises(opc_memory.OpcMemoryError):
+                    self.backend.governance_snapshot()
+        path.write_bytes(original)
 
     def test_cross_project_and_obsolete_are_never_injected(self) -> None:
         alpha = self.add_approved(summary="shared deploy", content="alpha body")
@@ -189,6 +279,104 @@ class HierarchicalRecallTests(unittest.TestCase):
         rendered = json.dumps(packet["conflicts"])
         self.assertNotIn("left body", rendered)
         self.assertNotIn("right body", rendered)
+
+    def test_deleted_replaced_or_forged_derived_relations_never_release_conflict_bodies(self) -> None:
+        left = self.add_approved(summary="conflict graph left", content="left forbidden body")
+        right = self.add_approved(summary="conflict graph right", content="right forbidden body")
+        other = self.add_approved(summary="unrelated node", content="other body")
+        self.rewrite_relations(
+            left,
+            [{"kind": "conflicts", "target_id": right["id"], "scope": "project", "project_id": "project-alpha"}],
+        )
+        self.rewrite_relations(
+            right,
+            [{"kind": "conflicts", "target_id": left["id"], "scope": "project", "project_id": "project-alpha"}],
+        )
+        self.commit()
+        recall = self.build()
+        original = json.loads(recall.index.path.read_text(encoding="utf-8"))
+
+        def mutate(value: dict[str, Any], mode: str) -> None:
+            by_id = {item["node_id"]: item for item in value["leaves"]}
+            if mode == "deleted":
+                by_id[left["id"]]["relations"] = []
+                by_id[right["id"]]["relations"] = []
+            elif mode == "replaced":
+                by_id[left["id"]]["relations"] = [
+                    {"kind": "conflicts", "target_id": other["id"], "scope": "project", "project_id": "project-alpha"}
+                ]
+            else:
+                by_id[left["id"]]["relations"].append(
+                    {"kind": "supersedes", "target_id": other["id"], "scope": "project", "project_id": "project-alpha"}
+                )
+
+        for mode in ("deleted", "replaced", "forged"):
+            with self.subTest(mode=mode):
+                value = json.loads(json.dumps(original))
+                mutate(value, mode)
+                recall.index.path.write_bytes(opc_hierarchical._strict_json_bytes(value))
+                result = recall.query(
+                    "conflict graph", project_id="project-alpha", role="developer", limit=10
+                )
+                self.assertEqual(result["context_packet"]["mode"], "flat-file-git-fallback")
+                rendered = json.dumps(result)
+                self.assertNotIn("left forbidden body", rendered)
+                self.assertNotIn("right forbidden body", rendered)
+                self.assertIn("derived_governance_mismatch", rendered)
+
+    def test_hierarchical_and_flat_share_chain_branch_diamond_inverse_and_mixed_effects(self) -> None:
+        records = {
+            name: self.add_approved(summary=f"governance graph {name}", content=f"body {name}")
+            for name in reversed(tuple("ABCDEFGHIJKLMN"))
+        }
+
+        def relation(kind: str, target: str) -> dict[str, Any]:
+            return {
+                "kind": kind,
+                "target_id": records[target]["id"],
+                "scope": "project",
+                "project_id": "project-alpha",
+            }
+
+        graph = {
+            "A": [relation("supersedes", "B")],
+            "B": [relation("supersedes", "C")],
+            "D": [relation("invalidates", "F"), relation("invalidates", "E")],
+            "G": [relation("supersedes", "H")],
+            "I": [relation("supersedes", "H")],
+            "J": [relation("superseded_by", "K")],
+            "L": [relation("invalidates", "M")],
+            "M": [relation("supersedes", "N")],
+        }
+        for name, item in records.items():
+            self.rewrite_relations(item, list(reversed(graph.get(name, []))))
+        self.commit()
+        flat = self.backend.query_context(
+            "governance graph", project_id="project-alpha", role="developer", limit=100
+        )
+        hierarchical = self.build().query(
+            "governance graph",
+            project_id="project-alpha",
+            role="developer",
+            limit=100,
+            canonical_read_limit=64,
+        )
+        packet_ids = {
+            item["record_id"]
+            for bucket in ("facts", "decisions", "experiences", "procedures")
+            for item in hierarchical["context_packet"][bucket]
+        }
+        self.assertEqual(packet_ids, {item["id"] for item in flat["records"]})
+        flat_reasons = {
+            item["record_id"]: set(item["reason_codes"])
+            for item in flat["omissions"]
+        }
+        hierarchical_reasons = {
+            item["record_id"]: set(item["reason_codes"])
+            for item in hierarchical["recall_trace"]["discards"]
+            if "record_id" in item and item["record_id"] in flat_reasons
+        }
+        self.assertEqual(hierarchical_reasons, flat_reasons)
 
     def test_missing_and_stale_index_degrade_to_flat_file_git(self) -> None:
         self.add_approved(summary="alpha deployment", content="body")
@@ -309,19 +497,66 @@ class HierarchicalRecallTests(unittest.TestCase):
         with self.assertRaises(opc_hierarchical.HierarchicalError):
             opc_hierarchical.HierarchicalIndex(self.backend, self.data).preview()
 
-    def test_parent_identity_change_aborts_publish_and_cleans_temporary(self) -> None:
+    def test_publish_faults_restore_exact_pre_call_tree(self) -> None:
         self.add_approved(summary="alpha", content="body")
         self.commit()
         index = opc_hierarchical.HierarchicalIndex(self.backend, self.data)
         plan = index.preview()
-        with patch(
-            "opc_hierarchical._directory_object_token",
-            side_effect=["parent-before", "parent-after"],
-        ):
-            with self.assertRaises(opc_hierarchical.HierarchicalError):
+
+        def fail_nth(original: Any, ordinal: int) -> Any:
+            calls = 0
+
+            def failing(*args: Any, **kwargs: Any) -> Any:
+                nonlocal calls
+                calls += 1
+                if calls == ordinal:
+                    raise OSError("synthetic publish fault")
+                return original(*args, **kwargs)
+
+            return failing
+
+        faults = (
+            ("_publish_mkdir", 1), ("_publish_mkdir", 3), ("_publish_mkdir", 4),
+            ("_publish_open", 1), ("_publish_open", 2),
+            ("_publish_write", 1), ("_publish_write", 2),
+            ("_publish_fsync", 1), ("_publish_fsync", 2),
+            ("_publish_replace", 1),
+        )
+        for name, ordinal in faults:
+            with self.subTest(operation=name, ordinal=ordinal):
+                before = self.tree_snapshot(self.data)
+                original = getattr(opc_hierarchical, name)
+                with patch.object(
+                    opc_hierarchical,
+                    name,
+                    side_effect=fail_nth(original, ordinal),
+                ):
+                    with self.assertRaises((OSError, opc_hierarchical.HierarchicalError)):
+                        index.build(approval_token=plan["approval_token"])
+                self.assertEqual(self.tree_snapshot(self.data), before)
+
+    def test_existing_owned_or_unknown_ignore_marker_is_preserved_exactly(self) -> None:
+        self.add_approved(summary="alpha", content="body")
+        self.commit()
+        index = opc_hierarchical.HierarchicalIndex(self.backend, self.data)
+        plan = index.preview()
+        opc = self.data / ".opc"
+        opc.mkdir(parents=True)
+        sentinel = opc / "sentinel.bin"
+        sentinel.write_bytes(b"keep-byte-identical")
+        ignore = opc / ".gitignore"
+        ignore.write_bytes(b"unknown\n")
+        before = self.tree_snapshot(self.data)
+        with self.assertRaises(opc_hierarchical.HierarchicalError):
+            index.build(approval_token=plan["approval_token"])
+        self.assertEqual(self.tree_snapshot(self.data), before)
+
+        ignore.write_bytes(b"*\n!.gitignore\n")
+        before = self.tree_snapshot(self.data)
+        with patch.object(opc_hierarchical, "_publish_replace", side_effect=OSError("synthetic")):
+            with self.assertRaises(OSError):
                 index.build(approval_token=plan["approval_token"])
-        self.assertFalse(index.path.exists())
-        self.assertEqual(list(index.directory.glob(".index.json.tmp-*")), [])
+        self.assertEqual(self.tree_snapshot(self.data), before)
 
     def test_data_root_inside_project_git_is_rejected_without_writes(self) -> None:
         self.add_approved(summary="alpha", content="body")
@@ -356,6 +591,81 @@ class HierarchicalRecallTests(unittest.TestCase):
         with self.assertRaises(opc_hierarchical.HierarchicalError):
             opc_hierarchical.validate_context_packet(packet)
 
+    def test_packet_trace_joint_validator_rejects_cross_artifact_corruption(self) -> None:
+        self.add_approved(summary="alpha", content="body")
+        self.commit()
+        result = self.build().query("alpha", project_id="project-alpha", role="developer")
+        corruptions = []
+
+        value = json.loads(json.dumps(result))
+        item = value["context_packet"]["decisions"][0]
+        item["citation"]["record_id"] = "exp-forged"
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["context_packet"]["citations"] = []
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["context_packet"]["decisions"][0]["token_cost"] += 1
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["context_packet"]["budget"]["used_tokens"] = 0
+        value["context_packet"]["budget"]["remaining_tokens"] = value["context_packet"]["budget"]["limit_tokens"]
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["recall_trace"]["final_leaves"] = []
+        value["recall_trace"]["canonical_reads"] = []
+        value["recall_trace"]["canonical_read_count"] = 0
+        value["recall_trace"]["injected_token_cost"] = 0
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["recall_trace"]["root_selection"] *= 3
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["recall_trace"]["root_selection"][0]["uri"] = "opc://" + "x" * 600
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["recall_trace"]["root_selection"][0]["score"] = opc_hierarchical.MAX_NAVIGATION_SCORE + 1
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["recall_trace"]["discards"] = [{"reason_codes": ["x" * 129]}]
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["context_packet"]["omitted_summary"]["count"] = opc_hierarchical.MAX_OMITTED_ITEMS + 1
+        corruptions.append(value)
+
+        value = json.loads(json.dumps(result))
+        value["context_packet"]["decisions"][0]["content"] = "x" * (opc_hierarchical.MAX_TEXT + 1)
+        corruptions.append(value)
+
+        for value in corruptions:
+            with self.subTest(corruption=corruptions.index(value)):
+                with self.assertRaises(opc_hierarchical.HierarchicalError):
+                    opc_hierarchical.validate_recall_result(value)
+
+    def test_query_consumer_rejects_corrupted_packet_before_return(self) -> None:
+        self.add_approved(summary="alpha", content="body")
+        self.commit()
+        recall = self.build()
+        original = recall._packet_from_records
+
+        def corrupt(**values: Any) -> dict[str, Any]:
+            packet = original(**values)
+            packet["citations"] = []
+            return packet
+
+        with patch.object(recall, "_packet_from_records", side_effect=corrupt):
+            with self.assertRaises(opc_hierarchical.HierarchicalError):
+                recall.query("alpha", project_id="project-alpha", role="developer")
+
     def test_runtime_products_match_published_top_level_schemas(self) -> None:
         self.add_approved(summary="alpha", content="body")
         self.commit()
@@ -368,6 +678,12 @@ class HierarchicalRecallTests(unittest.TestCase):
             schema = json.loads((assets / schema_name).read_text(encoding="utf-8"))
             self.assertFalse(schema["additionalProperties"])
             self.assertEqual(set(schema["required"]), set(product))
+        trace_schema = json.loads((assets / "recall-trace.v1.schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(trace_schema["properties"]["canonical_reads"]["maxItems"], opc_hierarchical.MAX_CANONICAL_READS)
+        self.assertEqual(trace_schema["properties"]["expansions"]["maxItems"], opc_hierarchical.MAX_TRACE_ITEMS)
+        packet_schema = json.loads((assets / "context-packet.v1.schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(packet_schema["$defs"]["items"]["maxItems"], opc_hierarchical.MAX_PACKET_ITEMS)
+        self.assertEqual(packet_schema["$defs"]["item"]["properties"]["content"]["maxLength"], opc_hierarchical.MAX_TEXT)
 
 
 if __name__ == "__main__":

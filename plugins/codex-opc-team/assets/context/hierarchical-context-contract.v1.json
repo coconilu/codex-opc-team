@@ -9,6 +9,11 @@
   "preview_writes": false,
   "hard_filter_before_navigation": true,
   "l2_revalidation_required": true,
+  "shared_relation_governance": true,
+  "canonical_governance_snapshot_required": true,
+  "canonical_content_materialization_l2_only": true,
+  "joint_packet_trace_validation": true,
+  "publish_failure_restores_pre_call_tree": true,
   "virtual_namespaces": [
     "opc://global/{knowledge_type}/{record_id}",
     "opc://projects/{project_id}/{knowledge_type}/{record_id}"
@@ -37,6 +42,7 @@
     "discards",
     "fallbacks",
     "final_leaves",
+    "canonical_reads",
     "canonical_read_count",
     "injected_token_cost"
   ],
@@ -80,6 +86,10 @@
     "index_bytes": 16777216,
     "records": 5000,
     "canonical_reads": 64,
-    "budget_tokens": 200000
+    "budget_tokens": 200000,
+    "packet_items": 1000,
+    "trace_items": 10002,
+    "omitted_items": 20000,
+    "navigation_score": 1000000
   }
 }

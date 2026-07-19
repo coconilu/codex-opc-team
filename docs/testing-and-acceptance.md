@@ -57,6 +57,8 @@ Optional Mem0 切片必须在安装依赖前从 `RUNNER_TEMP` 初始化 `MEM0_DI
 
 分层比较另执行 `python scripts/hierarchical_evaluation.py verify`。它在同一新 fixture 上运行当前 flat 与 hierarchical，实现 result/report 逐字节复现；实际 wall-clock latency 保存在单独 versioned artifact，verify 严格校验其有限数值和可实现聚合，但不伪装为跨机器可重现测量。
 
+分层专项还必须覆盖：derived relation 删除/替换/伪造不释放受治理正文；metadata snapshot 封锁完整 record parser、不得将 content sentinel 传给 `json.loads`，且只有最终 L2 调用 `read_authoritative(...)`；flat/hierarchical 在 chain、branch、diamond、mixed、inverse 与 ID/file/edge 排列下结果一致；mkdir/open/write/fsync/replace 每个发布故障点恢复调用前 tree；Packet/Trace 单体与联合 schema/runtime 损坏拒绝；evaluation case/aggregate/hash/threshold/status/claim 损坏在 renderer 前拒绝。
+
 真实项目试点固定为 3–5 tasks。原始源码、对话、路径、运行标识、组织知识和逐任务结果留在私有项目证据边界，不进入公开仓库或 canonical knowledge；跨边界只允许严格 schema 的整体聚合。scope leakage 与 stale/obsolete acceptance 为零容忍，缺字段、零分母或不可验证结果不得记为 PASS。质量、context tokens 和 latency 必须并列报告，任何单项都不足以证明产品改进。
 
 结构化反馈测试必须覆盖：PASS、FAIL、partial 和 unknown 合成结果；经理判断/独立 QA/假设/未知信息分离；旧 run 无 sidecar 可读；同事件幂等、同 ID 冲突、stale 与并发写入 fail closed；Draft 2020-12 schema 与运行时对非法引用的一致拒绝；事件/sidecar 读取上限；共享凭证规则且错误/报告不泄漏；父目录在 pending 前后、replace 前和最终清理前变化时的回滚；竞争 lock/pending identity 保留；机器记录与确定性人类报告同源。测试还要证明写入只产生项目私有 feedback sidecar，不触发候选批准、Git、索引、发布、付款或外部通信。

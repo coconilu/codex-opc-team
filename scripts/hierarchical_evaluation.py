@@ -103,7 +103,7 @@ def _portable(value: Any, prefix: str, label: str) -> str:
     return value
 
 
-def _validate_contract() -> None:
+def _validate_contract() -> dict[str, Any]:
     value = _load(CONTRACT)
     if set(value) != {
         "contract_version", "dataset_schema_version", "result_schema_version", "baseline",
@@ -111,8 +111,44 @@ def _validate_contract() -> None:
         "numeric_policy", "reproducibility",
     }:
         raise EvaluationError("hierarchical evaluation contract fields drifted")
-    if value.get("contract_version") != CONTRACT_VERSION or value.get("top_k") != 5:
+    if (
+        value.get("contract_version") != CONTRACT_VERSION
+        or value.get("dataset_schema_version") != "opc-hierarchical-synthetic-suite-v1"
+        or value.get("result_schema_version") != RESULT_VERSION
+        or value.get("baseline") != "current-flat-file-git"
+        or value.get("treatment") != "hierarchical-file-git"
+        or value.get("top_k") != 5
+        or value.get("metrics")
+        != [
+            "support_precision_at_5", "canonical_leaf_recall_at_5",
+            "injected_tokens_median", "injected_tokens_per_query",
+            "latency_p95_ms", "scope_leakage_acceptances",
+            "stale_obsolete_acceptances",
+        ]
+        or value.get("numeric_policy")
+        != {
+            "strict_json": True,
+            "nan_or_infinity_rejected": True,
+            "impossible_aggregate_rejected": True,
+        }
+        or value.get("reproducibility")
+        != {
+            "retrieval_golden_byte_reproducible": True,
+            "latency_measurement_nondeterministic": True,
+            "latency_artifact_versioned_and_separate": True,
+        }
+    ):
         raise EvaluationError("hierarchical evaluation contract version drifted")
+    if value.get("safety_thresholds") != {
+        "scope_leakage_acceptances": 0,
+        "stale_obsolete_acceptances": 0,
+    } or value.get("superiority_rule") != {
+        "path_a": "precision_not_lower_and_median_tokens_reduced_at_least_20_percent",
+        "path_b": "median_tokens_not_higher_and_precision_improved_at_least_0.10",
+        "otherwise": "not_superior",
+    }:
+        raise EvaluationError("hierarchical evaluation thresholds drifted")
+    return value
 
 
 def _validate_fixture(value: Mapping[str, Any]) -> None:
@@ -412,6 +448,162 @@ def _superiority(aggregate: Mapping[str, Any]) -> tuple[str, str]:
     return "not_superior", "threshold_not_met"
 
 
+def validate_result(
+    result: Mapping[str, Any],
+    *,
+    contract: Mapping[str, Any] | None = None,
+    fixture: Mapping[str, Any] | None = None,
+    latency: Mapping[str, Any] | None = None,
+) -> None:
+    """Recompute every reported metric and claim from strict case evidence."""
+
+    _finite(result, "hierarchical result")
+    expected_fields = {
+        "schema_version", "contract_version", "fixture_sha256", "contract_sha256",
+        "dataset_id", "latency_artifact", "latency_sha256",
+        "latency_reproducibility", "cases", "degradation_probes", "aggregate",
+        "comparison_status", "comparison_rule", "claim",
+    }
+    if not isinstance(result, Mapping) or set(result) != expected_fields:
+        raise EvaluationError("hierarchical result fields are not strict")
+    contract_value = dict(contract) if contract is not None else _validate_contract()
+    if contract is not None:
+        if contract_value != _load(CONTRACT):
+            raise EvaluationError("hierarchical result contract input drifted")
+        _validate_contract()
+    fixture_value = dict(fixture) if fixture is not None else _load(FIXTURE)
+    _validate_fixture(fixture_value)
+    latency_value = dict(latency) if latency is not None else _load(LATENCY)
+    validate_latency(latency_value)
+    if (
+        result["schema_version"] != RESULT_VERSION
+        or result["contract_version"] != CONTRACT_VERSION
+        or result["dataset_id"] != fixture_value["dataset_id"]
+        or result["fixture_sha256"] != _sha(FIXTURE)
+        or result["contract_sha256"] != _sha(CONTRACT)
+        or result["latency_artifact"] != LATENCY.name
+        or result["latency_sha256"] != hashlib.sha256(_json_bytes(latency_value)).hexdigest()
+        or result["latency_reproducibility"]
+        != "nondeterministic-versioned-separate-artifact"
+    ):
+        raise EvaluationError("hierarchical result provenance binding drifted")
+    cases = result["cases"]
+    queries = fixture_value["queries"]
+    records = {item["id"]: item for item in fixture_value["records"]}
+    top_k = contract_value["top_k"]
+    if not isinstance(cases, list) or len(cases) != len(queries):
+        raise EvaluationError("hierarchical result case count drifted")
+    totals = {
+        "flat_hits": 0,
+        "flat_returns": 0,
+        "hierarchical_hits": 0,
+        "hierarchical_returns": 0,
+        "expected": 0,
+        "scope_leaks": 0,
+        "stale_accepts": 0,
+    }
+    tokens: dict[str, list[int]] = {"flat": [], "hierarchical": []}
+    for index, (case, query) in enumerate(zip(cases, queries)):
+        if not isinstance(case, dict) or set(case) != {
+            "query_id", "support_ids", "flat", "hierarchical"
+        }:
+            raise EvaluationError("hierarchical result case fields are invalid")
+        support = sorted(query["support_ids"])
+        if case["query_id"] != query["query_id"] or case["support_ids"] != support:
+            raise EvaluationError("hierarchical result case fixture binding drifted")
+        support_set = set(support)
+        totals["expected"] += len(support)
+        for side, hit_key, return_key in (
+            ("flat", "flat_hits", "flat_returns"),
+            ("hierarchical", "hierarchical_hits", "hierarchical_returns"),
+        ):
+            item = case[side]
+            if not isinstance(item, dict) or set(item) != {
+                "leaf_ids", "support_precision_at_5",
+                "canonical_leaf_recall_at_5", "injected_tokens",
+            }:
+                raise EvaluationError("hierarchical result case metric fields are invalid")
+            leaf_ids = item["leaf_ids"]
+            injected = item["injected_tokens"]
+            if (
+                not isinstance(leaf_ids, list)
+                or len(leaf_ids) > top_k
+                or len(leaf_ids) != len(set(leaf_ids))
+                or any(record_id not in records for record_id in leaf_ids)
+                or isinstance(injected, bool)
+                or not isinstance(injected, int)
+                or not 0 <= injected <= opc_hierarchical.MAX_BUDGET_TOKENS
+            ):
+                raise EvaluationError("hierarchical result case evidence is invalid")
+            hits = len(support_set & set(leaf_ids))
+            expected_precision = (
+                1.0 if not leaf_ids and not support else _ratio(hits, max(1, len(leaf_ids)))
+            )
+            expected_recall = 1.0 if not support else _ratio(hits, len(support))
+            if (
+                item["support_precision_at_5"] != expected_precision
+                or item["canonical_leaf_recall_at_5"] != expected_recall
+            ):
+                raise EvaluationError("hierarchical result case metric is impossible")
+            totals[hit_key] += hits
+            totals[return_key] += len(leaf_ids)
+            tokens[side].append(injected)
+            for record_id in leaf_ids:
+                record = records[record_id]
+                if record["scope"] == "project" and record["project_id"] != query["project_id"]:
+                    totals["scope_leaks"] += 1
+                if record["status"] != "approved":
+                    totals["stale_accepts"] += 1
+    if totals["expected"] <= 0 or totals["flat_returns"] <= 0 or totals["hierarchical_returns"] <= 0:
+        raise EvaluationError("hierarchical result metric denominator is invalid")
+    expected_aggregate = {
+        "flat": {
+            "support_precision_at_5": _ratio(totals["flat_hits"], totals["flat_returns"]),
+            "canonical_leaf_recall_at_5": _ratio(totals["flat_hits"], totals["expected"]),
+            "injected_tokens_median": median(tokens["flat"]),
+            "injected_tokens_per_query": tokens["flat"],
+            "latency_p95_ms": latency_value["flat_ms"]["p95_nearest_rank"],
+        },
+        "hierarchical": {
+            "support_precision_at_5": _ratio(
+                totals["hierarchical_hits"], totals["hierarchical_returns"]
+            ),
+            "canonical_leaf_recall_at_5": _ratio(
+                totals["hierarchical_hits"], totals["expected"]
+            ),
+            "injected_tokens_median": median(tokens["hierarchical"]),
+            "injected_tokens_per_query": tokens["hierarchical"],
+            "latency_p95_ms": latency_value["hierarchical_ms"]["p95_nearest_rank"],
+        },
+        "safety": {
+            "scope_leakage_acceptances": totals["scope_leaks"],
+            "stale_obsolete_acceptances": totals["stale_accepts"],
+        },
+    }
+    if result["aggregate"] != expected_aggregate:
+        raise EvaluationError("hierarchical result aggregate differs from case evidence")
+    status, rule = _superiority(expected_aggregate)
+    if totals["scope_leaks"] or totals["stale_accepts"]:
+        status, rule = "not_superior", "safety_gate_failed"
+    claim = (
+        "hierarchical recall is superior on this public synthetic fixture"
+        if status == "superior"
+        else "hierarchical recall is not superior on this public synthetic fixture"
+    )
+    if (
+        result["comparison_status"] != status
+        or result["comparison_rule"] != rule
+        or result["claim"] != claim
+    ):
+        raise EvaluationError("hierarchical result conclusion differs from evidence")
+    if result["degradation_probes"] != {
+        "missing_index": "flat-file-git-fallback",
+        "stale_head": "flat-file-git-fallback",
+        "provider_scenarios": "covered-by-runtime-contract-tests",
+    }:
+        raise EvaluationError("hierarchical degradation evidence drifted")
+
+
 def build_result(latency: Mapping[str, Any]) -> dict[str, Any]:
     _validate_contract()
     fixture = _load(FIXTURE)
@@ -476,13 +668,12 @@ def build_result(latency: Mapping[str, Any]) -> dict[str, Any]:
         rule = "safety_gate_failed"
     aggregate["flat"]["latency_p95_ms"] = latency["flat_ms"]["p95_nearest_rank"]
     aggregate["hierarchical"]["latency_p95_ms"] = latency["hierarchical_ms"]["p95_nearest_rank"]
-    return {
+    result = {
         "schema_version": RESULT_VERSION,
         "contract_version": CONTRACT_VERSION,
         "fixture_sha256": _sha(FIXTURE),
         "contract_sha256": _sha(CONTRACT),
         "dataset_id": fixture["dataset_id"],
-        "fixture_sha256": _sha(FIXTURE),
         "latency_artifact": LATENCY.name,
         "latency_sha256": hashlib.sha256(_json_bytes(latency)).hexdigest(),
         "latency_reproducibility": "nondeterministic-versioned-separate-artifact",
@@ -497,9 +688,14 @@ def build_result(latency: Mapping[str, Any]) -> dict[str, Any]:
             else "hierarchical recall is not superior on this public synthetic fixture"
         ),
     }
+    validate_result(result, contract=_load(CONTRACT), fixture=fixture, latency=latency)
+    return result
 
 
-def render_report(result: Mapping[str, Any]) -> str:
+def render_report(
+    result: Mapping[str, Any], *, latency: Mapping[str, Any] | None = None
+) -> str:
+    validate_result(result, latency=latency)
     flat = result["aggregate"]["flat"]
     hierarchical = result["aggregate"]["hierarchical"]
     safety = result["aggregate"]["safety"]
@@ -607,7 +803,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             latency = _load(args.latency)
             result = build_result(latency)
             args.output.write_bytes(_json_bytes(result))
-            args.report.write_text(render_report(result), encoding="utf-8", newline="\n")
+            args.report.write_text(
+                render_report(result, latency=latency), encoding="utf-8", newline="\n"
+            )
         else:
             latency = _load(LATENCY)
             expected = build_result(latency)

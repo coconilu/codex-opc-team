@@ -653,7 +653,12 @@ def validate_hierarchical_recall_contract() -> None:
         and context_contract.get("provider_authoritative") is False
         and context_contract.get("preview_writes") is False
         and context_contract.get("hard_filter_before_navigation") is True
-        and context_contract.get("l2_revalidation_required") is True,
+        and context_contract.get("l2_revalidation_required") is True
+        and context_contract.get("shared_relation_governance") is True
+        and context_contract.get("canonical_governance_snapshot_required") is True
+        and context_contract.get("canonical_content_materialization_l2_only") is True
+        and context_contract.get("joint_packet_trace_validation") is True
+        and context_contract.get("publish_failure_restores_pre_call_tree") is True,
         "hierarchical context authority boundary is incomplete",
     )
     derived = context_contract.get("derived_storage", {})
@@ -678,10 +683,27 @@ def validate_hierarchical_recall_contract() -> None:
         and set(trace_schema.get("required", []))
         == {
             "schema_version", "query_sha256", "mode", "root_selection", "expansions",
-            "discards", "fallbacks", "final_leaves", "canonical_read_count",
-            "injected_token_cost",
+            "discards", "fallbacks", "final_leaves", "canonical_reads",
+            "canonical_read_count", "injected_token_cost",
         },
         "ContextPacket or RecallTrace schema drifted from runtime",
+    )
+    require(
+        context_contract.get("limits")
+        == {
+            "index_bytes": 16777216,
+            "records": 5000,
+            "canonical_reads": 64,
+            "budget_tokens": 200000,
+            "packet_items": 1000,
+            "trace_items": 10002,
+            "omitted_items": 20000,
+            "navigation_score": 1000000,
+        }
+        and packet_schema.get("$defs", {}).get("items", {}).get("maxItems") == 1000
+        and trace_schema.get("properties", {}).get("canonical_reads", {}).get("maxItems") == 64
+        and trace_schema.get("properties", {}).get("expansions", {}).get("maxItems") == 10002,
+        "hierarchical schema/runtime bounds drifted",
     )
     fixture = load_json(fixture_path)
     result = load_json(result_path)

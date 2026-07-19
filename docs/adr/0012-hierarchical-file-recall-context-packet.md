@@ -15,7 +15,7 @@ File/Git 继续是唯一权威源。发布 `opc-hierarchical-context-contract-v1
 
 ```text
 query
-  -> #7 deterministic hard filters over private derived metadata
+  -> canonical governance metadata snapshot + shared #7 hard filters
   -> explicit opc://global and opc://projects/{project_id} roots
   -> L0 approved summaries and L1 deterministic aggregates
   -> priority expansion of a bounded leaf set
@@ -34,10 +34,18 @@ query
 
 分层召回必须先复用 ADR-0011 的确定性 hard filter，再导航；任何进入 packet 的 L2 叶子在注入前必须再次通过 exact HEAD/commit/hash/status/scope/sensitivity/applicability/relations 验证。Shadow 仍是只读 candidate 证据消费者，不能利用分层索引授予正式 context 资格。
 
+关系治理不得在 hierarchical 路径复制第二套算法。flat 与 hierarchical 共同调用 `evaluate_relation_governance(...)`，从冻结结构图同时计算 chain、branch、diamond、inverse supersession/invalidation 与 conflict effects。hierarchical 在导航前和读取 L2 前各取得一次 bounded canonical governance metadata snapshot；snapshot 不向 consumer 暴露正文，并与 derived 的 status/scope/applicability/relations/source path/HEAD/hash 全量绑定。derived 删除、替换或伪造关系，或两次 canonical snapshot 不一致时，显式降级到共享 flat File/Git，不能继续信任 derived graph。
+
+build 的目录、owned `.gitignore`、temporary 与 replace 构成一个恢复事务：所有既有和新建目录都绑定 filesystem identity；mkdir/open/write/fsync/replace 任一点失败，只删除本次创建且 identity 未变化的对象，逆序恢复调用前目录树。未知 `.gitignore` 失败关闭，既有 owned marker 和其他文件必须 byte-identical 保留。
+
+canonical governance snapshot 使用严格、schema-aware 的增量 JSON 扫描：为 current-HEAD/hash provenance 允许底层字节 I/O，但 `content` 值只校验字符串语法、UTF-8 和长度，不构造 Python 字符串、对象、导航特征、Trace 或 Token 上下文。只有最终选中的 L2 才能由 `read_authoritative(...)` materialize 正文。审计测试必须封锁完整 record parser，并在任何 `json.loads` payload 出现正文 sentinel 时失败。
+
+`ContextPacket` 和 `RecallTrace` 既分别严格验证，也由联合 validator 验证 query/mode、item/citation identity、top citations、重算 token/budget、`canonical_reads`/read count、final leaves 与 injected cost。评测 result 在写入或渲染前必须从 strict cases、contract、fixture/hash 和单独 latency artifact 重算 aggregate、safety、status、rule 与 claim；renderer 不得信任已汇总字段。
+
 ## Consequences
 
 - 默认核心仍为 Python 标准库与 Git，不增加依赖或许可证传播风险。
-- 正常分层路径不会先读取全库正文来评分；仅最终少量 L2 叶子回读 canonical bytes。
+- 正常分层路径不会先 materialize 全库正文或用正文评分；metadata snapshot 的底层 provenance I/O 不进入 Python 正文对象、Trace 或 Token 上下文，仅最终少量 L2 叶子 materialize canonical body。
 - derived 数据被删除或损坏不会丢失知识；降级状态是显式的。
 - 分层质量、Token、安全和延迟使用同一公开合成 fixture 与当前 flat 基线比较；未满足版本化阈值时报告必须写 `not_superior`。
 - L0/L1 可能漏路由，因此必须保留跨目录、relations 与回退评测，不能把一次 synthetic 优势推广成统计普适结论。

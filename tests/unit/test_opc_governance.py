@@ -364,7 +364,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         self.write(valid)
         self.commit("large rejected relation chain")
         with mock.patch.object(
-            opc_memory,
+            governance,
             "relation_cycles",
             wraps=governance.relation_cycles,
         ) as cycle_check:
@@ -499,6 +499,69 @@ class KnowledgeGovernanceTests(unittest.TestCase):
                     record_id,
                     omissions[record_id]["citation"]["record_id"],
                 )
+
+    def test_shared_relation_engine_is_id_edge_and_inventory_order_independent(self) -> None:
+        definitions = {
+            "A": [("supersedes", "B")],
+            "B": [("supersedes", "C")],
+            "D": [("invalidates", "E"), ("invalidates", "F")],
+            "G": [("supersedes", "H")],
+            "I": [("supersedes", "H")],
+            "J": [("superseded_by", "K")],
+            "L": [("invalidates", "M")],
+            "M": [("supersedes", "N")],
+            "O": [("conflicts", "P")],
+            "P": [("conflicts", "O")],
+        }
+        names = sorted(
+            {*definitions, *(target for edges in definitions.values() for _, target in edges)}
+        )
+        outcomes = []
+        for reverse_ids, reverse_edges, reverse_inventory in (
+            (False, False, False),
+            (True, True, True),
+        ):
+            mapping = {
+                name: f"exp-permutation-{(len(names) - index - 1) if reverse_ids else index:02d}"
+                for index, name in enumerate(names)
+            }
+            records = []
+            for name in names:
+                edges = list(definitions.get(name, []))
+                if reverse_edges:
+                    edges.reverse()
+                relations = [
+                    {
+                        "kind": kind,
+                        "target_id": mapping[target],
+                        "scope": "project",
+                        "project_id": "project-alpha",
+                    }
+                    for kind, target in edges
+                ]
+                records.append((mapping[name], self.record(mapping[name], relations=relations)))
+            if reverse_inventory:
+                records.reverse()
+            inventory = dict(records)
+            evaluated = governance.evaluate_relation_governance(
+                inventory,
+                {record_id: [] for record_id in inventory},
+                project_id="project-alpha",
+            )
+            inverse = {record_id: name for name, record_id in mapping.items()}
+            outcomes.append(
+                {
+                    "reasons": {
+                        inverse[record_id]: tuple(reasons)
+                        for record_id, reasons in evaluated["relation_reasons"].items()
+                    },
+                    "conflicts": {
+                        tuple(sorted((inverse[left], inverse[right])))
+                        for left, right in evaluated["conflict_pairs"]
+                    },
+                }
+            )
+        self.assertEqual(outcomes[0], outcomes[1])
 
     def test_provider_rank_cannot_override_canonical_order_or_current_head(self) -> None:
         project = self.record(

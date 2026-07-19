@@ -21,12 +21,15 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from opc_governance import (
+    MAX_RELATIONS,
+    MAX_SHORT_TEXT,
+    MAX_TEXT,
     GovernanceError,
     applicability_reasons,
     canonical_citation,
+    evaluate_relation_governance,
+    normalize_applicability,
     normalize_relations,
-    relation_applies,
-    relation_cycles,
     validate_query_context,
 )
 from opc_memory import (
@@ -57,11 +60,16 @@ TRACE_VERSION = "opc-recall-trace-v1"
 MAX_INDEX_BYTES = 16 * 1024 * 1024
 MAX_BUDGET_TOKENS = 200_000
 MAX_CANONICAL_READS = 64
+MAX_PACKET_ITEMS = 1000
+MAX_TRACE_ITEMS = MAX_RECORDS * 2 + 2
+MAX_OMITTED_ITEMS = MAX_RECORDS * len(MEMORY_STATUSES)
+MAX_NAVIGATION_SCORE = 1_000_000
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = PLUGIN_ROOT / "assets" / "context" / "hierarchical-context-contract.v1.json"
 DERIVED_RELATIVE = Path(".opc") / "derived" / "hierarchical-recall-v1"
 INDEX_NAME = "index.json"
 PORTABLE = re.compile(r"^[A-Za-z0-9._-]+$")
+PORTABLE_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GIT_COMMIT = re.compile(r"^[0-9a-f]{40,64}$")
 TOKEN_TERMS = re.compile(r"[\w-]+", re.UNICODE)
@@ -69,6 +77,27 @@ TOKEN_TERMS = re.compile(r"[\w-]+", re.UNICODE)
 
 class HierarchicalError(RuntimeError):
     """A redacted, user-actionable hierarchical recall error."""
+
+
+def _publish_mkdir(path: Path) -> None:
+    os.mkdir(path)
+
+
+def _publish_open(path: Path) -> int:
+    return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+
+
+def _publish_write(descriptor: int, payload: bytes) -> None:
+    if os.write(descriptor, payload) != len(payload):
+        raise HierarchicalError("derived publish write was incomplete")
+
+
+def _publish_fsync(descriptor: int) -> None:
+    os.fsync(descriptor)
+
+
+def _publish_replace(source: Path, destination: Path) -> None:
+    os.replace(source, destination)
 
 
 def _strict_json_bytes(value: Mapping[str, Any], *, maximum: int = MAX_INDEX_BYTES) -> bytes:
@@ -149,6 +178,11 @@ def load_contract() -> dict[str, Any]:
         "preview_writes": False,
         "hard_filter_before_navigation": True,
         "l2_revalidation_required": True,
+        "shared_relation_governance": True,
+        "canonical_governance_snapshot_required": True,
+        "canonical_content_materialization_l2_only": True,
+        "joint_packet_trace_validation": True,
+        "publish_failure_restores_pre_call_tree": True,
     }
     for key, value in expected.items():
         if contract.get(key) != value:
@@ -159,6 +193,10 @@ def load_contract() -> dict[str, Any]:
         "records": MAX_RECORDS,
         "canonical_reads": MAX_CANONICAL_READS,
         "budget_tokens": MAX_BUDGET_TOKENS,
+        "packet_items": MAX_PACKET_ITEMS,
+        "trace_items": MAX_TRACE_ITEMS,
+        "omitted_items": MAX_OMITTED_ITEMS,
+        "navigation_score": MAX_NAVIGATION_SCORE,
     }:
         raise HierarchicalError("hierarchical contract limits drifted from runtime")
     return contract
@@ -230,6 +268,54 @@ def _leaf_from_record(
         "source_commit": provenance.get("source_commit"),
         "content_sha256": provenance.get("content_hash"),
     }
+
+
+def _governance_leaf_matches(
+    leaf: Mapping[str, Any],
+    record: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+) -> bool:
+    """Bind disposable navigation metadata to canonical governance metadata."""
+
+    try:
+        canonical = {
+            "node_id": record["id"],
+            "knowledge_type": record["type"],
+            "scope": record["scope"],
+            "project_id": record.get("project_id"),
+            "status": record["status"],
+            "sensitivity": record.get("sensitivity", "internal"),
+            "applicability": normalize_applicability(record),
+            "relations": normalize_relations(record),
+            "source_path": provenance["source_path"],
+            "source_commit": provenance["source_commit"],
+            "content_sha256": provenance["content_hash"],
+        }
+    except (GovernanceError, KeyError, TypeError):
+        return False
+    return all(leaf.get(key) == value for key, value in canonical.items())
+
+
+def _governance_snapshot_matches_index(
+    leaves: Mapping[str, Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
+) -> bool:
+    inventory = snapshot.get("inventory")
+    provenance = snapshot.get("provenance")
+    if not isinstance(inventory, Mapping) or not isinstance(provenance, Mapping):
+        return False
+    if set(leaves) != set(inventory) or set(inventory) != set(provenance):
+        return False
+    return all(
+        isinstance(inventory[record_id], Mapping)
+        and isinstance(provenance[record_id], Mapping)
+        and _governance_leaf_matches(
+            leaf,
+            inventory[record_id],
+            provenance[record_id],
+        )
+        for record_id, leaf in leaves.items()
+    )
 
 
 def _containers(leaves: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -377,52 +463,122 @@ class HierarchicalIndex:
         payload = _strict_json_bytes(index)
         if sha256_bytes(payload) != approval_token:
             raise HierarchicalError("canonical knowledge changed after preview")
-        self.directory.parent.mkdir(parents=True, exist_ok=True)
-        if self.directory.parent.is_symlink():
-            raise HierarchicalError("derived parent is linked")
-        self.directory.mkdir(exist_ok=True)
-        try:
-            self.directory.resolve().relative_to(self.data_root)
-        except ValueError as exc:
-            raise HierarchicalError("derived directory escaped private data_root") from exc
-        parent_token = _directory_object_token(_lstat_identity(self.directory))
         ignore = self.data_root / ".opc" / ".gitignore"
         ignore_payload = b"*\n!.gitignore\n"
-        if ignore.exists():
-            existing_ignore = _read_bounded_bytes(
-                ignore, label="derived ignore marker", maximum=64
-            )
-            if existing_ignore != ignore_payload:
-                raise HierarchicalError("private .opc ignore marker is not owned by this contract")
-        else:
-            descriptor = os.open(ignore, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            try:
-                os.write(descriptor, ignore_payload)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        if self.path.exists():
-            _read_bounded_bytes(
-                self.path,
-                label="existing derived hierarchical index",
-                maximum=MAX_INDEX_BYTES,
-            )
         temporary = self.directory / f".{INDEX_NAME}.tmp-{os.getpid()}"
-        if temporary.exists():
-            raise HierarchicalError("derived temporary path already exists")
-        try:
-            descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        targets = [
+            self.data_root,
+            self.data_root / ".opc",
+            self.data_root / ".opc" / "derived",
+            self.directory,
+        ]
+        created_dirs: list[tuple[Path, str]] = []
+        bindings: dict[Path, str] = {}
+        created_ignore_identity: dict[str, int] | None = None
+        created_temporary_identity: dict[str, int] | None = None
+        committed = False
+
+        def bind_directory(path: Path) -> str:
+            identity = _lstat_identity(path)
+            if path.is_symlink() or not stat.S_ISDIR(identity["mode"]):
+                raise HierarchicalError("derived transaction parent is not a stable directory")
             try:
-                os.write(descriptor, payload)
-                os.fsync(descriptor)
+                path.resolve().relative_to(self.data_root.parent)
+            except ValueError as exc:
+                raise HierarchicalError("derived transaction directory escaped private data") from exc
+            return _directory_object_token(identity)
+
+        def verify_bindings() -> None:
+            for path, token in bindings.items():
+                if bind_directory(path) != token:
+                    raise HierarchicalError("derived transaction parent changed")
+
+        try:
+            anchor = self.data_root.parent
+            anchor_token = bind_directory(anchor)
+            for target in targets:
+                if bind_directory(anchor) != anchor_token:
+                    raise HierarchicalError("derived transaction anchor changed")
+                verify_bindings()
+                if target.exists():
+                    token = bind_directory(target)
+                else:
+                    parent = target.parent
+                    expected_parent = bindings.get(parent, anchor_token)
+                    if bind_directory(parent) != expected_parent:
+                        raise HierarchicalError("derived transaction parent changed before mkdir")
+                    _publish_mkdir(target)
+                    token = bind_directory(target)
+                    created_dirs.append((target, token))
+                bindings[target] = token
+
+            verify_bindings()
+            if ignore.exists():
+                existing_ignore = _read_bounded_bytes(
+                    ignore, label="derived ignore marker", maximum=64
+                )
+                if existing_ignore != ignore_payload:
+                    raise HierarchicalError("private .opc ignore marker is not owned by this contract")
+            else:
+                descriptor = _publish_open(ignore)
+                try:
+                    created_ignore_identity = _lstat_identity(ignore)
+                    _publish_write(descriptor, ignore_payload)
+                    _publish_fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+
+            verify_bindings()
+            if self.path.exists():
+                _read_bounded_bytes(
+                    self.path,
+                    label="existing derived hierarchical index",
+                    maximum=MAX_INDEX_BYTES,
+                )
+            if temporary.exists():
+                raise HierarchicalError("derived temporary path already exists")
+            descriptor = _publish_open(temporary)
+            try:
+                created_temporary_identity = _lstat_identity(temporary)
+                _publish_write(descriptor, payload)
+                _publish_fsync(descriptor)
             finally:
                 os.close(descriptor)
-            if _directory_object_token(_lstat_identity(self.directory)) != parent_token:
-                raise HierarchicalError("derived parent changed during publish")
-            os.replace(temporary, self.path)
+            verify_bindings()
+            _publish_replace(temporary, self.path)
+            committed = True
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            if created_temporary_identity is not None and temporary.exists():
+                try:
+                    current = _lstat_identity(temporary)
+                    if all(
+                        current[key] == created_temporary_identity[key]
+                        for key in ("device", "inode", "mode")
+                    ) and current["links"] == 1:
+                        temporary.unlink()
+                except OSError:
+                    pass
+            if not committed:
+                if created_ignore_identity is not None and ignore.exists():
+                    try:
+                        current = _lstat_identity(ignore)
+                        same_object = all(
+                            current[key] == created_ignore_identity[key]
+                            for key in ("device", "inode", "mode")
+                        )
+                        if (
+                            same_object
+                            and current["links"] == 1
+                        ):
+                            ignore.unlink()
+                    except (HierarchicalError, OpcMemoryError, OSError):
+                        pass
+                for path, token in reversed(created_dirs):
+                    try:
+                        if bind_directory(path) == token:
+                            path.rmdir()
+                    except (HierarchicalError, OSError):
+                        pass
         return {
             **plan,
             "dry_run": False,
@@ -552,6 +708,14 @@ def _bucket(record: Mapping[str, Any]) -> str:
     return "facts"
 
 
+def _packet_items(packet: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [
+        item
+        for bucket in ("facts", "decisions", "experiences", "procedures")
+        for item in packet.get(bucket, [])
+    ]
+
+
 def validate_context_packet(packet: Mapping[str, Any]) -> None:
     expected = {
         "schema_version", "query_sha256", "mode", "facts", "decisions",
@@ -579,6 +743,7 @@ def validate_context_packet(packet: Mapping[str, Any]) -> None:
         if (
             not isinstance(source_path, str)
             or not source_path
+            or not PORTABLE_REF.fullmatch(source_path)
             or "\\" in source_path
             or source_path.startswith("/")
             or any(part in {"", ".", ".."} for part in source_path.split("/"))
@@ -587,17 +752,24 @@ def validate_context_packet(packet: Mapping[str, Any]) -> None:
             or value["status"] != "approved"
             or value["scope"] not in {"global", "project"}
             or value["sensitivity"] not in {"public", "internal", "restricted"}
+            or len(source_path) > 240
         ):
             raise HierarchicalError("ContextPacket citation provenance is invalid")
         project_id = value["project_id"]
+        if value["scope"] == "global" and project_id is not None:
+            raise HierarchicalError("global citation includes a project id")
+        if value["scope"] == "project" and project_id is None:
+            raise HierarchicalError("project citation is missing a project id")
         if project_id is not None:
             _portable(project_id, "citation project id")
         _portable(value["knowledge_type"], "citation knowledge type")
 
+    item_count = 0
     for bucket in ("facts", "decisions", "experiences", "procedures"):
         items = packet.get(bucket)
-        if not isinstance(items, list):
+        if not isinstance(items, list) or len(items) > MAX_PACKET_ITEMS:
             raise HierarchicalError("ContextPacket category must be an array")
+        item_count += len(items)
         for item in items:
             if not isinstance(item, dict) or set(item) != {
                 "record_id", "content", "citation", "token_cost"
@@ -606,19 +778,30 @@ def validate_context_packet(packet: Mapping[str, Any]) -> None:
             _portable(item["record_id"], "ContextPacket record id")
             if (
                 not isinstance(item["content"], str)
+                or not item["content"]
+                or len(item["content"]) > MAX_TEXT
                 or isinstance(item["token_cost"], bool)
                 or not isinstance(item["token_cost"], int)
                 or item["token_cost"] < 1
             ):
                 raise HierarchicalError("ContextPacket item is invalid")
             validate_citation(item["citation"])
+            if item["record_id"] != item["citation"]["record_id"]:
+                raise HierarchicalError("ContextPacket item citation identity differs")
+            expected_cost = _token_cost(item["content"]) + _token_cost(
+                json.dumps(item["citation"], sort_keys=True)
+            )
+            if item["token_cost"] != expected_cost:
+                raise HierarchicalError("ContextPacket item token cost is invalid")
+    if item_count > MAX_PACKET_ITEMS:
+        raise HierarchicalError("ContextPacket item limit was exceeded")
     citations = packet.get("citations")
-    if not isinstance(citations, list):
+    if not isinstance(citations, list) or len(citations) > MAX_PACKET_ITEMS:
         raise HierarchicalError("ContextPacket citations must be an array")
     for citation in citations:
         validate_citation(citation)
     conflicts = packet.get("conflicts")
-    if not isinstance(conflicts, list):
+    if not isinstance(conflicts, list) or len(conflicts) > MAX_PACKET_ITEMS:
         raise HierarchicalError("ContextPacket conflicts must be an array")
     for conflict in conflicts:
         if (
@@ -631,6 +814,8 @@ def validate_context_packet(packet: Mapping[str, Any]) -> None:
             raise HierarchicalError("ContextPacket conflict fields are invalid")
         for citation in conflict["citations"]:
             validate_citation(citation)
+        if conflict["citations"][0]["record_id"] == conflict["citations"][1]["record_id"]:
+            raise HierarchicalError("ContextPacket conflict citations must differ")
     budget = packet.get("budget")
     if not isinstance(budget, dict) or set(budget) != {
         "limit_tokens", "used_tokens", "remaining_tokens"
@@ -647,14 +832,26 @@ def validate_context_packet(packet: Mapping[str, Any]) -> None:
         or used + remaining != limit
     ):
         raise HierarchicalError("ContextPacket budget aggregate is impossible")
+    items = _packet_items(packet)
+    expected_citations = [item["citation"] for item in items]
+    if citations != expected_citations:
+        raise HierarchicalError("ContextPacket top citations differ from injected items")
+    if used != sum(item["token_cost"] for item in items):
+        raise HierarchicalError("ContextPacket used token cost differs from injected items")
     omitted = packet.get("omitted_summary")
     if not isinstance(omitted, dict) or set(omitted) != {"count", "reason_codes"}:
         raise HierarchicalError("ContextPacket omitted summary is invalid")
-    if isinstance(omitted["count"], bool) or not isinstance(omitted["count"], int) or omitted["count"] < 0:
+    if (
+        isinstance(omitted["count"], bool)
+        or not isinstance(omitted["count"], int)
+        or not 0 <= omitted["count"] <= MAX_OMITTED_ITEMS
+    ):
         raise HierarchicalError("ContextPacket omitted count is invalid")
     if (
         not isinstance(omitted["reason_codes"], list)
+        or len(omitted["reason_codes"]) > MAX_RELATIONS
         or any(not isinstance(item, str) or not item for item in omitted["reason_codes"])
+        or any(len(item) > 128 or not PORTABLE.fullmatch(item) for item in omitted["reason_codes"])
         or omitted["reason_codes"] != sorted(set(omitted["reason_codes"]))
     ):
         raise HierarchicalError("ContextPacket omission reasons are invalid")
@@ -664,7 +861,7 @@ def validate_recall_trace(trace: Mapping[str, Any]) -> None:
     expected = {
         "schema_version", "query_sha256", "mode", "root_selection", "expansions",
         "discards", "fallbacks", "final_leaves", "canonical_read_count",
-        "injected_token_cost",
+        "canonical_reads", "injected_token_cost",
     }
     if not isinstance(trace, Mapping) or set(trace) != expected:
         raise HierarchicalError("RecallTrace fields are not strict")
@@ -692,17 +889,27 @@ def validate_recall_trace(trace: Mapping[str, Any]) -> None:
             raise HierarchicalError("RecallTrace contains a non-finite score")
 
     inspect(trace)
-    if not isinstance(trace["root_selection"], list) or not isinstance(trace["expansions"], list):
+    if (
+        not isinstance(trace["root_selection"], list)
+        or len(trace["root_selection"]) > 2
+        or not isinstance(trace["expansions"], list)
+        or len(trace["expansions"]) > MAX_TRACE_ITEMS
+    ):
         raise HierarchicalError("RecallTrace navigation fields must be arrays")
+    for field in ("root_selection", "expansions"):
+        serialized = [json.dumps(item, sort_keys=True) for item in trace[field]]
+        if len(serialized) != len(set(serialized)):
+            raise HierarchicalError(f"RecallTrace {field} must be unique")
     for root in trace["root_selection"]:
         if (
             not isinstance(root, dict)
             or set(root) != {"uri", "score"}
             or not isinstance(root["uri"], str)
             or not root["uri"].startswith("opc://")
+            or len(root["uri"]) > 512
             or isinstance(root["score"], bool)
             or not isinstance(root["score"], int)
-            or root["score"] < 0
+            or not 0 <= root["score"] <= MAX_NAVIGATION_SCORE
         ):
             raise HierarchicalError("RecallTrace root selection is invalid")
     for expansion in trace["expansions"]:
@@ -714,9 +921,10 @@ def validate_recall_trace(trace: Mapping[str, Any]) -> None:
         if (
             not isinstance(expansion["uri"], str)
             or not expansion["uri"].startswith("opc://")
+            or len(expansion["uri"]) > 512
             or isinstance(expansion["score"], bool)
             or not isinstance(expansion["score"], int)
-            or expansion["score"] < 0
+            or not 0 <= expansion["score"] <= MAX_NAVIGATION_SCORE
         ):
             raise HierarchicalError("RecallTrace expansion is invalid")
         if "leaf_id" in expansion:
@@ -725,7 +933,7 @@ def validate_recall_trace(trace: Mapping[str, Any]) -> None:
                 raise HierarchicalError("RecallTrace leaf action is invalid")
         elif expansion["action"] != "expanded":
             raise HierarchicalError("RecallTrace node action is invalid")
-    if not isinstance(trace["discards"], list):
+    if not isinstance(trace["discards"], list) or len(trace["discards"]) > MAX_TRACE_ITEMS:
         raise HierarchicalError("RecallTrace discards must be an array")
     for discard in trace["discards"]:
         if not isinstance(discard, dict) or set(discard) not in (
@@ -739,12 +947,16 @@ def validate_recall_trace(trace: Mapping[str, Any]) -> None:
         if (
             not isinstance(reasons, list)
             or not reasons
+            or len(reasons) > MAX_RELATIONS
             or any(not isinstance(item, str) or not item for item in reasons)
+            or any(len(item) > 128 or not PORTABLE.fullmatch(item) for item in reasons)
             or reasons != sorted(set(reasons))
         ):
             raise HierarchicalError("RecallTrace discard reasons are invalid")
     if (
         not isinstance(trace["fallbacks"], list)
+        or len(trace["fallbacks"]) > 2
+        or len(trace["fallbacks"]) != len(set(trace["fallbacks"]))
         or any(
             item not in {"flat-file-git", "provider-error-file-hierarchy"}
             for item in trace["fallbacks"]
@@ -759,12 +971,37 @@ def validate_recall_trace(trace: Mapping[str, Any]) -> None:
         raise HierarchicalError("RecallTrace canonical read limit was exceeded")
     if trace["injected_token_cost"] > MAX_BUDGET_TOKENS:
         raise HierarchicalError("RecallTrace injected token cost is invalid")
-    if not isinstance(trace["final_leaves"], list):
-        raise HierarchicalError("RecallTrace final leaves must be an array")
-    if len(trace["final_leaves"]) != len(set(trace["final_leaves"])):
-        raise HierarchicalError("RecallTrace final leaves must be unique")
-    for record_id in trace["final_leaves"]:
-        _portable(record_id, "RecallTrace final leaf")
+    for field, maximum in (
+        ("canonical_reads", MAX_CANONICAL_READS),
+        ("final_leaves", MAX_CANONICAL_READS),
+    ):
+        values = trace[field]
+        if not isinstance(values, list) or len(values) > maximum:
+            raise HierarchicalError(f"RecallTrace {field} must be a bounded array")
+        if len(values) != len(set(values)):
+            raise HierarchicalError(f"RecallTrace {field} must be unique")
+        for record_id in values:
+            _portable(record_id, f"RecallTrace {field} record")
+    if trace["canonical_read_count"] != len(trace["canonical_reads"]):
+        raise HierarchicalError("RecallTrace canonical read aggregate differs from reads")
+
+
+def validate_recall_result(result: Mapping[str, Any]) -> None:
+    if not isinstance(result, Mapping) or set(result) != {"context_packet", "recall_trace"}:
+        raise HierarchicalError("recall result fields are not strict")
+    packet = result["context_packet"]
+    trace = result["recall_trace"]
+    validate_context_packet(packet)
+    validate_recall_trace(trace)
+    if packet["query_sha256"] != trace["query_sha256"] or packet["mode"] != trace["mode"]:
+        raise HierarchicalError("packet and trace identity differs")
+    item_ids = [item["record_id"] for item in _packet_items(packet)]
+    if trace["final_leaves"] != item_ids:
+        raise HierarchicalError("trace final leaves differ from injected packet items")
+    if not set(item_ids).issubset(set(trace["canonical_reads"])):
+        raise HierarchicalError("injected leaves were not canonically read")
+    if trace["injected_token_cost"] != packet["budget"]["used_tokens"]:
+        raise HierarchicalError("packet and trace injected token cost differs")
 
 
 class HierarchicalRecall:
@@ -785,7 +1022,13 @@ class HierarchicalRecall:
         self.provider_enabled = bool(provider_enabled and provider is not None)
         self.timeout_seconds = max(0.01, float(timeout_seconds))
 
-    def _flat_fallback(self, query: str, **values: Any) -> dict[str, Any]:
+    def _flat_fallback(
+        self,
+        query: str,
+        *,
+        reason_code: str = "derived_index_unavailable_or_stale",
+        **values: Any,
+    ) -> dict[str, Any]:
         limit = int(values["limit"])
         context = self.backend.query_context(
             query,
@@ -811,15 +1054,16 @@ class HierarchicalRecall:
             "mode": "flat-file-git-fallback",
             "root_selection": [],
             "expansions": [],
-            "discards": [{"reason_codes": ["derived_index_unavailable_or_stale"]}],
+            "discards": [{"reason_codes": [reason_code]}],
             "fallbacks": ["flat-file-git"],
-            "final_leaves": [record["id"] for record in context["records"]],
+            "final_leaves": [item["record_id"] for item in _packet_items(packet)],
+            "canonical_reads": [record["id"] for record in context["records"]],
             "canonical_read_count": len(context["records"]),
             "injected_token_cost": packet["budget"]["used_tokens"],
         }
-        validate_context_packet(packet)
-        validate_recall_trace(trace)
-        return {"context_packet": packet, "recall_trace": trace}
+        result = {"context_packet": packet, "recall_trace": trace}
+        validate_recall_result(result)
+        return result
 
     def _packet_from_records(
         self,
@@ -840,7 +1084,7 @@ class HierarchicalRecall:
             "experiences": [],
             "procedures": [],
             "citations": [],
-            "conflicts": [dict(item) for item in conflicts],
+            "conflicts": [dict(item) for item in conflicts[:MAX_PACKET_ITEMS]],
             "budget": {"limit_tokens": budget_tokens, "used_tokens": 0, "remaining_tokens": budget_tokens},
             "omitted_summary": {"count": len(pre_omissions), "reason_codes": sorted({reason for item in pre_omissions for reason in item.get("reason_codes", [])})},
         }
@@ -858,7 +1102,6 @@ class HierarchicalRecall:
                 continue
             item = {"record_id": record["id"], "content": content, "citation": dict(citation), "token_cost": item_cost}
             packet[_bucket(record)].append(item)
-            packet["citations"].append(dict(citation))
             used += item_cost
         packet["budget"] = {
             "limit_tokens": budget_tokens,
@@ -866,6 +1109,9 @@ class HierarchicalRecall:
             "remaining_tokens": budget_tokens - used,
         }
         packet["omitted_summary"]["reason_codes"] = sorted(set(omitted))
+        packet["citations"] = [
+            dict(item["citation"]) for item in _packet_items(packet)
+        ]
         return packet
 
     def query(
@@ -925,32 +1171,39 @@ class HierarchicalRecall:
             return self._flat_fallback(query, **fallback_values)
 
         leaves = {str(item.get("node_id")): item for item in index["leaves"] if isinstance(item, dict)}
+        try:
+            snapshot = self.backend.governance_snapshot()
+            canonical_inventory = snapshot["inventory"]
+            canonical_provenance = snapshot["provenance"]
+            if not _governance_snapshot_matches_index(leaves, snapshot):
+                raise HierarchicalError("derived governance metadata changed")
+        except (GovernanceError, HierarchicalError, OpcMemoryError, OSError, KeyError, TypeError):
+            return self._flat_fallback(
+                query,
+                reason_code="derived_governance_mismatch",
+                **fallback_values,
+            )
+
         base_reasons: dict[str, set[str]] = {}
-        for record_id, leaf in leaves.items():
+        for record_id, record in canonical_inventory.items():
             reasons: set[str] = set()
-            if leaf.get("status") != "approved":
-                reasons.add(str(leaf.get("status") or "status_invalid"))
-            scope = leaf.get("scope")
-            if scope == "global":
-                if leaf.get("project_id") is not None:
-                    reasons.add("project_scope_mismatch")
-            elif scope != "project" or not project_id or leaf.get("project_id") != project_id:
+            if record.get("status") != "approved":
+                reasons.add(str(record.get("status") or "status_invalid"))
+            if not self.backend._scope_matches(record, project_id):
                 reasons.add("project_scope_mismatch")
-            if leaf.get("source_commit") != head or not SHA256.fullmatch(str(leaf.get("content_sha256", ""))):
+            provenance = canonical_provenance.get(record_id, {})
+            if provenance.get("source_commit") != head or not SHA256.fullmatch(
+                str(provenance.get("content_hash", ""))
+            ):
                 reasons.add("stale_provenance")
-            if leaf.get("sensitivity") not in sensitivities:
+            if record.get("sensitivity", "internal") not in sensitivities:
                 reasons.add("sensitivity_not_authorized")
-            if memory_type and leaf.get("knowledge_type") != memory_type:
+            if memory_type and record.get("type") != memory_type:
                 reasons.add("knowledge_type_not_applicable")
             try:
-                shadow_record = {
-                    "schema_version": 2,
-                    "type": leaf.get("knowledge_type"),
-                    "applicability": leaf.get("applicability"),
-                }
                 reasons.update(
                     applicability_reasons(
-                        shadow_record,
+                        record,
                         role=role,
                         knowledge_type=memory_type,
                         context=context_values,
@@ -961,49 +1214,23 @@ class HierarchicalRecall:
                 reasons.add("applicability_invalid")
             base_reasons[record_id] = reasons
 
-        eligible = {record_id for record_id, reasons in base_reasons.items() if not reasons}
-        relation_reasons: dict[str, set[str]] = {record_id: set() for record_id in leaves}
-        relations: list[tuple[str, str, str]] = []
-        edges: dict[str, set[str]] = {}
-        for source_id in sorted(eligible):
-            value = leaves[source_id].get("relations")
-            if not isinstance(value, list):
-                relation_reasons[source_id].add("relations_invalid")
-                continue
-            for relation in value:
-                if not isinstance(relation, Mapping) or not relation_applies(relation, project_id):
-                    continue
-                target = str(relation.get("target_id", ""))
-                kind = str(relation.get("kind", ""))
-                if target not in leaves:
-                    relation_reasons[source_id].add("relation_target_missing")
-                    continue
-                if target not in eligible:
-                    if kind in {"superseded_by", "invalidated_by"}:
-                        relation_reasons[source_id].add("relation_target_ineligible")
-                    continue
-                relations.append((source_id, target, kind))
-                if kind != "conflicts":
-                    edges.setdefault(source_id, set()).add(target)
-        for record_id in relation_cycles(edges):
-            relation_reasons[record_id].add("relation_cycle")
-        for source, target, kind in relations:
-            if relation_reasons[source] or relation_reasons[target]:
-                continue
-            if kind in {"supersedes", "invalidates"}:
-                relation_reasons[target].add("superseded" if kind == "supersedes" else "invalidated")
-            elif kind in {"superseded_by", "invalidated_by"}:
-                relation_reasons[source].add("superseded" if kind == "superseded_by" else "invalidated")
-        conflict_pairs = {
-            tuple(sorted((source, target)))
-            for source, target, kind in relations
-            if kind == "conflicts" and not relation_reasons[source] and not relation_reasons[target]
+        governance = evaluate_relation_governance(
+            canonical_inventory,
+            base_reasons,
+            project_id=project_id,
+        )
+        relation_reasons = {
+            record_id: set(reasons)
+            for record_id, reasons in governance["relation_reasons"].items()
         }
+        conflict_pairs = set(governance["conflict_pairs"])
         conflicted = {item for pair in conflict_pairs for item in pair}
         for item in conflicted:
             relation_reasons[item].add("unresolved_conflict")
         eligible = {
-            record_id for record_id in eligible if not relation_reasons[record_id]
+            record_id
+            for record_id, reasons in base_reasons.items()
+            if not reasons and not relation_reasons[record_id]
         }
 
         trace: dict[str, Any] = {
@@ -1015,6 +1242,7 @@ class HierarchicalRecall:
             "discards": [],
             "fallbacks": [],
             "final_leaves": [],
+            "canonical_reads": [],
             "canonical_read_count": 0,
             "injected_token_cost": 0,
         }
@@ -1144,6 +1372,24 @@ class HierarchicalRecall:
                 continue
             selected.append(item)
 
+        # Close the metadata/body TOCTOU window before any L2 body is read.
+        # The second bounded metadata snapshot also covers inverse incoming
+        # relations that a tampered derived leaf cannot reveal.
+        try:
+            final_snapshot = self.backend.governance_snapshot()
+            if (
+                final_snapshot != snapshot
+                or not _governance_snapshot_matches_index(leaves, final_snapshot)
+                or _head(self.backend.root) != head
+            ):
+                raise HierarchicalError("canonical governance changed during navigation")
+        except (GovernanceError, HierarchicalError, OpcMemoryError, OSError, KeyError, TypeError):
+            return self._flat_fallback(
+                query,
+                reason_code="canonical_governance_changed",
+                **fallback_values,
+            )
+
         canonical_records: list[dict[str, Any]] = []
         for leaf in selected:
             if len(canonical_records) >= limit:
@@ -1156,8 +1402,12 @@ class HierarchicalRecall:
                     approved_only=True,
                 )
                 trace["canonical_read_count"] += 1
-                if record.get("id") != leaf.get("node_id") or not self.backend._scope_matches(record, project_id):
-                    raise HierarchicalError("canonical scope or identity changed")
+                trace["canonical_reads"].append(str(leaf["node_id"]))
+                provenance = self.backend.source_metadata(str(leaf["source_path"]))
+                if not _governance_leaf_matches(leaf, record, provenance):
+                    raise HierarchicalError("canonical governance changed")
+                if not self.backend._scope_matches(record, project_id):
+                    raise HierarchicalError("canonical scope changed")
                 reasons = applicability_reasons(
                     record,
                     role=role,
@@ -1167,7 +1417,6 @@ class HierarchicalRecall:
                 )
                 if reasons or record.get("sensitivity", "internal") not in sensitivities:
                     raise HierarchicalError("canonical applicability changed")
-                provenance = self.backend.source_metadata(str(leaf["source_path"]))
                 if provenance.get("source_commit") != head or provenance.get("content_hash") != leaf.get("content_sha256"):
                     raise HierarchicalError("canonical provenance changed")
                 result = dict(record)
@@ -1180,28 +1429,21 @@ class HierarchicalRecall:
 
         conflicts: list[dict[str, Any]] = []
         for left, right in sorted(conflict_pairs):
-            citations: list[dict[str, Any]] = []
-            for record_id in (left, right):
-                if trace["canonical_read_count"] >= MAX_CANONICAL_READS:
-                    citations = []
-                    break
-                leaf = leaves[record_id]
-                try:
-                    record = self.backend.read_authoritative(
-                        source_path=str(leaf["source_path"]),
-                        content_hash=str(leaf["content_sha256"]),
-                        source_commit=str(leaf["source_commit"]),
-                        approved_only=True,
+            try:
+                citations = [
+                    canonical_citation(
+                        canonical_inventory[record_id],
+                        canonical_provenance[record_id],
                     )
-                    trace["canonical_read_count"] += 1
-                    citations.append(
-                        canonical_citation(record, self.backend.source_metadata(str(leaf["source_path"])))
-                    )
-                except (GovernanceError, OpcMemoryError, OSError):
-                    citations = []
-                    break
-            if len(citations) == 2:
-                conflicts.append({"reason_code": "unresolved_conflict", "citations": citations})
+                    for record_id in (left, right)
+                ]
+            except (GovernanceError, KeyError, TypeError):
+                return self._flat_fallback(
+                    query,
+                    reason_code="canonical_governance_changed",
+                    **fallback_values,
+                )
+            conflicts.append({"reason_code": "unresolved_conflict", "citations": citations})
 
         packet = self._packet_from_records(
             query=query,
@@ -1210,11 +1452,13 @@ class HierarchicalRecall:
             budget_tokens=budget_tokens,
             mode="hierarchical-file-git",
         )
-        trace["final_leaves"] = [record["id"] for record in canonical_records]
+        trace["final_leaves"] = [
+            item["record_id"] for item in _packet_items(packet)
+        ]
         trace["injected_token_cost"] = packet["budget"]["used_tokens"]
-        validate_context_packet(packet)
-        validate_recall_trace(trace)
-        return {"context_packet": packet, "recall_trace": trace}
+        result = {"context_packet": packet, "recall_trace": trace}
+        validate_recall_result(result)
+        return result
 
 
 def build_parser() -> argparse.ArgumentParser:

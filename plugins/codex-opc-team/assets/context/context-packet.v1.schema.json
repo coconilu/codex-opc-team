@@ -11,9 +11,10 @@
     "decisions": {"$ref": "#/$defs/items"},
     "experiences": {"$ref": "#/$defs/items"},
     "procedures": {"$ref": "#/$defs/items"},
-    "citations": {"type": "array", "items": {"$ref": "#/$defs/citation"}},
+    "citations": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/citation"}},
     "conflicts": {
       "type": "array",
+      "maxItems": 1000,
       "items": {
         "type": "object",
         "required": ["reason_code", "citations"],
@@ -38,8 +39,8 @@
       "type": "object",
       "required": ["count", "reason_codes"],
       "properties": {
-        "count": {"type": "integer", "minimum": 0},
-        "reason_codes": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+        "count": {"type": "integer", "minimum": 0, "maximum": 20000},
+        "reason_codes": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"}, "uniqueItems": true}
       },
       "additionalProperties": false
     }
@@ -66,13 +67,13 @@
       "required": ["record_id", "content", "citation", "token_cost"],
       "properties": {
         "record_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128},
-        "content": {"type": "string"},
+        "content": {"type": "string", "minLength": 1, "maxLength": 262144},
         "citation": {"$ref": "#/$defs/citation"},
-        "token_cost": {"type": "integer", "minimum": 1}
+        "token_cost": {"type": "integer", "minimum": 1, "maximum": 200000}
       },
       "additionalProperties": false
     },
-    "items": {"type": "array", "items": {"$ref": "#/$defs/item"}}
+    "items": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/item"}}
   },
   "additionalProperties": false
 }

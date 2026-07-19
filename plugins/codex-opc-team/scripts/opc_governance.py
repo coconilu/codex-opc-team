@@ -537,6 +537,126 @@ def relation_cycles(edges: Mapping[str, set[str]]) -> set[str]:
     return cyclic
 
 
+def evaluate_relation_governance(
+    inventory: Mapping[str, Mapping[str, Any]],
+    base_reasons: Mapping[str, Sequence[str]],
+    *,
+    project_id: str | None,
+) -> dict[str, Any]:
+    """Evaluate relation structure and effects once from a frozen graph.
+
+    Callers own record loading, provenance and hard-filter evaluation.  This
+    function is the single #7 relation engine used by flat and hierarchical
+    recall, so ordering and intermediate effects cannot diverge.
+    """
+
+    if len(inventory) > MAX_RECORDS or set(inventory) != set(base_reasons):
+        raise GovernanceError("relation governance inventory is inconsistent")
+    relation_reasons: dict[str, set[str]] = {
+        record_id: set() for record_id in inventory
+    }
+    hard_filter_eligible = {
+        record_id for record_id in inventory if not base_reasons.get(record_id)
+    }
+    normalized_by_source: dict[str, list[dict[str, Any]]] = {}
+    for source_id in sorted(hard_filter_eligible):
+        try:
+            normalized_by_source[source_id] = normalize_relations(
+                inventory[source_id]
+            )
+        except GovernanceError:
+            relation_reasons[source_id].add("relations_invalid")
+
+    edges: dict[str, set[str]] = {}
+    active_relations: list[tuple[str, str, str]] = []
+    for source_id in sorted(hard_filter_eligible):
+        if relation_reasons[source_id]:
+            continue
+        for relation in normalized_by_source.get(source_id, []):
+            if not relation_applies(relation, project_id):
+                continue
+            target_id = relation["target_id"]
+            if target_id not in inventory:
+                relation_reasons[source_id].add("relation_target_missing")
+                continue
+            kind = relation["kind"]
+            if (
+                target_id not in hard_filter_eligible
+                or relation_reasons[target_id]
+            ):
+                if kind in {"superseded_by", "invalidated_by"}:
+                    relation_reasons[source_id].add("relation_target_ineligible")
+                continue
+            active_relations.append((source_id, target_id, kind))
+            if kind != "conflicts":
+                edges.setdefault(source_id, set()).add(target_id)
+
+    for record_id in relation_cycles(edges):
+        relation_reasons[record_id].add("relation_cycle")
+
+    inverse_dependents: dict[str, set[str]] = {}
+    for source_id, target_id, kind in active_relations:
+        if kind in {"superseded_by", "invalidated_by"}:
+            inverse_dependents.setdefault(target_id, set()).add(source_id)
+    structurally_ineligible = [
+        record_id
+        for record_id in sorted(hard_filter_eligible)
+        if relation_reasons[record_id]
+    ]
+    queue_index = 0
+    while queue_index < len(structurally_ineligible):
+        target_id = structurally_ineligible[queue_index]
+        queue_index += 1
+        for source_id in sorted(inverse_dependents.get(target_id, set())):
+            if relation_reasons[source_id]:
+                continue
+            relation_reasons[source_id].add("relation_target_ineligible")
+            structurally_ineligible.append(source_id)
+
+    relation_effects: dict[str, set[str]] = {
+        record_id: set() for record_id in inventory
+    }
+    for source_id, target_id, kind in active_relations:
+        if base_reasons.get(source_id) or relation_reasons[source_id]:
+            continue
+        target_eligible = (
+            not base_reasons.get(target_id)
+            and not relation_reasons[target_id]
+        )
+        if kind in {"supersedes", "invalidates"}:
+            if target_eligible:
+                relation_effects[target_id].add(
+                    "superseded" if kind == "supersedes" else "invalidated"
+                )
+        elif kind in {"superseded_by", "invalidated_by"}:
+            if target_eligible:
+                relation_effects[source_id].add(
+                    "superseded" if kind == "superseded_by" else "invalidated"
+                )
+    for record_id, effects in relation_effects.items():
+        relation_reasons[record_id].update(effects)
+
+    conflict_pairs: set[tuple[str, str]] = set()
+    for source_id, target_id, kind in active_relations:
+        if kind != "conflicts":
+            continue
+        if (
+            not base_reasons.get(source_id)
+            and not relation_reasons[source_id]
+            and not base_reasons.get(target_id)
+            and not relation_reasons[target_id]
+        ):
+            conflict_pairs.add(tuple(sorted((source_id, target_id))))
+
+    return {
+        "relation_reasons": {
+            record_id: tuple(sorted(reasons))
+            for record_id, reasons in sorted(relation_reasons.items())
+        },
+        "conflict_pairs": tuple(sorted(conflict_pairs)),
+    }
+
+
 def validate_query_context(
     *,
     project_id: str | None,

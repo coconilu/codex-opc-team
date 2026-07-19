@@ -9,10 +9,12 @@ against its source file, and failures fall back to deterministic file search.
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import importlib
 import importlib.util
 import json
+import mmap
 import os
 import queue
 import re
@@ -38,11 +40,10 @@ from opc_governance import (
     GovernanceError,
     applicability_reasons,
     canonical_citation,
+    evaluate_relation_governance,
     load_contract as load_governance_contract,
     migrate_record,
     normalize_relations,
-    relation_applies,
-    relation_cycles,
     strict_json_bytes,
     validate_query_context,
     validate_record,
@@ -368,6 +369,328 @@ def _read_bounded_record(path: Path, *, label: str) -> dict[str, Any]:
         _read_bounded_bytes(path, label=label),
         label=label,
     )
+
+
+_JSON_WHITESPACE = frozenset(b" \t\r\n")
+_JSON_HEX = frozenset(b"0123456789abcdefABCDEF")
+_GOVERNANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "id",
+        "type",
+        "status",
+        "scope",
+        "project_id",
+        "sensitivity",
+        "applicability",
+        "relations",
+        "superseded_by",
+    }
+)
+
+
+def _skip_json_whitespace(source: mmap.mmap, offset: int) -> int:
+    while offset < len(source) and source[offset] in _JSON_WHITESPACE:
+        offset += 1
+    return offset
+
+
+def _validate_utf8_range(source: mmap.mmap, start: int, end: int) -> int:
+    """Validate one unescaped JSON-string segment without retaining its text."""
+
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    count = 0
+    for offset in range(start, end, 4096):
+        chunk = memoryview(source)[offset : min(offset + 4096, end)]
+        try:
+            count += len(decoder.decode(chunk))
+        finally:
+            chunk.release()
+    count += len(decoder.decode(b"", final=True))
+    return count
+
+
+def _scan_json_string(source: mmap.mmap, offset: int) -> tuple[int, int]:
+    """Return (exclusive end, decoded length) without materializing the string."""
+
+    if offset >= len(source) or source[offset] != 0x22:
+        raise OpcMemoryError("canonical governance source is not strict JSON")
+    cursor = offset + 1
+    segment_start = cursor
+    decoded_length = 0
+    while cursor < len(source):
+        byte = source[cursor]
+        if byte == 0x22:
+            try:
+                decoded_length += _validate_utf8_range(source, segment_start, cursor)
+            except UnicodeError as exc:
+                raise OpcMemoryError(
+                    "canonical governance source is not strict UTF-8 JSON"
+                ) from exc
+            return cursor + 1, decoded_length
+        if byte == 0x5C:
+            try:
+                decoded_length += _validate_utf8_range(source, segment_start, cursor)
+            except UnicodeError as exc:
+                raise OpcMemoryError(
+                    "canonical governance source is not strict UTF-8 JSON"
+                ) from exc
+            cursor += 1
+            if cursor >= len(source):
+                break
+            escape = source[cursor]
+            if escape == ord("u"):
+                if cursor + 4 >= len(source) or any(
+                    source[index] not in _JSON_HEX
+                    for index in range(cursor + 1, cursor + 5)
+                ):
+                    raise OpcMemoryError("canonical governance source is not strict JSON")
+                cursor += 5
+            elif escape in b'"\\/bfnrt':
+                cursor += 1
+            else:
+                raise OpcMemoryError("canonical governance source is not strict JSON")
+            decoded_length += 1
+            segment_start = cursor
+            continue
+        if byte < 0x20:
+            raise OpcMemoryError("canonical governance source is not strict JSON")
+        cursor += 1
+    raise OpcMemoryError("canonical governance source is not strict JSON")
+
+
+def _scan_json_number(source: mmap.mmap, offset: int) -> int:
+    cursor = offset
+    if source[cursor] == ord("-"):
+        cursor += 1
+        if cursor >= len(source):
+            raise OpcMemoryError("canonical governance source is not strict JSON")
+    if source[cursor] == ord("0"):
+        cursor += 1
+        if cursor < len(source) and ord("0") <= source[cursor] <= ord("9"):
+            raise OpcMemoryError("canonical governance source is not strict JSON")
+    elif ord("1") <= source[cursor] <= ord("9"):
+        while cursor < len(source) and ord("0") <= source[cursor] <= ord("9"):
+            cursor += 1
+    else:
+        raise OpcMemoryError("canonical governance source is not strict JSON")
+    if cursor < len(source) and source[cursor] == ord("."):
+        cursor += 1
+        if cursor >= len(source) or not ord("0") <= source[cursor] <= ord("9"):
+            raise OpcMemoryError("canonical governance source is not strict JSON")
+        while cursor < len(source) and ord("0") <= source[cursor] <= ord("9"):
+            cursor += 1
+    if cursor < len(source) and source[cursor] in (ord("e"), ord("E")):
+        cursor += 1
+        if cursor < len(source) and source[cursor] in (ord("+"), ord("-")):
+            cursor += 1
+        if cursor >= len(source) or not ord("0") <= source[cursor] <= ord("9"):
+            raise OpcMemoryError("canonical governance source is not strict JSON")
+        while cursor < len(source) and ord("0") <= source[cursor] <= ord("9"):
+            cursor += 1
+    return cursor
+
+
+def _scan_json_value(source: mmap.mmap, offset: int, *, depth: int = 0) -> int:
+    """Validate one JSON value lexically without constructing its value tree."""
+
+    if depth > 64:
+        raise OpcMemoryError("canonical governance source exceeds the JSON depth limit")
+    cursor = _skip_json_whitespace(source, offset)
+    if cursor >= len(source):
+        raise OpcMemoryError("canonical governance source is not strict JSON")
+    byte = source[cursor]
+    if byte == 0x22:
+        return _scan_json_string(source, cursor)[0]
+    if byte in b"-0123456789":
+        return _scan_json_number(source, cursor)
+    for literal in (b"true", b"false", b"null"):
+        if source[cursor : cursor + len(literal)] == literal:
+            return cursor + len(literal)
+    if byte == ord("["):
+        cursor = _skip_json_whitespace(source, cursor + 1)
+        if cursor < len(source) and source[cursor] == ord("]"):
+            return cursor + 1
+        while True:
+            cursor = _skip_json_whitespace(
+                source, _scan_json_value(source, cursor, depth=depth + 1)
+            )
+            if cursor >= len(source):
+                break
+            if source[cursor] == ord("]"):
+                return cursor + 1
+            if source[cursor] != ord(","):
+                break
+            cursor = _skip_json_whitespace(source, cursor + 1)
+        raise OpcMemoryError("canonical governance source is not strict JSON")
+    if byte == ord("{"):
+        cursor = _skip_json_whitespace(source, cursor + 1)
+        keys: set[str] = set()
+        if cursor < len(source) and source[cursor] == ord("}"):
+            return cursor + 1
+        while True:
+            key_end, key_length = _scan_json_string(source, cursor)
+            if key_length > 1024:
+                raise OpcMemoryError("canonical governance JSON key is too long")
+            try:
+                key = json.loads(bytes(memoryview(source)[cursor:key_end]))
+            except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+                raise OpcMemoryError(
+                    "canonical governance source is not strict JSON"
+                ) from exc
+            if key in keys:
+                raise OpcMemoryError("canonical governance source has duplicate JSON keys")
+            keys.add(key)
+            cursor = _skip_json_whitespace(source, key_end)
+            if cursor >= len(source) or source[cursor] != ord(":"):
+                raise OpcMemoryError("canonical governance source is not strict JSON")
+            cursor = _skip_json_whitespace(
+                source, _scan_json_value(source, cursor + 1, depth=depth + 1)
+            )
+            if cursor >= len(source):
+                break
+            if source[cursor] == ord("}"):
+                return cursor + 1
+            if source[cursor] != ord(","):
+                break
+            cursor = _skip_json_whitespace(source, cursor + 1)
+        raise OpcMemoryError("canonical governance source is not strict JSON")
+    raise OpcMemoryError("canonical governance source is not strict JSON")
+
+
+def _canonical_sha256_mapped(source: mmap.mmap) -> str:
+    """Hash with the same CRLF normalization as canonical source validation."""
+
+    digest = hashlib.sha256()
+    start = 0
+    cursor = 0
+    view = memoryview(source)
+    try:
+        while cursor + 1 < len(source):
+            if source[cursor] == 0x0D and source[cursor + 1] == 0x0A:
+                digest.update(view[start:cursor])
+                digest.update(b"\n")
+                cursor += 2
+                start = cursor
+            else:
+                cursor += 1
+        digest.update(view[start:])
+    finally:
+        view.release()
+    return digest.hexdigest()
+
+
+def _governance_projection_from_mapped(
+    source: mmap.mmap,
+) -> tuple[dict[str, Any], str]:
+    """Validate a record while never constructing its ``content`` string."""
+
+    cursor = _skip_json_whitespace(source, 0)
+    if cursor >= len(source) or source[cursor] != ord("{"):
+        raise OpcMemoryError("canonical governance source must be a JSON object")
+    cursor = _skip_json_whitespace(source, cursor + 1)
+    record_without_content: dict[str, Any] = {}
+    content_seen = False
+    if cursor < len(source) and source[cursor] == ord("}"):
+        raise OpcMemoryError("canonical governance source is missing required fields")
+    while True:
+        key_end, key_length = _scan_json_string(source, cursor)
+        if key_length > 1024:
+            raise OpcMemoryError("canonical governance JSON key is too long")
+        try:
+            key = json.loads(bytes(memoryview(source)[cursor:key_end]))
+        except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            raise OpcMemoryError("canonical governance source is not strict JSON") from exc
+        if key == "content" and content_seen or key in record_without_content:
+            raise OpcMemoryError("canonical governance source has duplicate JSON keys")
+        cursor = _skip_json_whitespace(source, key_end)
+        if cursor >= len(source) or source[cursor] != ord(":"):
+            raise OpcMemoryError("canonical governance source is not strict JSON")
+        value_start = _skip_json_whitespace(source, cursor + 1)
+        value_end = _scan_json_value(source, value_start, depth=1)
+        if key == "content":
+            if source[value_start] != ord('"'):
+                raise OpcMemoryError("canonical governance content must be a string")
+            _, content_length = _scan_json_string(source, value_start)
+            if not 1 <= content_length <= 262144:
+                raise OpcMemoryError("canonical governance content length is invalid")
+            content_seen = True
+        else:
+            try:
+                record_without_content[key] = json.loads(
+                    bytes(memoryview(source)[value_start:value_end]),
+                    parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token)),
+                )
+            except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+                raise OpcMemoryError("canonical governance source is not strict JSON") from exc
+        cursor = _skip_json_whitespace(source, value_end)
+        if cursor >= len(source):
+            raise OpcMemoryError("canonical governance source is not strict JSON")
+        if source[cursor] == ord("}"):
+            cursor = _skip_json_whitespace(source, cursor + 1)
+            if cursor != len(source):
+                raise OpcMemoryError("canonical governance source has trailing data")
+            break
+        if source[cursor] != ord(","):
+            raise OpcMemoryError("canonical governance source is not strict JSON")
+        cursor = _skip_json_whitespace(source, cursor + 1)
+    if not content_seen:
+        raise OpcMemoryError("canonical governance source is missing content")
+    validation_record = dict(record_without_content)
+    validation_record["content"] = "[not-materialized]"
+    try:
+        validate_record(validation_record)
+    except GovernanceError as exc:
+        raise OpcMemoryError(f"canonical governance source: {exc}") from exc
+    return (
+        {key: value for key, value in record_without_content.items() if key in _GOVERNANCE_FIELDS},
+        _canonical_sha256_mapped(source),
+    )
+
+
+def _read_governance_projection(path: Path) -> tuple[dict[str, Any], str]:
+    """Read governance metadata and provenance without materializing ``content``."""
+
+    candidate = _assert_unlinked_ancestors(path, label="canonical governance source")
+    try:
+        before = candidate.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or not 0 < before.st_size <= MAX_RECORD_BYTES
+        ):
+            raise OpcMemoryError(
+                "canonical governance source must be one bounded, uniquely linked regular file"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
+                or opened.st_size != before.st_size
+                or opened.st_nlink != 1
+                or not stat.S_ISREG(opened.st_mode)
+            ):
+                raise OpcMemoryError("canonical governance source changed before read")
+            with mmap.mmap(descriptor, 0, access=mmap.ACCESS_READ) as mapped:
+                projection = _governance_projection_from_mapped(mapped)
+            after = candidate.lstat()
+            if (
+                after.st_dev != opened.st_dev
+                or after.st_ino != opened.st_ino
+                or after.st_size != opened.st_size
+                or after.st_mtime_ns != opened.st_mtime_ns
+            ):
+                raise OpcMemoryError("canonical governance source changed during read")
+            return projection
+        finally:
+            os.close(descriptor)
+    except OpcMemoryError:
+        raise
+    except OSError as exc:
+        raise OpcMemoryError("canonical governance source could not be read safely") from exc
 
 
 def redact_error(error: Exception) -> str:
@@ -1121,106 +1444,16 @@ class FileGitBackend:
             ):
                 candidate_ids.add(record_id)
 
-        relation_reasons: dict[str, set[str]] = {record_id: set() for record_id in inventory}
-        hard_filter_eligible = {
-            record_id for record_id in inventory if not base_reasons.get(record_id)
+        governance = evaluate_relation_governance(
+            inventory,
+            base_reasons,
+            project_id=project_id,
+        )
+        relation_reasons = {
+            record_id: set(reasons)
+            for record_id, reasons in governance["relation_reasons"].items()
         }
-        normalized_by_source: dict[str, list[dict[str, Any]]] = {}
-        for source_id in sorted(hard_filter_eligible):
-            try:
-                normalized_by_source[source_id] = normalize_relations(
-                    inventory[source_id]
-                )
-            except GovernanceError:
-                relation_reasons[source_id].add("relations_invalid")
-
-        edges: dict[str, set[str]] = {}
-        active_relations: list[tuple[str, str, str]] = []
-        for source_id in sorted(hard_filter_eligible):
-            if relation_reasons[source_id]:
-                continue
-            for relation in normalized_by_source.get(source_id, []):
-                if not relation_applies(relation, project_id):
-                    continue
-                target_id = relation["target_id"]
-                if target_id not in inventory:
-                    relation_reasons[source_id].add("relation_target_missing")
-                    continue
-                kind = relation["kind"]
-                if (
-                    target_id not in hard_filter_eligible
-                    or relation_reasons[target_id]
-                ):
-                    if kind in {"superseded_by", "invalidated_by"}:
-                        relation_reasons[source_id].add("relation_target_ineligible")
-                    continue
-                active_relations.append((source_id, target_id, kind))
-                if kind != "conflicts":
-                    edges.setdefault(source_id, set()).add(target_id)
-
-        for record_id in relation_cycles(edges):
-            relation_reasons[record_id].add("relation_cycle")
-
-        # Finish structural eligibility before computing any governance effect.
-        # For inverse relations, an ineligible target makes the source
-        # ineligible too; propagate that fact with a bounded work queue so the
-        # result cannot depend on record or edge order.
-        inverse_dependents: dict[str, set[str]] = {}
-        for source_id, target_id, kind in active_relations:
-            if kind in {"superseded_by", "invalidated_by"}:
-                inverse_dependents.setdefault(target_id, set()).add(source_id)
-        structurally_ineligible = [
-            record_id
-            for record_id in sorted(hard_filter_eligible)
-            if relation_reasons[record_id]
-        ]
-        queue_index = 0
-        while queue_index < len(structurally_ineligible):
-            target_id = structurally_ineligible[queue_index]
-            queue_index += 1
-            for source_id in sorted(inverse_dependents.get(target_id, set())):
-                if relation_reasons[source_id]:
-                    continue
-                relation_reasons[source_id].add("relation_target_ineligible")
-                structurally_ineligible.append(source_id)
-
-        # Compute effects simultaneously from the frozen, structurally valid
-        # graph. A middle node that is superseded/invalidated by one edge still
-        # contributes all of its own valid outgoing edges in the same graph.
-        relation_effects: dict[str, set[str]] = {
-            record_id: set() for record_id in inventory
-        }
-        for source_id, target_id, kind in active_relations:
-            if base_reasons.get(source_id) or relation_reasons[source_id]:
-                continue
-            target_eligible = (
-                not base_reasons.get(target_id)
-                and not relation_reasons[target_id]
-            )
-            if kind in {"supersedes", "invalidates"}:
-                if target_eligible:
-                    relation_effects[target_id].add(
-                        "superseded" if kind == "supersedes" else "invalidated"
-                    )
-            elif kind in {"superseded_by", "invalidated_by"}:
-                if target_eligible:
-                    relation_effects[source_id].add(
-                        "superseded" if kind == "superseded_by" else "invalidated"
-                    )
-        for record_id, effects in relation_effects.items():
-            relation_reasons[record_id].update(effects)
-
-        conflict_pairs: set[tuple[str, str]] = set()
-        for source_id, target_id, kind in active_relations:
-            if kind != "conflicts":
-                continue
-            if (
-                not base_reasons.get(source_id)
-                and not relation_reasons[source_id]
-                and not base_reasons.get(target_id)
-                and not relation_reasons[target_id]
-            ):
-                conflict_pairs.add(tuple(sorted((source_id, target_id))))
+        conflict_pairs = set(governance["conflict_pairs"])
 
         conflicted = {record_id for pair in conflict_pairs for record_id in pair}
         records: list[dict[str, Any]] = []
@@ -1447,6 +1680,59 @@ class FileGitBackend:
             "source_path": source_path,
             "content_hash": content_hash,
             "source_commit": self.source_commit(path, content_hash),
+        }
+
+    def _governance_source_commit(self, path: Path) -> str | None:
+        """Verify HEAD identity without returning the committed blob to Python."""
+
+        top_text = _git(self.root, ("rev-parse", "--show-toplevel"))
+        head = _git(self.root, ("rev-parse", "HEAD"))
+        if not isinstance(top_text, str) or not isinstance(head, str):
+            return None
+        top = Path(top_text).resolve()
+        try:
+            relative = path.relative_to(top).as_posix()
+        except ValueError:
+            return None
+        committed_oid = _git(top, ("rev-parse", f"{head}:{relative}"))
+        if not isinstance(committed_oid, str) or not committed_oid:
+            return None
+        # Git performs the working-tree/blob comparison internally.  No record
+        # body is returned to the navigation process.
+        clean = _git(top, ("diff", "--quiet", head, "--", relative))
+        return head if clean == "" else None
+
+    def governance_snapshot(self) -> dict[str, Any]:
+        """Return bounded canonical governance metadata without record bodies.
+
+        This is the authority bridge for progressive recall.  It validates the
+        complete canonical record while exposing only fields needed for hard
+        filters, relation-graph evaluation and provenance comparison.  Callers
+        must use ``read_authoritative`` for any body they intend to inject.
+        """
+
+        inventory: dict[str, dict[str, Any]] = {}
+        provenance: dict[str, dict[str, Any]] = {}
+        for status in MEMORY_STATUSES:
+            paths = sorted(self._folder(status).glob("*.json"))
+            if len(paths) > MAX_RECORDS:
+                raise OpcMemoryError("knowledge repository exceeds the configured record limit")
+            for path in paths:
+                metadata, content_hash = _read_governance_projection(path)
+                record_id = safe_record_id(str(metadata["id"]))
+                if path.stem != record_id or record_id in inventory:
+                    raise OpcMemoryError("canonical governance snapshot has duplicate or mismatched ids")
+                source_path = path.relative_to(self.root).as_posix()
+                metadata["_source_path"] = source_path
+                inventory[record_id] = metadata
+                provenance[record_id] = {
+                    "source_path": source_path,
+                    "content_hash": content_hash,
+                    "source_commit": self._governance_source_commit(path),
+                }
+        return {
+            "inventory": inventory,
+            "provenance": provenance,
         }
 
     def read_authoritative(

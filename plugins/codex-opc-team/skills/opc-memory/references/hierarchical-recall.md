@@ -12,3 +12,7 @@ The hierarchical index is derived data separate from Mem0. It lives at `<private
 | Delete | `index-delete --approval-token <exact-token>` | Deletes derived index only |
 
 Prefix commands with `<memory-python> "<plugin-root>/scripts/opc_hierarchical.py" --knowledge-root <knowledge-root> --data-root <private-data-root>`. Missing/invalid/stale index falls back to flat File/Git. Provider failure, timeout, disabled state or disagreement falls back to File hierarchy. Never describe L0/L1 as knowledge facts and never rebuild/approve/write Provider during query.
+
+Flat and hierarchical recall share the same frozen #7 relation-governance engine. Query binds derived relations to canonical governance metadata before navigation and again before L2 reads; any mismatch falls back to flat File/Git. A failed build must restore the exact pre-call private tree, including owned or unknown `.gitignore` semantics.
+
+The metadata snapshots may stream canonical bytes for HEAD/hash provenance, but must skip construction of the `content` value. They cannot place body text in Python objects, navigation scoring, Trace, or token context. Only final selected L2 calls may materialize content through `read_authoritative(...)`.
