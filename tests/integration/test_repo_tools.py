@@ -175,7 +175,10 @@ class PrivacyScanTests(unittest.TestCase):
             original = privacy_scan._path_boundary_kind
 
             def classify(path):
-                if path == boundary:
+                # ``scan`` canonicalizes its root first. Windows runners may
+                # expand a temp-directory alias, so classify the stable entry
+                # name instead of comparing a pre-canonical absolute path.
+                if path.name == boundary.name:
                     return "reparse"
                 return original(path)
 
