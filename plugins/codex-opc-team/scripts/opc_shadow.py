@@ -502,6 +502,15 @@ def _load_contract() -> tuple[dict[str, Any], bytes]:
     }
     if limits != expected_limits:
         raise ShadowError("Shadow Evaluation limits drifted from the runtime contract")
+    policy = contract.get("decision_policy")
+    if not isinstance(policy, dict) or (
+        policy.get("conflicting_quality_deltas") != "inconclusive"
+        or policy.get("conflicting_measured_quality_or_safety_failure")
+        != "conflicting_measured_results"
+        or policy.get("positive_forbids_measured_quality_or_safety_counterevidence")
+        is not True
+    ):
+        raise ShadowError("Shadow Evaluation conflict policy drifted from the runtime contract")
     return contract, raw
 
 
@@ -889,20 +898,32 @@ def evaluate(
     counter = [item for item in all_evidence if item.get("direction") == "counterevidence"]
     neutral = [item for item in all_evidence if item.get("direction") not in {"supporting", "counterevidence"}]
     failures = [*control_failures, *treatment_failures]
+    execution_degraded = bool(failures)
     quality_support = [item for item in comparisons if item["metric_id"] in (*QUALITY_METRICS, *SAFETY_METRICS) and item["direction"] == "supporting"]
     quality_counter = [item for item in comparisons if item["metric_id"] in (*QUALITY_METRICS, *SAFETY_METRICS) and item["direction"] == "counterevidence"]
-    if treatment["scope_leakage_acceptances"] or treatment["stale_obsolete_acceptances"]:
-        quality_counter.append({"metric_id": "safety_gate", "direction": "counterevidence"})
-    if failures:
+    measured_conflict = bool(quality_support and quality_counter)
+    safety_gate_failed = bool(
+        treatment["scope_leakage_acceptances"]
+        or treatment["stale_obsolete_acceptances"]
+    )
+    if measured_conflict:
+        failures.append(
+            {
+                "arm": "comparison",
+                "case_id": "aggregate",
+                "code": "conflicting_measured_results",
+                "failure_ref": "quality_safety",
+            }
+        )
+    if execution_degraded:
         status = "inconclusive"
         degradation_status = "degraded"
         recommendation = "inconclusive"
-    elif quality_support and quality_counter:
+    elif measured_conflict:
         status = "inconclusive"
         degradation_status = "none"
         recommendation = "inconclusive"
-        failures.append({"arm": "comparison", "case_id": "aggregate", "code": "conflicting_measured_results", "failure_ref": "quality_safety"})
-    elif quality_counter:
+    elif quality_counter or safety_gate_failed:
         status = "conclusive"
         degradation_status = "none"
         recommendation = "do_not_promote_on_shadow_evidence"
@@ -1402,6 +1423,44 @@ def validate_result(value: Mapping[str, Any]) -> None:
     _validate_failure_modes(value["failure_modes"])
     _validate_governance(value["governance"])
 
+    measured_quality_support = [
+        item
+        for item in comparisons or []
+        if item.get("metric_id") in (*QUALITY_METRICS, *SAFETY_METRICS)
+        and item.get("source_kind") == "measured"
+        and item.get("direction") == "supporting"
+    ]
+    measured_quality_counter = [
+        item
+        for item in comparisons or []
+        if item.get("metric_id") in (*QUALITY_METRICS, *SAFETY_METRICS)
+        and item.get("source_kind") == "measured"
+        and item.get("direction") == "counterevidence"
+    ]
+    measured_conflict = bool(measured_quality_support and measured_quality_counter)
+    expected_conflict_failure = {
+        "arm": "comparison",
+        "case_id": "aggregate",
+        "code": "conflicting_measured_results",
+        "failure_ref": "quality_safety",
+    }
+    conflict_failures = [
+        item
+        for item in value["failure_modes"]
+        if item.get("code") == "conflicting_measured_results"
+    ]
+    if measured_conflict:
+        if (
+            value["status"] != "inconclusive"
+            or value["recommendation"] != "inconclusive"
+            or conflict_failures != [expected_conflict_failure]
+        ):
+            raise ShadowError(
+                "measured quality or safety conflict must remain inconclusive with its exact failure"
+            )
+    elif conflict_failures:
+        raise ShadowError("result claims a measured conflict without bidirectional evidence")
+
     passed = value["preflight"]["passed"]
     if not passed:
         if (
@@ -1429,19 +1488,13 @@ def validate_result(value: Mapping[str, Any]) -> None:
     failures = value["failure_modes"]
     recommendation = value["recommendation"]
     if recommendation == "consider_for_separate_curation":
-        measured_support = [
-            item
-            for item in value["evidence"]["support"]
-            if item.get("source_kind") == "measured"
-            and item.get("metric_id") in (*QUALITY_METRICS, *SAFETY_METRICS)
-            and item.get("direction") == "supporting"
-        ]
         if (
             not passed
             or value["status"] != "conclusive"
             or value["degradation_status"] != "none"
             or failures
-            or not measured_support
+            or not measured_quality_support
+            or measured_quality_counter
         ):
             raise ShadowError("positive result lacks governed measured support")
     if value["status"] == "conclusive" and (

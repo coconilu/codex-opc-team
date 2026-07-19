@@ -216,6 +216,24 @@ class ShadowEvaluationTests(unittest.TestCase):
             expected_preview_sha256=preview["preview_sha256"],
         )
 
+    def run_safety_conflict_result(self) -> dict:
+        _, source, provenance = self.make_candidate()
+        replay, raw = self.replay(source, provenance, treatment="neutral")
+        control = replay["cases"][0]["control"]["metrics"]
+        treatment = replay["cases"][0]["treatment"]["metrics"]
+        control["scope_leakage_acceptances"] = 1
+        treatment["scope_leakage_acceptances"] = 0
+        control["stale_obsolete_acceptances"] = 0
+        treatment["stale_obsolete_acceptances"] = 1
+        raw = strict_bytes(replay)
+        preview, _ = shadow.build_preview(self.knowledge, replay, raw)
+        return shadow.evaluate(
+            self.knowledge,
+            replay,
+            raw,
+            expected_preview_sha256=preview["preview_sha256"],
+        )
+
     def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(SCRIPTS / "opc_shadow.py"), *args],
@@ -253,13 +271,44 @@ class ShadowEvaluationTests(unittest.TestCase):
 
     def test_harmful_candidate_preserves_safety_counterevidence(self) -> None:
         result = self.run_result(treatment="harmful")
+        self.assertEqual(result["status"], "conclusive")
         self.assertEqual(result["recommendation"], "do_not_promote_on_shadow_evidence")
         self.assertTrue(any(item["metric_id"] == "scope_leakage_acceptances" for item in result["evidence"]["counterevidence"]))
+        self.assertFalse(
+            any(
+                item["code"] == "conflicting_measured_results"
+                for item in result["failure_modes"]
+            )
+        )
 
     def test_conflicting_candidate_is_inconclusive(self) -> None:
         result = self.run_result(treatment="conflicting")
         self.assertEqual(result["status"], "inconclusive")
         self.assertTrue(any(item["code"] == "conflicting_measured_results" for item in result["failure_modes"]))
+
+    def test_safety_support_and_counterevidence_are_inconclusive_conflict(self) -> None:
+        result = self.run_safety_conflict_result()
+        self.assertEqual(result["status"], "inconclusive")
+        self.assertEqual(result["recommendation"], "inconclusive")
+        directions = {
+            item["metric_id"]: item["direction"]
+            for item in result["measurements"]["comparisons"]
+            if item["metric_id"] in shadow.SAFETY_METRICS
+        }
+        self.assertEqual(
+            {
+                "scope_leakage_acceptances": "supporting",
+                "stale_obsolete_acceptances": "counterevidence",
+            },
+            directions,
+        )
+        self.assertEqual(
+            1,
+            sum(
+                item["code"] == "conflicting_measured_results"
+                for item in result["failure_modes"]
+            ),
+        )
 
     def test_over_scoped_cross_project_candidate_is_rejected_before_measurement(self) -> None:
         _, source, provenance = self.make_candidate(project_id="project-alpha")
@@ -571,6 +620,81 @@ class ShadowEvaluationTests(unittest.TestCase):
                 self.assertFalse(validator.is_valid(corrupted))
                 with self.assertRaises(shadow.ShadowError):
                     shadow.render_report(corrupted)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("jsonschema") is not None,
+        "jsonschema is optional in the dependency-free core job",
+    )
+    def test_conflicting_result_schema_runtime_and_renderer_are_consistent(self) -> None:
+        from jsonschema import Draft202012Validator
+
+        schema = json.loads(
+            (ROOT / "evaluation" / "schemas" / "shadow-result.v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validator = Draft202012Validator(schema)
+        result = self.run_result(treatment="conflicting")
+        self.assertTrue(validator.is_valid(result))
+        shadow.validate_result(result)
+        self.assertIn("conflicting_measured_results", shadow.render_report(result))
+        conflict_failure = next(
+            item
+            for item in result["failure_modes"]
+            if item["code"] == "conflicting_measured_results"
+        )
+        mutations = {
+            "missing_conflict_failure": lambda value: value.update(failure_modes=[]),
+            "duplicate_conflict_failure": lambda value: value["failure_modes"].append(
+                copy.deepcopy(conflict_failure)
+            ),
+            "forged_conclusive_harmful": lambda value: value.update(
+                status="conclusive",
+                recommendation="do_not_promote_on_shadow_evidence",
+                failure_modes=[],
+            ),
+            "forged_conclusive_positive": lambda value: value.update(
+                status="conclusive",
+                recommendation="consider_for_separate_curation",
+                failure_modes=[],
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                corrupted = copy.deepcopy(result)
+                mutate(corrupted)
+                self.assertFalse(validator.is_valid(corrupted))
+                with self.assertRaisesRegex(shadow.ShadowError, "conflict|positive"):
+                    shadow.validate_result(corrupted)
+                with self.assertRaises(shadow.ShadowError):
+                    shadow.render_report(corrupted)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("jsonschema") is not None,
+        "jsonschema is optional in the dependency-free core job",
+    )
+    def test_safety_conflict_and_counter_only_result_schema_distinction(self) -> None:
+        from jsonschema import Draft202012Validator
+
+        schema = json.loads(
+            (ROOT / "evaluation" / "schemas" / "shadow-result.v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validator = Draft202012Validator(schema)
+        safety_conflict = self.run_safety_conflict_result()
+        self.assertTrue(validator.is_valid(safety_conflict))
+        shadow.validate_result(safety_conflict)
+
+        self.tearDown()
+        self.setUp()
+        counter_only = self.run_result(treatment="harmful")
+        self.assertTrue(validator.is_valid(counter_only))
+        shadow.validate_result(counter_only)
+        self.assertEqual(counter_only["status"], "conclusive")
+        self.assertEqual(
+            counter_only["recommendation"], "do_not_promote_on_shadow_evidence"
+        )
 
     def test_renderer_recomputes_measurement_direction_and_confidence(self) -> None:
         result = self.run_result()

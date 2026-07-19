@@ -9,7 +9,7 @@
     "contract_version": {"const": "opc-shadow-evaluation-contract-v1"},
     "metric_contract": {"const": "opc-evaluation-contract-v1"},
     "metric_contract_sha256": {"const": "f7eda22695e25f91f15031d6a94d0183e399fc3b52b34a21130b7f567180444d"},
-    "contract_sha256": {"const": "50686c3a232fdcd39bde5c4073abb941343f19a795e0a5271a4714c496fc4d88"},
+    "contract_sha256": {"const": "d63bb2cc4ca9f4d545810f83256856f9e904e765de4bd591945df42bc9992d0d"},
     "replay_sha256": {"$ref": "#/$defs/sha256"},
     "evaluation_id": {"$ref": "#/$defs/portableId"},
     "dataset": {"$ref": "#/$defs/dataset"},
@@ -161,6 +161,18 @@
       },
       "additionalProperties": false
     },
+    "counterMetricComparison": {
+      "type": "object",
+      "required": ["metric_id", "control", "treatment", "direction", "source_kind"],
+      "properties": {
+        "metric_id": {"enum": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate", "scope_leakage_acceptances", "stale_obsolete_acceptances"]},
+        "control": {"type": ["number", "null"], "minimum": 0, "maximum": 20000000},
+        "treatment": {"type": ["number", "null"], "minimum": 0, "maximum": 20000000},
+        "direction": {"const": "counterevidence"},
+        "source_kind": {"const": "measured"}
+      },
+      "additionalProperties": false
+    },
     "metricRef": {
       "type": "object",
       "required": ["metric_id", "aggregate_ref", "aggregate_sha256", "interpretation"],
@@ -218,6 +230,17 @@
         "case_id": {"$ref": "#/$defs/portableId"},
         "code": {"$ref": "#/$defs/portableId"},
         "failure_ref": {"$ref": "#/$defs/portableId"}
+      },
+      "additionalProperties": false
+    },
+    "conflictingMeasuredFailure": {
+      "type": "object",
+      "required": ["arm", "case_id", "code", "failure_ref"],
+      "properties": {
+        "arm": {"const": "comparison"},
+        "case_id": {"const": "aggregate"},
+        "code": {"const": "conflicting_measured_results"},
+        "failure_ref": {"const": "quality_safety"}
       },
       "additionalProperties": false
     },
@@ -287,13 +310,59 @@
           "failure_modes": {"maxItems": 0},
           "evidence": {
             "properties": {
-              "support": {"contains": {"$ref": "#/$defs/positiveMetricComparison"}, "minContains": 1}
+              "support": {
+                "contains": {"$ref": "#/$defs/positiveMetricComparison"},
+                "minContains": 1,
+                "not": {"contains": {"$ref": "#/$defs/counterMetricComparison"}}
+              },
+              "counterevidence": {"not": {"contains": {"$ref": "#/$defs/counterMetricComparison"}}},
+              "neutral_or_unknown": {"not": {"contains": {"$ref": "#/$defs/counterMetricComparison"}}}
             }
           },
           "measurements": {
             "properties": {
-              "comparisons": {"contains": {"$ref": "#/$defs/positiveMetricComparison"}, "minContains": 1}
+              "comparisons": {
+                "contains": {"$ref": "#/$defs/positiveMetricComparison"},
+                "minContains": 1,
+                "not": {"contains": {"$ref": "#/$defs/counterMetricComparison"}}
+              }
             }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "measurements": {
+            "type": "object",
+            "required": ["comparisons"],
+            "properties": {
+              "comparisons": {
+                "allOf": [
+                  {"contains": {"$ref": "#/$defs/positiveMetricComparison"}, "minContains": 1},
+                  {"contains": {"$ref": "#/$defs/counterMetricComparison"}, "minContains": 1}
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {"const": "inconclusive"},
+          "recommendation": {"const": "inconclusive"},
+          "failure_modes": {
+            "contains": {"$ref": "#/$defs/conflictingMeasuredFailure"},
+            "minContains": 1,
+            "maxContains": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "failure_modes": {
+            "not": {"contains": {"$ref": "#/$defs/conflictingMeasuredFailure"}}
           }
         }
       }

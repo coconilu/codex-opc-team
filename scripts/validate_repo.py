@@ -405,11 +405,13 @@ def validate_shadow_evaluation_contract() -> None:
         "armAggregate",
         "metricComparison",
         "positiveMetricComparison",
+        "counterMetricComparison",
         "metricRef",
         "feedbackEvidence",
         "evidenceBuckets",
         "confidence",
         "failureMode",
+        "conflictingMeasuredFailure",
         "governance",
         "measurements",
     )
@@ -479,10 +481,36 @@ def validate_shadow_evaluation_contract() -> None:
         "Shadow result governance write permissions must be schema-constant false",
     )
     positive = result_schema.get("$defs", {}).get("positiveMetricComparison", {})
+    counter = result_schema.get("$defs", {}).get("counterMetricComparison", {})
+    conflict_failure = result_schema.get("$defs", {}).get("conflictingMeasuredFailure", {})
+    result_conditions = json.dumps(result_schema.get("allOf", []), sort_keys=True)
     require(
         positive.get("properties", {}).get("direction", {}).get("const") == "supporting"
         and positive.get("properties", {}).get("source_kind", {}).get("const") == "measured",
         "Shadow positive result schema must require measured supporting evidence",
+    )
+    require(
+        counter.get("properties", {}).get("direction", {}).get("const")
+        == "counterevidence"
+        and counter.get("properties", {}).get("source_kind", {}).get("const")
+        == "measured"
+        and conflict_failure.get("properties", {}).get("code", {}).get("const")
+        == "conflicting_measured_results"
+        and '"$ref": "#/$defs/conflictingMeasuredFailure"' in result_conditions
+        and '"$ref": "#/$defs/counterMetricComparison"' in result_conditions
+        and '"maxContains": 1' in result_conditions,
+        "Shadow result schema must preserve exact measured conflict evidence",
+    )
+    decision_policy = contract.get("decision_policy") or {}
+    require(
+        decision_policy.get("conflicting_quality_deltas") == "inconclusive"
+        and decision_policy.get("conflicting_measured_quality_or_safety_failure")
+        == "conflicting_measured_results"
+        and decision_policy.get(
+            "positive_forbids_measured_quality_or_safety_counterevidence"
+        )
+        is True,
+        "Shadow measured conflict policy is incomplete",
     )
     require(
         set(contract.get("forbidden_side_effects", []))

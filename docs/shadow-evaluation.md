@@ -94,6 +94,8 @@ python <plugin-root>/scripts/opc_shadow.py report --result <private-result.json>
 
 `report` 不是宽松模板渲染器：它先验证所有嵌套字段、当前 Shadow/#4 contract hash、聚合与 comparison 一致性、证据分桶、置信度公式及治理不变量。伪造的正向建议、空 dataset/candidate/preflight、任意 confidence/evidence/governance 或带 failure 的正向组合都会被拒绝。
 
+归档/迁移结果也必须保留 measured 质量/安全的双向冲突：同时有 supporting 与 counterevidence 时，只允许 `inconclusive/inconclusive`，并要求恰好一个 `conflicting_measured_results` failure。Positive 明确禁止任何 measured 质量/安全 counterevidence；仅 counterevidence 的 harmful 结果不会被误归为 conflict。
+
 用户必须先创建空的 private artifact root。所有用户路径会在 resolve 前逐级拒绝 symlink/junction/reparse 祖先；replay、result、canonical candidate 和最终 artifact 都要求单一 link identity。Artifact root 在检查时记录目录 identity，publish 必须绑定同一对象；父目录被普通目录替换、已存在同名结果、hard link、大小越界或凭据模式都会失败关闭并只清理本事务拥有的 identity。Windows 8.3 等价别名按 filesystem identity 接受。错误只返回类别，不回显匹配的敏感值。
 
 ## 6. 后续治理

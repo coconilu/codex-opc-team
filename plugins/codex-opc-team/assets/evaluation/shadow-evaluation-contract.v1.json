@@ -28,6 +28,8 @@
     "neutral_is_not_positive": true,
     "timeout_or_provider_failure": "inconclusive_degraded",
     "conflicting_quality_deltas": "inconclusive",
+    "conflicting_measured_quality_or_safety_failure": "conflicting_measured_results",
+    "positive_forbids_measured_quality_or_safety_counterevidence": true,
     "confidence_formula": "beta-v1",
     "confidence_prior": {"support": 1, "counterevidence": 1},
     "confidence_weights": {"measured": 3, "human_judgment": 1, "model_inference": 0, "unverified": 0}

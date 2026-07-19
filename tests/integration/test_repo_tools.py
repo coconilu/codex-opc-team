@@ -135,6 +135,20 @@ class ShadowContractValidationTests(unittest.TestCase):
                 ),
                 "exact baseline and Shadow contract hashes",
             ),
+            (
+                contract_path,
+                lambda value: value["decision_policy"].update(
+                    positive_forbids_measured_quality_or_safety_counterevidence=False
+                ),
+                "measured conflict policy is incomplete",
+            ),
+            (
+                result_schema_path,
+                lambda value: value["$defs"]["counterMetricComparison"]["properties"][
+                    "direction"
+                ].update(const="neutral"),
+                "preserve exact measured conflict evidence",
+            ),
         )
         for target, mutation, message in cases:
             with self.subTest(message=message):
