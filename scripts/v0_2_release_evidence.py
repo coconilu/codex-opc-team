@@ -98,6 +98,7 @@ class _PrivateReadToken(NamedTuple):
     prefix: str
     sha256: str
     snapshot: tuple[int, int, int, int, int, int]
+    root_tokens: tuple[tuple[int, int], ...]
     parent_tokens: tuple[tuple[int, int], ...]
 
 
@@ -348,12 +349,16 @@ def verify_public() -> None:
         raise ReleaseEvidenceError("committed v0.2 public evidence report drifted; regenerate it")
 
 
-def _canonical_private_root(root: Path) -> tuple[Path, Path]:
+def _canonical_private_root(
+    root: Path,
+) -> tuple[Path, Path, tuple[tuple[int, int], ...]]:
     root_absolute = Path(os.path.abspath(root))
     try:
+        before_tokens = _absolute_directory_tokens(root_absolute)
         before = root_absolute.lstat()
         resolved = root_absolute.resolve(strict=True)
         canonical = resolved.lstat()
+        after_tokens = _absolute_directory_tokens(root_absolute)
     except OSError as exc:
         raise ReleaseEvidenceError("private root is missing") from exc
     same_identity = _file_identity(before) == _file_identity(canonical)
@@ -362,6 +367,7 @@ def _canonical_private_root(root: Path) -> tuple[Path, Path]:
         or _is_reparse(before)
         or not same_identity
         or not os.path.samefile(root_absolute, resolved)
+        or before_tokens != after_tokens
     ):
         raise ReleaseEvidenceError("private root must be a normal directory")
     # A normal Windows 8.3/case spelling is allowed only when lstat proved the
@@ -378,7 +384,7 @@ def _canonical_private_root(root: Path) -> tuple[Path, Path]:
         raise ReleaseEvidenceError(
             "private root must be filesystem-separated from the public repository"
         )
-    return root_absolute, resolved
+    return root_absolute, resolved, after_tokens
 
 
 def _regular_private_file(
@@ -403,7 +409,7 @@ def _regular_private_file(
     parts = Path(relative).parts
     if not parts or Path(relative).is_absolute() or any(part in {"", ".", ".."} for part in parts):
         raise ReleaseEvidenceError("private evidence ref is not portable")
-    root_absolute, resolved_root = _canonical_private_root(root)
+    root_absolute, resolved_root, root_tokens = _canonical_private_root(root)
     candidate = root_absolute.joinpath(*parts)
     try:
         resolved = candidate.resolve(strict=True)
@@ -443,6 +449,9 @@ def _regular_private_file(
     try:
         after_path = candidate.lstat()
         after_tokens = _directory_chain_tokens(root_absolute, parts[:-1])
+        after_root, after_resolved_root, after_root_tokens = _canonical_private_root(
+            root_absolute
+        )
     except OSError as exc:
         raise ReleaseEvidenceError("private evidence changed during read") from exc
     if (
@@ -451,6 +460,9 @@ def _regular_private_file(
         or _file_snapshot(opened) != _file_snapshot(after_fd)
         or _file_identity(before) != _file_identity(after_path)
         or parent_tokens != after_tokens
+        or after_root != root_absolute
+        or after_resolved_root != resolved_root
+        or root_tokens != after_root_tokens
         or candidate.resolve(strict=True) != canonical_candidate
     ):
         raise ReleaseEvidenceError("private evidence changed during bound read")
@@ -464,6 +476,7 @@ def _regular_private_file(
                 prefix=prefix,
                 sha256=_sha(raw),
                 snapshot=_file_snapshot(after_fd),
+                root_tokens=after_root_tokens,
                 parent_tokens=after_tokens,
             )
         )
@@ -482,6 +495,7 @@ def _revalidate_private_reads(tokens: Sequence[_PrivateReadToken]) -> None:
         )
         if len(replay) != 1 or (
             replay[0].snapshot != token.snapshot
+            or replay[0].root_tokens != token.root_tokens
             or replay[0].parent_tokens != token.parent_tokens
         ):
             raise ReleaseEvidenceError("private evidence changed after validation")
@@ -503,6 +517,46 @@ def _file_snapshot(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
         int(getattr(info, "st_ctime_ns", int(info.st_ctime * 1_000_000_000))),
         int(getattr(info, "st_nlink", 1)),
     )
+
+
+def _absolute_directory_chain(path: Path) -> tuple[Path, ...]:
+    if not path.is_absolute() or not path.anchor:
+        raise ReleaseEvidenceError("private root must be absolute")
+    current = Path(path.anchor)
+    chain = [current]
+    for part in path.parts[1:]:
+        current = current / part
+        chain.append(current)
+    return tuple(chain)
+
+
+def _absolute_directory_tokens(path: Path) -> tuple[tuple[int, int], ...]:
+    tokens: list[tuple[int, int]] = []
+    for current in _absolute_directory_chain(path):
+        info = current.lstat()
+        if not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+            raise ReleaseEvidenceError(
+                "private root ancestor must be a normal directory, not a link"
+            )
+        tokens.append(_file_identity(info))
+    return tuple(tokens)
+
+
+def _assert_private_root_binding(
+    root: Path,
+    resolved_root: Path,
+    root_tokens: tuple[tuple[int, int], ...],
+) -> None:
+    try:
+        current_root, current_resolved, current_tokens = _canonical_private_root(root)
+    except (OSError, ReleaseEvidenceError) as exc:
+        raise ReleaseEvidenceError("private root boundary changed") from exc
+    if (
+        current_root != root
+        or current_resolved != resolved_root
+        or current_tokens != root_tokens
+    ):
+        raise ReleaseEvidenceError("private root boundary changed")
 
 
 def _directory_chain_tokens(root: Path, parent_parts: Sequence[str]) -> tuple[tuple[int, int], ...]:
@@ -562,8 +616,10 @@ def _write_all_and_verify(descriptor: int, raw: bytes) -> os.stat_result:
 
 def _write_private_output_posix(
     root: Path,
+    resolved_root: Path,
     relative: Path,
     raw: bytes,
+    root_tokens: tuple[tuple[int, int], ...],
     parent_tokens: tuple[tuple[int, int], ...],
     pre_publish: Callable[[], None] | None,
 ) -> None:
@@ -573,26 +629,46 @@ def _write_private_output_posix(
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
-    anchor_fd = os.open(root.parent, directory_flags)
-    try:
-        root_fd = os.open(root, directory_flags)
-    except BaseException:
-        os.close(anchor_fd)
-        raise
-    directory_fds = [root_fd]
+    ancestor_paths = _absolute_directory_chain(root)
+    opened_fds: list[int] = []
+    ancestor_fds: list[int] = []
+    directory_fds: list[int] = []
     descriptor = -1
     created = False
     created_identity: tuple[int, int] | None = None
+    parent_fd = -1
     try:
+        for index, path in enumerate(ancestor_paths):
+            ancestor_fd = os.open(path, directory_flags)
+            opened_fds.append(ancestor_fd)
+            ancestor_fds.append(ancestor_fd)
+            current = os.fstat(ancestor_fd)
+            if _file_identity(current) != root_tokens[index]:
+                raise ReleaseEvidenceError("private root changed before binding")
+            if index:
+                linked = os.stat(
+                    path.name,
+                    dir_fd=ancestor_fds[index - 1],
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISDIR(linked.st_mode)
+                    or _is_reparse(linked)
+                    or _file_identity(linked) != _file_identity(current)
+                ):
+                    raise ReleaseEvidenceError("private root ancestor changed before binding")
+        directory_fds.append(ancestor_fds[-1])
         if _file_identity(os.fstat(directory_fds[0])) != parent_tokens[0]:
             raise ReleaseEvidenceError("private verdict root changed before binding")
         for index, part in enumerate(relative.parts[:-1], start=1):
             child_fd = os.open(part, directory_flags, dir_fd=directory_fds[-1])
+            opened_fds.append(child_fd)
             directory_fds.append(child_fd)
             if _file_identity(os.fstat(child_fd)) != parent_tokens[index]:
                 raise ReleaseEvidenceError("private verdict parent changed before binding")
         if pre_publish is not None:
             pre_publish()
+        _assert_private_root_binding(root, resolved_root, root_tokens)
         flags = (
             os.O_RDWR
             | os.O_CREAT
@@ -608,18 +684,32 @@ def _write_private_output_posix(
         after = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
         chain_is_bound = _file_identity(after) == created_identity
         try:
-            anchored_root = os.stat(root.name, dir_fd=anchor_fd, follow_symlinks=False)
-            absolute_root = root.lstat()
-        except OSError:
+            _assert_private_root_binding(root, resolved_root, root_tokens)
+        except ReleaseEvidenceError:
             chain_is_bound = False
-        else:
-            held_root_identity = _file_identity(os.fstat(directory_fds[0]))
+        for index, fd in enumerate(ancestor_fds):
+            current = os.fstat(fd)
             if (
-                not stat.S_ISDIR(anchored_root.st_mode)
-                or _file_identity(anchored_root) != held_root_identity
-                or _file_identity(absolute_root) != held_root_identity
+                not stat.S_ISDIR(current.st_mode)
+                or _file_identity(current) != root_tokens[index]
             ):
                 chain_is_bound = False
+            if index:
+                try:
+                    linked = os.stat(
+                        ancestor_paths[index].name,
+                        dir_fd=ancestor_fds[index - 1],
+                        follow_symlinks=False,
+                    )
+                except OSError:
+                    chain_is_bound = False
+                    continue
+                if (
+                    not stat.S_ISDIR(linked.st_mode)
+                    or _is_reparse(linked)
+                    or _file_identity(linked) != _file_identity(current)
+                ):
+                    chain_is_bound = False
         for index, fd in enumerate(directory_fds):
             current = os.fstat(fd)
             if (
@@ -650,7 +740,7 @@ def _write_private_output_posix(
         if descriptor >= 0:
             os.close(descriptor)
             descriptor = -1
-        if created and created_identity is not None:
+        if created and created_identity is not None and parent_fd >= 0:
             try:
                 current = os.stat(
                     relative.name, dir_fd=parent_fd, follow_symlinks=False
@@ -666,16 +756,17 @@ def _write_private_output_posix(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        for fd in reversed(directory_fds):
+        for fd in reversed(opened_fds):
             os.close(fd)
-        os.close(anchor_fd)
 
 
 def _write_private_output_windows(
     root: Path,
+    resolved_root: Path,
     absolute: Path,
     relative: Path,
     raw: bytes,
+    root_tokens: tuple[tuple[int, int], ...],
     pre_publish: Callable[[], None] | None,
 ) -> None:
     import ctypes
@@ -738,13 +829,15 @@ def _write_private_output_windows(
     descriptor = -1
     file_handle: int | None = None
     try:
+        for current in _absolute_directory_chain(root):
+            directory_handles.append(open_directory(current))
         current = root
-        directory_handles.append(open_directory(current))
         for part in relative.parts[:-1]:
             current = current / part
             directory_handles.append(open_directory(current))
         if pre_publish is not None:
             pre_publish()
+        _assert_private_root_binding(root, resolved_root, root_tokens)
         handle = create_file(
             str(absolute), generic_read | generic_write | delete, 0, None, create_new,
             file_attribute_normal | open_reparse_point, None,
@@ -757,6 +850,7 @@ def _write_private_output_windows(
         file_handle = int(handle)
         descriptor = msvcrt.open_osfhandle(file_handle, os.O_RDWR | getattr(os, "O_BINARY", 0))
         _write_all_and_verify(descriptor, raw)
+        _assert_private_root_binding(root, resolved_root, root_tokens)
         os.close(descriptor)
         descriptor = -1
         file_handle = None
@@ -787,7 +881,7 @@ def _write_private_output(
     *,
     pre_publish: Callable[[], None] | None = None,
 ) -> None:
-    root_absolute, _ = _canonical_private_root(root)
+    root_absolute, resolved_root, root_tokens = _canonical_private_root(root)
     absolute = Path(os.path.abspath(path))
     try:
         relative = absolute.relative_to(root_absolute)
@@ -805,11 +899,23 @@ def _write_private_output(
     try:
         if os.name == "nt":
             _write_private_output_windows(
-                root_absolute, absolute, relative, raw, pre_publish
+                root_absolute,
+                resolved_root,
+                absolute,
+                relative,
+                raw,
+                root_tokens,
+                pre_publish,
             )
         else:
             _write_private_output_posix(
-                root_absolute, relative, raw, parent_tokens, pre_publish
+                root_absolute,
+                resolved_root,
+                relative,
+                raw,
+                root_tokens,
+                parent_tokens,
+                pre_publish,
             )
     except BaseException as exc:
         if isinstance(exc, ReleaseEvidenceError):

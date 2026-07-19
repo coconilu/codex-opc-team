@@ -274,6 +274,20 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
         ):
             release._canonical_private_root(alias)
 
+    def test_private_root_rejects_linked_ancestor(self) -> None:
+        real_parent = self.temporary_canonical / "real-parent"
+        nested_root = real_parent / "nested-private"
+        nested_root.mkdir(parents=True)
+        linked_parent = self.temporary_canonical / "linked-parent"
+        try:
+            linked_parent.symlink_to(real_parent, target_is_directory=True)
+        except OSError:
+            self.skipTest("directory symlinks are unavailable")
+        with self.assertRaisesRegex(
+            release.ReleaseEvidenceError, "ancestor must be a normal directory"
+        ):
+            release._canonical_private_root(linked_parent / nested_root.name)
+
     def test_private_sources_are_cumulatively_revalidated_before_pass(self) -> None:
         path, _ = self.write_pilot()
         source = (
@@ -328,6 +342,19 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(release.ReleaseEvidenceError, "normal directory|link or alias"):
                 release.validate_private_pilot(reparse_root, reparse_path)
 
+        junction = self.temporary_canonical / "private-ancestor-junction"
+        completed = release.subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(self.private.parent)],
+            stdout=release.subprocess.PIPE,
+            stderr=release.subprocess.STDOUT,
+            check=False,
+        )
+        if completed.returncode == 0:
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "ancestor must be a normal directory"
+            ):
+                release._canonical_private_root(junction / self.private.name)
+
     @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
     def test_posix_output_removes_owned_file_if_bound_parent_moves_outside(self) -> None:
         output = self.private / "evidence" / "race-verdict.json"
@@ -350,6 +377,63 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertFalse((escaped_parent / output.name).exists())
         escaped_parent.rename(self.private / "evidence")
+        if before_fds is not None:
+            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
+    def test_posix_private_read_rejects_ancestor_move_during_read(self) -> None:
+        container = self.temporary_canonical / "read-container"
+        private = container / "private"
+        source = private / "evidence" / "source.json"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"{}\n")
+        escaped = self.temporary_canonical / "escaped-read-container"
+        original = release.os.read
+        moved = False
+
+        def race(descriptor, size):
+            nonlocal moved
+            if not moved:
+                container.rename(escaped)
+                moved = True
+            return original(descriptor, size)
+
+        with mock.patch.object(release.os, "read", side_effect=race):
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "private root|changed during"
+            ):
+                release._regular_private_file(
+                    private, "evidence/source.json", None, prefix=""
+                )
+        escaped.rename(container)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
+    def test_posix_private_write_rejects_ancestor_move_and_cleans_owned_output(self) -> None:
+        container = self.temporary_canonical / "write-container"
+        private = container / "private"
+        output = private / "evidence" / "ancestor-race-verdict.json"
+        output.parent.mkdir(parents=True)
+        escaped = self.temporary_canonical / "escaped-write-container"
+        original = release._write_all_and_verify
+        fd_root = Path("/proc/self/fd")
+        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
+
+        def race(descriptor, raw):
+            container.rename(escaped)
+            return original(descriptor, raw)
+
+        with mock.patch.object(release, "_write_all_and_verify", side_effect=race):
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "boundary changed"
+            ):
+                release._write_private_output(
+                    private, output, {"private_pilot_status": "pass"}
+                )
+        self.assertFalse(output.exists())
+        self.assertFalse(
+            (escaped / "private" / "evidence" / output.name).exists()
+        )
+        escaped.rename(container)
         if before_fds is not None:
             self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
 
