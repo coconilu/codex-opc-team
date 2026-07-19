@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -256,6 +257,39 @@ def validate_markdown_links() -> None:
             require((path.parent / relative).exists(), f"{path}: broken local link {target}")
 
 
+def validate_evaluation_baseline() -> None:
+    evaluation = ROOT / "evaluation"
+    contract_path = evaluation / "contracts" / "baseline-contract.v1.json"
+    fixture_path = evaluation / "fixtures" / "synthetic-suite.v1.json"
+    result_path = evaluation / "baselines" / "file-git-no-enhancement.v1.json"
+    report_path = evaluation / "baselines" / "file-git-no-enhancement.v1.md"
+    for path in (contract_path, fixture_path, result_path, report_path):
+        require(path.is_file(), f"missing versioned evaluation artifact: {path}")
+    contract = load_json(contract_path)
+    fixture = load_json(fixture_path)
+    result = load_json(result_path)
+    version = contract.get("contract_version")
+    require(version == "opc-evaluation-contract-v1", "unsupported evaluation contract")
+    require(fixture.get("contract_version") == version, "fixture contract version mismatch")
+    require(result.get("contract_version") == version, "result contract version mismatch")
+    require(
+        result.get("baseline_id") == contract.get("baseline_id"),
+        "result baseline id mismatch",
+    )
+    require(
+        result.get("contract_sha256") == hashlib.sha256(contract_path.read_bytes()).hexdigest(),
+        "result is not bound to the exact evaluation contract",
+    )
+    require(
+        result.get("source_sha256") == hashlib.sha256(fixture_path.read_bytes()).hexdigest(),
+        "result is not bound to the exact synthetic fixture",
+    )
+    require(result.get("overall_safety_status") == "pass", "committed safety baseline must pass")
+    report = report_path.read_text(encoding="utf-8")
+    require(str(result.get("dataset_id")) in report, "human evaluation report dataset mismatch")
+    require("Safety: **PASS**" in report, "human evaluation report safety mismatch")
+
+
 def main() -> int:
     checks = [
         validate_manifest,
@@ -266,6 +300,7 @@ def main() -> int:
         validate_mem0_disclosure,
         validate_architecture_api_contract,
         validate_published_memory_contract,
+        validate_evaluation_baseline,
         validate_markdown_links,
     ]
     try:

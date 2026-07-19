@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -61,11 +62,57 @@ def forbidden_filename(path: Path) -> bool:
     return path.suffix.lower() in PRIVATE_KEY_SUFFIXES
 
 
+def _path_boundary_kind(path: Path) -> str | None:
+    """Classify filesystem entries without following their target.
+
+    ``Path.is_junction`` was added after Python 3.10, so the Windows reparse
+    attribute remains the compatibility source of truth. Unknown entries fail
+    closed instead of being traversed or opened.
+    """
+
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return "unreadable"
+    if stat.S_ISLNK(metadata.st_mode):
+        return "symlink"
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if getattr(metadata, "st_file_attributes", 0) & reparse_flag:
+        return "reparse"
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction):
+        try:
+            if is_junction():
+                return "junction"
+        except OSError:
+            return "unreadable"
+    return None
+
+
 def iter_files(root: Path):
+    first_directory = True
     for current, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        current_path = Path(current)
+        boundary_dirs: list[Path] = []
+        traversable_dirs: list[str] = []
+        for name in dirs:
+            if name in SKIP_DIRS:
+                continue
+            candidate = current_path / name
+            if _path_boundary_kind(candidate) is None:
+                traversable_dirs.append(name)
+            else:
+                boundary_dirs.append(candidate)
+        dirs[:] = sorted(traversable_dirs)
+        yield from sorted(boundary_dirs)
         for name in sorted(files):
-            yield Path(current) / name
+            # A linked Git worktree stores a machine-local ``gitdir`` pointer
+            # in a root .git control file. It is Git metadata, not publishable
+            # repository content; history is scanned separately below.
+            if first_directory and name == ".git":
+                continue
+            yield current_path / name
+        first_directory = False
 
 
 def scan_text(relative: Path, text: str, *, prefix: str = "") -> list[str]:
@@ -81,18 +128,74 @@ def scan_text(relative: Path, text: str, *, prefix: str = "") -> list[str]:
 
 def scan(root: Path) -> list[str]:
     findings: list[str] = []
-    for path in iter_files(root):
-        relative = path.relative_to(root)
+    try:
+        canonical_root = root.expanduser().resolve(strict=True)
+    except OSError as exc:
+        return [f"scan-root: SCAN_ROOT_UNAVAILABLE ({type(exc).__name__})"]
+    if not canonical_root.is_dir():
+        return ["scan-root: SCAN_ROOT_UNAVAILABLE (NotDirectory)"]
+    for path in iter_files(canonical_root):
+        try:
+            relative = path.relative_to(canonical_root)
+        except ValueError:
+            findings.append(f"{path.name}: SCAN_PATH_ESCAPED")
+            continue
+        boundary_kind = _path_boundary_kind(path)
+        if boundary_kind is not None:
+            if boundary_kind == "unreadable":
+                findings.append(f"{relative}: SCAN_PATH_UNAVAILABLE")
+                continue
+            try:
+                resolved_target = path.resolve(strict=False)
+                resolved_target.relative_to(canonical_root)
+            except (OSError, ValueError):
+                findings.append(
+                    f"{relative}: symbolic link escapes scan root or reparse point escapes scan root"
+                )
+                continue
+            if forbidden_filename(relative):
+                findings.append(f"{relative}: forbidden private/runtime filename")
+            if boundary_kind in {"reparse", "junction"} or resolved_target.is_dir():
+                findings.append(f"{relative}: directory reparse point is not scanned")
+                continue
+            try:
+                target = os.readlink(path)
+            except OSError:
+                findings.append(f"{relative}: SCAN_PATH_UNAVAILABLE")
+            else:
+                findings.extend(scan_text(relative, target))
+            continue
+        try:
+            canonical_path = path.resolve(strict=True)
+            canonical_path.relative_to(canonical_root)
+        except ValueError:
+            findings.append(f"{relative}: SCAN_PATH_ESCAPED")
+            continue
+        except OSError:
+            findings.append(f"{relative}: SCAN_PATH_UNAVAILABLE")
+            continue
         if forbidden_filename(relative):
             findings.append(f"{relative}: forbidden private/runtime filename")
         is_safe_env_example = path.name.lower() in SAFE_ENV_EXAMPLES
+        try:
+            file_size = canonical_path.stat().st_size
+        except OSError:
+            findings.append(f"{relative}: SCAN_PATH_UNAVAILABLE")
+            continue
         if (
-            not is_safe_env_example
-            and path.suffix.lower() not in TEXT_SUFFIXES
-        ) or path.stat().st_size > 2_000_000:
+            not is_safe_env_example and path.suffix.lower() not in TEXT_SUFFIXES
+        ) or file_size > 2_000_000:
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            read_path = path.resolve(strict=True)
+            read_path.relative_to(canonical_root)
+            if _path_boundary_kind(path) is not None:
+                findings.append(f"{relative}: SCAN_PATH_CHANGED")
+                continue
+            text = read_path.read_text(encoding="utf-8")
+        except ValueError:
+            findings.append(f"{relative}: SCAN_PATH_ESCAPED")
+            continue
         except (UnicodeDecodeError, OSError):
             continue
         findings.extend(scan_text(relative, text))

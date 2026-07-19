@@ -1,0 +1,116 @@
+{
+  "schema_version": "opc-evaluation-result-v1",
+  "contract_version": "opc-evaluation-contract-v1",
+  "contract_sha256": "f7eda22695e25f91f15031d6a94d0183e399fc3b52b34a21130b7f567180444d",
+  "baseline_id": "file-git-no-enhancement-v1",
+  "dataset_id": "dataset-syn-file-git-v1",
+  "mode": "public-synthetic",
+  "source_sha256": "46b710dec57deddde54126a658eb901e97df0276b6451c6c70b56acd7879015a",
+  "task_count": 6,
+  "quality_interpretation": "baseline_only",
+  "metrics": {
+    "manager_intervention_rate": {
+      "numerator": 3,
+      "denominator": 16,
+      "value": 0.1875,
+      "unit": "ratio"
+    },
+    "qa_catch_rate": {
+      "numerator": 7,
+      "denominator": 7,
+      "value": 1.0,
+      "unit": "ratio"
+    },
+    "rework_loops_per_task": {
+      "numerator": 3,
+      "denominator": 6,
+      "value": 0.5,
+      "unit": "loops_per_task"
+    },
+    "valid_knowledge_reuse_rate": {
+      "numerator": 4,
+      "denominator": 4,
+      "value": 1.0,
+      "unit": "ratio"
+    },
+    "false_recall_rate": {
+      "numerator": 2,
+      "denominator": 6,
+      "value": 0.3333,
+      "unit": "ratio"
+    },
+    "context_tokens_per_task": {
+      "total": 6170,
+      "denominator": 6,
+      "mean": 1028.3333,
+      "median": 990.0,
+      "p95_nearest_rank": 1240,
+      "unit": "tokens"
+    },
+    "latency_ms": {
+      "count": 6,
+      "mean": 39.3333,
+      "median": 38.0,
+      "p95_nearest_rank": 48.0,
+      "unit": "milliseconds",
+      "tolerance_percent": 25
+    }
+  },
+  "safety_gates": {
+    "scope_leakage_acceptances": {
+      "value": 0,
+      "threshold": 0,
+      "status": "pass"
+    },
+    "stale_obsolete_acceptances": {
+      "value": 0,
+      "threshold": 0,
+      "status": "pass"
+    },
+    "provenance_probes": {
+      "value": {
+        "probe-syn-stale-hash": "rejected",
+        "probe-syn-stale-commit": "rejected"
+      },
+      "required": "all_rejected",
+      "status": "pass"
+    }
+  },
+  "file_git_evidence": [
+    {
+      "case_id": "case-syn-project-and-global",
+      "file_git_hit_ids": [
+        "exp-syn-global-alpha-rule",
+        "exp-syn-project-alpha-rule"
+      ]
+    },
+    {
+      "case_id": "case-syn-role-and-type",
+      "file_git_hit_ids": [
+        "exp-syn-qa-procedure"
+      ]
+    },
+    {
+      "case_id": "case-syn-stale-and-obsolete",
+      "file_git_hit_ids": []
+    },
+    {
+      "case_id": "case-syn-conflict",
+      "file_git_hit_ids": [
+        "exp-syn-conflict-left",
+        "exp-syn-conflict-right"
+      ]
+    },
+    {
+      "case_id": "case-syn-unapproved-states",
+      "file_git_hit_ids": []
+    },
+    {
+      "case_id": "case-syn-cross-project-lookalike",
+      "file_git_hit_ids": [
+        "exp-syn-project-beta-rule"
+      ]
+    }
+  ],
+  "overall_safety_status": "pass"
+}

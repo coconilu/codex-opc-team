@@ -1,0 +1,331 @@
+{
+  "schema_version": "opc-synthetic-suite-v1",
+  "contract_version": "opc-evaluation-contract-v1",
+  "dataset_id": "dataset-syn-file-git-v1",
+  "mode": "public-synthetic",
+  "records": [
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-project-alpha-rule",
+        "type": "decision",
+        "summary": "Synthetic alpha delivery rule",
+        "content": "alpha-marker requires synthetic project checks",
+        "keywords": ["alpha-marker"],
+        "metadata": {"role": "developer", "conflict_group": null},
+        "scope": "project",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.9,
+        "status": "approved",
+        "project_id": "project-syn-alpha",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-project-beta-lookalike",
+        "type": "decision",
+        "summary": "Synthetic alpha delivery rule",
+        "content": "alpha-marker belongs to a different synthetic project",
+        "keywords": ["alpha-marker"],
+        "metadata": {"role": "developer", "conflict_group": null},
+        "scope": "project",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.9,
+        "status": "approved",
+        "project_id": "project-syn-beta",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-global-alpha-rule",
+        "type": "decision",
+        "summary": "Synthetic global alpha rule",
+        "content": "alpha-marker is safe for every synthetic project",
+        "keywords": ["alpha-marker"],
+        "metadata": {"role": "developer", "conflict_group": null},
+        "scope": "global",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.9,
+        "status": "approved",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-qa-procedure",
+        "type": "procedure",
+        "summary": "Synthetic QA procedure",
+        "content": "role-marker is for the synthetic QA role",
+        "keywords": ["role-marker"],
+        "metadata": {"role": "qa", "conflict_group": null},
+        "scope": "global",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.8,
+        "status": "approved",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-developer-procedure",
+        "type": "procedure",
+        "summary": "Synthetic developer procedure",
+        "content": "role-marker is for the synthetic developer role",
+        "keywords": ["role-marker"],
+        "metadata": {"role": "developer", "conflict_group": null},
+        "scope": "global",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.8,
+        "status": "approved",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-qa-lesson",
+        "type": "lesson",
+        "summary": "Synthetic QA lesson",
+        "content": "role-marker has a different synthetic knowledge type",
+        "keywords": ["role-marker"],
+        "metadata": {"role": "qa", "conflict_group": null},
+        "scope": "global",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.8,
+        "status": "approved",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-obsolete-rule",
+        "type": "decision",
+        "summary": "Synthetic obsolete rule",
+        "content": "stale-marker must never be recalled",
+        "keywords": ["stale-marker"],
+        "metadata": {"role": "developer", "conflict_group": null},
+        "scope": "project",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.7,
+        "status": "obsolete",
+        "project_id": "project-syn-alpha",
+        "obsolete_at": "2025-01-01T00:00:00Z",
+        "obsolete_reason": "synthetic replacement",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-stale-hash-rule",
+        "type": "decision",
+        "summary": "Synthetic stale hash rule",
+        "content": "stale-marker begins as committed synthetic content",
+        "keywords": ["stale-marker"],
+        "metadata": {"role": "developer", "conflict_group": null},
+        "scope": "project",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.7,
+        "status": "approved",
+        "project_id": "project-syn-alpha",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "change_content"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-conflict-left",
+        "type": "decision",
+        "summary": "Synthetic conflict left",
+        "content": "conflict-marker proposes the left synthetic choice",
+        "keywords": ["conflict-marker"],
+        "metadata": {"role": "manager", "conflict_group": "conflict-syn-routing"},
+        "scope": "global",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.6,
+        "status": "approved",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-conflict-right",
+        "type": "decision",
+        "summary": "Synthetic conflict right",
+        "content": "conflict-marker proposes the right synthetic choice",
+        "keywords": ["conflict-marker"],
+        "metadata": {"role": "manager", "conflict_group": "conflict-syn-routing"},
+        "scope": "global",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.6,
+        "status": "approved",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-candidate-rule",
+        "type": "preference",
+        "summary": "Synthetic unapproved candidate",
+        "content": "state-marker remains a candidate",
+        "keywords": ["state-marker"],
+        "metadata": {"role": "curator", "conflict_group": null},
+        "scope": "global",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.5,
+        "status": "candidate",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-rejected-rule",
+        "type": "preference",
+        "summary": "Synthetic rejected candidate",
+        "content": "state-marker was rejected",
+        "keywords": ["state-marker"],
+        "metadata": {"role": "curator", "conflict_group": null},
+        "scope": "global",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.5,
+        "status": "rejected",
+        "rejected_by": "fixture-manager",
+        "rejected_at": "2025-01-01T00:00:00Z",
+        "rejection_reason": "synthetic rejection",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    },
+    {
+      "record": {
+        "schema_version": 1,
+        "id": "exp-syn-project-beta-rule",
+        "type": "lesson",
+        "summary": "Synthetic beta lesson",
+        "content": "beta-marker belongs to beta",
+        "keywords": ["beta-marker"],
+        "metadata": {"role": "developer", "conflict_group": null},
+        "scope": "project",
+        "owner": "evaluation-fixture",
+        "evidence": {"method": "synthetic-contract"},
+        "confidence": 0.9,
+        "status": "approved",
+        "project_id": "project-syn-beta",
+        "approved_by": "fixture-manager",
+        "approved_at": "2025-01-01T00:00:00Z",
+        "validation": "synthetic replay",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      "post_commit": "none"
+    }
+  ],
+  "provenance_probes": [
+    {"probe_id": "probe-syn-stale-hash", "record_id": "exp-syn-project-alpha-rule", "failure": "stale_hash"},
+    {"probe_id": "probe-syn-stale-commit", "record_id": "exp-syn-project-alpha-rule", "failure": "stale_commit"}
+  ],
+  "cases": [
+    {
+      "case_id": "case-syn-project-and-global",
+      "query": {"text": "alpha-marker", "project_id": "project-syn-alpha", "role": "developer", "knowledge_type": "decision"},
+      "observed": {"manager_interventions": 1, "eligible_manager_decisions": 4, "known_defects": 2, "qa_caught_defects": 2, "rework_loops": 1, "context_tokens": 1180, "latency_ms": 42}
+    },
+    {
+      "case_id": "case-syn-role-and-type",
+      "query": {"text": "role-marker", "project_id": "project-syn-alpha", "role": "qa", "knowledge_type": "procedure"},
+      "observed": {"manager_interventions": 0, "eligible_manager_decisions": 3, "known_defects": 1, "qa_caught_defects": 1, "rework_loops": 0, "context_tokens": 960, "latency_ms": 36}
+    },
+    {
+      "case_id": "case-syn-stale-and-obsolete",
+      "query": {"text": "stale-marker", "project_id": "project-syn-alpha", "role": "developer", "knowledge_type": "decision"},
+      "observed": {"manager_interventions": 1, "eligible_manager_decisions": 2, "known_defects": 1, "qa_caught_defects": 1, "rework_loops": 1, "context_tokens": 900, "latency_ms": 39}
+    },
+    {
+      "case_id": "case-syn-conflict",
+      "query": {"text": "conflict-marker", "project_id": "project-syn-alpha", "role": "manager", "knowledge_type": "decision"},
+      "observed": {"manager_interventions": 1, "eligible_manager_decisions": 2, "known_defects": 1, "qa_caught_defects": 1, "rework_loops": 1, "context_tokens": 1240, "latency_ms": 48}
+    },
+    {
+      "case_id": "case-syn-unapproved-states",
+      "query": {"text": "state-marker", "project_id": "project-syn-alpha", "role": "curator", "knowledge_type": "preference"},
+      "observed": {"manager_interventions": 0, "eligible_manager_decisions": 2, "known_defects": 1, "qa_caught_defects": 1, "rework_loops": 0, "context_tokens": 870, "latency_ms": 34}
+    },
+    {
+      "case_id": "case-syn-cross-project-lookalike",
+      "query": {"text": "beta-marker", "project_id": "project-syn-beta", "role": "developer", "knowledge_type": "lesson"},
+      "observed": {"manager_interventions": 0, "eligible_manager_decisions": 3, "known_defects": 1, "qa_caught_defects": 1, "rework_loops": 0, "context_tokens": 1020, "latency_ms": 37}
+    }
+  ]
+}

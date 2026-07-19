@@ -73,6 +73,7 @@ Hook/runtime events live in private `PLUGIN_DATA` or a project `.opc` fallback, 
 | [Migration](docs/migration-from-local-prototype.md) | Safe cutover from the local prototype |
 | [Security and privacy](docs/security-and-privacy.md) | Data boundaries, hook safety, and publication checks |
 | [Testing and acceptance](docs/testing-and-acceptance.md) | Test matrix and release gates |
+| [Evaluation baseline](docs/evaluation-baseline.md) | Versioned synthetic File/Git baseline and private 3–5-task aggregate protocol |
 | [Roadmap](docs/roadmap.md) | Planned delivery stages |
 
 Architecture decisions live under [`docs/adr`](docs/adr/README.md).

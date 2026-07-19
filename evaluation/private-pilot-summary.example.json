@@ -1,0 +1,22 @@
+{
+  "schema_version": "opc-private-pilot-summary-v1",
+  "contract_version": "opc-evaluation-contract-v1",
+  "pilot_id": "pilot-0123456789ab",
+  "mode": "private-aggregate",
+  "task_count": 3,
+  "counts": {
+    "manager_interventions": 1,
+    "eligible_manager_decisions": 8,
+    "known_defects": 3,
+    "qa_caught_defects": 3,
+    "rework_loops": 2,
+    "valid_reuse_opportunities": 4,
+    "valid_reuses": 3,
+    "accepted_recalls": 4,
+    "false_recall_acceptances": 1,
+    "scope_leakage_acceptances": 0,
+    "stale_obsolete_acceptances": 0
+  },
+  "context_tokens": {"total": 4200, "median": 1350, "p95_nearest_rank": 1600},
+  "latency_ms": {"total": 138, "median": 45, "p95_nearest_rank": 52}
+}
