@@ -62,16 +62,28 @@ def forbidden_filename(path: Path) -> bool:
 
 
 def iter_files(root: Path):
-    root = root.resolve()
+    first_directory = True
     for current, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        current_path = Path(current)
+        symlink_dirs = sorted(
+            current_path / name
+            for name in dirs
+            if name not in SKIP_DIRS and (current_path / name).is_symlink()
+        )
+        dirs[:] = sorted(
+            name
+            for name in dirs
+            if name not in SKIP_DIRS and not (current_path / name).is_symlink()
+        )
+        yield from symlink_dirs
         for name in sorted(files):
             # A linked Git worktree stores a machine-local ``gitdir`` pointer
             # in a root .git control file. It is Git metadata, not publishable
             # repository content; history is scanned separately below.
-            if Path(current) == root and name == ".git":
+            if first_directory and name == ".git":
                 continue
-            yield Path(current) / name
+            yield current_path / name
+        first_directory = False
 
 
 def scan_text(relative: Path, text: str, *, prefix: str = "") -> list[str]:
@@ -87,10 +99,30 @@ def scan_text(relative: Path, text: str, *, prefix: str = "") -> list[str]:
 
 def scan(root: Path) -> list[str]:
     findings: list[str] = []
-    for path in iter_files(root):
-        relative = path.relative_to(root)
+    try:
+        canonical_root = root.expanduser().resolve(strict=True)
+    except OSError as exc:
+        return [f"scan-root: SCAN_ROOT_UNAVAILABLE ({type(exc).__name__})"]
+    if not canonical_root.is_dir():
+        return ["scan-root: SCAN_ROOT_UNAVAILABLE (NotDirectory)"]
+    for path in iter_files(canonical_root):
+        try:
+            relative = path.relative_to(canonical_root)
+        except ValueError:
+            findings.append(f"{path.name}: SCAN_PATH_ESCAPED")
+            continue
         if forbidden_filename(relative):
             findings.append(f"{relative}: forbidden private/runtime filename")
+        if path.is_symlink():
+            try:
+                target = os.readlink(path)
+                resolved_target = (path.parent / target).resolve(strict=False)
+                resolved_target.relative_to(canonical_root)
+            except (OSError, ValueError):
+                findings.append(f"{relative}: symbolic link escapes scan root")
+            else:
+                findings.extend(scan_text(relative, target))
+            continue
         is_safe_env_example = path.name.lower() in SAFE_ENV_EXAMPLES
         if (
             not is_safe_env_example

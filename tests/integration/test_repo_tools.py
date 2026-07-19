@@ -133,6 +133,29 @@ class PrivacyScanTests(unittest.TestCase):
             (root / "README.md").write_text("portable example", encoding="utf-8")
             self.assertEqual([], privacy_scan.scan(root))
 
+    def test_scan_canonicalizes_root_before_file_iteration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "README.md").write_text("portable example", encoding="utf-8")
+            with mock.patch.object(
+                privacy_scan, "iter_files", wraps=privacy_scan.iter_files
+            ) as iterator:
+                self.assertEqual([], privacy_scan.scan(root))
+            iterator.assert_called_once_with(root.resolve(strict=True))
+
+    def test_file_symlink_escape_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp)
+            external = Path(outside) / "external.txt"
+            external.write_text("portable external content", encoding="utf-8")
+            link = root / "linked.txt"
+            try:
+                link.symlink_to(external)
+            except OSError as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+            findings = privacy_scan.scan(root)
+            self.assertTrue(any("symbolic link escapes scan root" in item for item in findings))
+
     @mock.patch.object(privacy_scan.subprocess, "run")
     def test_git_history_scan_fails_closed_when_git_is_unavailable(self, run):
         run.side_effect = FileNotFoundError("git")
