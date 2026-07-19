@@ -302,7 +302,7 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
                 release.validate_private_pilot(self.private, path)
 
     @unittest.skipUnless(os.name == "nt", "Windows path semantics only")
-    def test_windows_case_normalization_passes_but_short_or_reparse_aliases_fail(self) -> None:
+    def test_windows_case_and_short_aliases_pass_but_reparse_roots_fail(self) -> None:
         path, _ = self.write_pilot()
         case_root = Path(str(self.private).swapcase())
         case_path = Path(str(path).swapcase())
@@ -314,8 +314,8 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
             alias_root = self.temporary_alias / "private-project"
             alias_path = alias_root / ".opc" / "release-evidence" / "pilot.json"
             self.assertTrue(os.path.samefile(alias_root, self.private))
-            with self.assertRaisesRegex(release.ReleaseEvidenceError, "link or alias"):
-                release.validate_private_pilot(alias_root, alias_path)
+            alias_verdict = release.validate_private_pilot(alias_root, alias_path)
+            self.assertEqual("pass", alias_verdict["private_pilot_status"])
 
         reparse_root = self.temporary_canonical / "private-reparse"
         try:
@@ -327,6 +327,31 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
             reparse_path = reparse_root / ".opc" / "release-evidence" / "pilot.json"
             with self.assertRaisesRegex(release.ReleaseEvidenceError, "normal directory|link or alias"):
                 release.validate_private_pilot(reparse_root, reparse_path)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory-fd transaction only")
+    def test_posix_output_removes_owned_file_if_bound_parent_moves_outside(self) -> None:
+        output = self.private / "evidence" / "race-verdict.json"
+        escaped_parent = self.temporary_canonical / "escaped-evidence"
+        original = release._write_all_and_verify
+        fd_root = Path("/proc/self/fd")
+        before_fds = len(tuple(fd_root.iterdir())) if fd_root.is_dir() else None
+
+        def race(descriptor, raw):
+            (self.private / "evidence").rename(escaped_parent)
+            return original(descriptor, raw)
+
+        with mock.patch.object(release, "_write_all_and_verify", side_effect=race):
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "boundary changed|missing"
+            ):
+                release._write_private_output(
+                    self.private, output, {"private_pilot_status": "pass"}
+                )
+        self.assertFalse(output.exists())
+        self.assertFalse((escaped_parent / output.name).exists())
+        escaped_parent.rename(self.private / "evidence")
+        if before_fds is not None:
+            self.assertEqual(before_fds, len(tuple(fd_root.iterdir())))
 
     @unittest.skipUnless(os.name == "nt", "Windows directory handle locking only")
     def test_windows_output_holds_parent_chain_and_releases_every_handle(self) -> None:

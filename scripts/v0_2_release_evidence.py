@@ -364,14 +364,10 @@ def _canonical_private_root(root: Path) -> tuple[Path, Path]:
         or not os.path.samefile(root_absolute, resolved)
     ):
         raise ReleaseEvidenceError("private root must be a normal directory")
-    # Windows path equality already ignores case, but the explicit normcase
-    # comparison documents the only lexical normalization accepted here.
-    # Short-name, junction, symlink, and other alias spellings resolve to a
-    # different normalized path and therefore remain fail-closed.
-    lexical = os.path.normcase(os.path.normpath(str(root_absolute)))
-    canonical_lexical = os.path.normcase(os.path.normpath(str(resolved)))
-    if lexical != canonical_lexical:
-        raise ReleaseEvidenceError("private root must not be a link or alias")
+    # A normal Windows 8.3/case spelling is allowed only when lstat proved the
+    # selected root itself is not a reparse point and filesystem identity plus
+    # samefile bind it to the canonical directory. Symlinks and junctions fail
+    # above before resolve can hide their type.
     repository = ROOT.resolve(strict=True)
     try:
         private_in_repository = resolved == repository or resolved.is_relative_to(repository)
@@ -577,17 +573,16 @@ def _write_private_output_posix(
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
-    parent_fd = os.open(root, directory_flags)
+    directory_fds = [os.open(root, directory_flags)]
     descriptor = -1
     created = False
     try:
-        if _file_identity(os.fstat(parent_fd)) != parent_tokens[0]:
+        if _file_identity(os.fstat(directory_fds[0])) != parent_tokens[0]:
             raise ReleaseEvidenceError("private verdict root changed before binding")
         for index, part in enumerate(relative.parts[:-1], start=1):
-            child_fd = os.open(part, directory_flags, dir_fd=parent_fd)
-            os.close(parent_fd)
-            parent_fd = child_fd
-            if _file_identity(os.fstat(parent_fd)) != parent_tokens[index]:
+            child_fd = os.open(part, directory_flags, dir_fd=directory_fds[-1])
+            directory_fds.append(child_fd)
+            if _file_identity(os.fstat(child_fd)) != parent_tokens[index]:
                 raise ReleaseEvidenceError("private verdict parent changed before binding")
         if pre_publish is not None:
             pre_publish()
@@ -598,15 +593,36 @@ def _write_private_output_posix(
             | getattr(os, "O_NOFOLLOW", 0)
             | getattr(os, "O_CLOEXEC", 0)
         )
+        parent_fd = directory_fds[-1]
         descriptor = os.open(relative.name, flags, 0o600, dir_fd=parent_fd)
         created = True
         created_identity = _file_identity(os.fstat(descriptor))
         _write_all_and_verify(descriptor, raw)
         after = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
-        if (
-            _file_identity(after) != created_identity
-            or _file_identity(os.fstat(parent_fd)) != parent_tokens[-1]
-        ):
+        chain_is_bound = _file_identity(after) == created_identity
+        for index, fd in enumerate(directory_fds):
+            current = os.fstat(fd)
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or _file_identity(current) != parent_tokens[index]
+            ):
+                chain_is_bound = False
+            if index:
+                try:
+                    linked = os.stat(
+                        relative.parts[index - 1],
+                        dir_fd=directory_fds[index - 1],
+                        follow_symlinks=False,
+                    )
+                except OSError:
+                    chain_is_bound = False
+                    continue
+                if (
+                    not stat.S_ISDIR(linked.st_mode)
+                    or _file_identity(linked) != _file_identity(current)
+                ):
+                    chain_is_bound = False
+        if not chain_is_bound:
             raise ReleaseEvidenceError("private verdict output boundary changed during write")
         os.close(descriptor)
         descriptor = -1
@@ -623,7 +639,8 @@ def _write_private_output_posix(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        os.close(parent_fd)
+        for fd in reversed(directory_fds):
+            os.close(fd)
 
 
 def _write_private_output_windows(
