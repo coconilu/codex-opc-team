@@ -75,6 +75,7 @@ Hook 必须满足：
 | Mem0 供应链或服务异常 | 隔离依赖、固定版本、可禁用、File/Git 降级 |
 | Shadow replay 越界或诱导自动晋升 | current-HEAD/scope 预检、同契约比较、私有不可覆盖报告、零状态/索引写入 |
 | derived 分层索引被删除、过期或篡改 | 只作导航；缺失/非法/HEAD 不同即 flat fallback；L2 注入前重验 exact provenance 与治理 |
+| lineage 把时间顺序误写成因果或泄漏上下文 | 只存版本/Hash/citation/state；报告前重验；固定 association/evidence only；禁存正文、prompt、CoT 与 payload |
 
 Mem0 Adapter 在任何 `mem0` import 之前把 `MEM0_DIR` 指向 OPC 私有 `data_root`，显式关闭 `MEM0_TELEMETRY`，并固定 History DB 与 Qdrant 路径。若当前进程已经用外部目录或开启 Telemetry 导入 Mem0，Adapter 拒绝继续并降级到 File/Git。这些本地路径隔离不等于文本完全本地：进入索引的已批准摘要和正文可能发送给默认 OpenAI-backed 模型/嵌入服务。用户必须在启用前看到这条数据流；返回的召回项仍只是带 canonical 元数据的候选引用，必须回读 File/Git。
 
@@ -112,6 +113,7 @@ Mem0 Adapter 在任何 `mem0` import 之前把 `MEM0_DIR` 指向 OPC 私有 `dat
 | Mem0 索引 | 用户启用并索引 | 可重建 | 可独立删除，不影响知识 |
 | 分层 L0/L1 索引 | 用户确认 exact preview 后在 private data root 构建 | 可重建、Git ignored | exact-token 删除，不影响知识或 Provider |
 | Shadow Evaluation 输入/报告 | 用户批准的私有 pilot 或合成 fixture | 私有派生数据策略 | 用户按私有证据保留策略决定 |
+| Knowledge lineage sidecar | exact preview 后记录角色/步骤状态或晚到关联 | 默认 30 天，项目策略可缩短 | 删除整个私有派生产物，不改写 canonical knowledge |
 | 配置备份 | 配置变更前 | 到用户确认稳定 | 明确列出后由用户决定 |
 
 ## 9. 安全事件响应

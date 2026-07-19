@@ -18,3 +18,5 @@ python <plugin-root>/scripts/opc_knowledge.py update-run --project-root <project
 Before `ready_for_manager`, record non-empty `implementation`, `verification`, and `qa` evidence. Before `completed`, also record `manager_handoff` evidence. Keep `.opc/run.json` local runtime state; do not copy it into organizational knowledge or a public repository.
 
 Structured feedback is an optional versioned sidecar under `.opc/feedback`, not a new run-state requirement. Request it after handoff or when a late product outcome arrives; read a missing sidecar as “not recorded,” not PASS.
+
+Knowledge-use lineage is also optional and does not change run transitions. Follow `knowledge-lineage.md`: record explicit role/step states and portable late evidence associations, then revalidate before handoff. Missing lineage means unavailable, never inferred usage.

@@ -555,9 +555,16 @@ class _BoundDirectory:
             raise FeedbackError("feedback child is a symlink or reparse point")
         return _file_identity(metadata)
 
-    def open_exclusive(self, name: str) -> int:
+    def open_exclusive(self, name: str, *, binary: bool = False) -> int:
         self.verify_current()
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_CREAT
+            | os.O_EXCL
+            | os.O_WRONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        if binary:
+            flags |= getattr(os, "O_BINARY", 0)
         if self.fd is not None:
             descriptor = os.open(name, flags, 0o600, dir_fd=self.fd)
         else:
@@ -577,6 +584,7 @@ class _BoundDirectory:
         *,
         max_bytes: int,
         require_single_link: bool = False,
+        binary: bool = False,
     ) -> bytes:
         self.verify_current()
         expected = self.child_identity(name)
@@ -586,6 +594,8 @@ class _BoundDirectory:
         if require_single_link and before.st_nlink != 1:
             raise FeedbackError("feedback child must have one filesystem link")
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        if binary:
+            flags |= getattr(os, "O_BINARY", 0)
         descriptor = (
             os.open(name, flags, dir_fd=self.fd)
             if self.fd is not None

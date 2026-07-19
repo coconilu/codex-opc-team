@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added strict, bounded private knowledge-use lineage with exact Packet/Trace and canonical revision identities, deterministic role/step states, explicit provider degradation, portable late evidence associations, current-HEAD report revalidation, and no causal or promotion authority.
 - Added zero-dependency hierarchical File/Git recall with private rebuildable L0/L1 navigation, bounded current-HEAD L2 reads, strict ContextPacket/RecallTrace contracts, flat/provider degradation, and a versioned public flat-vs-hierarchical evaluation.
 - Hardened hierarchical recall with the shared #7 relation engine, canonical governance snapshots, exact publish rollback, joint Packet/Trace validation, and evidence-recomputed evaluation rendering.
 - Added a versioned, deterministic File/Git evaluation contract, public synthetic fixtures, machine and human baseline artifacts, and a strict aggregate-only protocol for private 3–5-task pilots.

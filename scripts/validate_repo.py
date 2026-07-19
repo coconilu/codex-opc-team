@@ -749,6 +749,157 @@ def validate_hierarchical_recall_contract() -> None:
         require(token in report, f"hierarchical report is missing {token}")
 
 
+def validate_knowledge_lineage_contract() -> None:
+    asset_root = PLUGIN / "assets" / "lineage"
+    contract_path = asset_root / "knowledge-lineage-contract.v1.json"
+    schema_path = asset_root / "knowledge-lineage.v1.schema.json"
+    runtime_path = PLUGIN / "scripts" / "opc_lineage.py"
+    adr_path = ROOT / "docs" / "adr" / "0013-private-knowledge-use-lineage.md"
+    guide_path = ROOT / "docs" / "knowledge-lineage.md"
+    skill_refs = (
+        PLUGIN / "skills" / "opc-manager" / "references" / "knowledge-lineage.md",
+        PLUGIN / "skills" / "opc-qa-gate" / "references" / "lineage-evidence.md",
+        PLUGIN / "skills" / "opc-retrospective" / "references" / "knowledge-lineage.md",
+        PLUGIN / "skills" / "opc-memory" / "references" / "knowledge-lineage.md",
+    )
+    for path in (contract_path, schema_path, runtime_path, adr_path, guide_path, *skill_refs):
+        require(path.is_file(), f"missing knowledge-lineage artifact: {path}")
+
+    scripts = str(PLUGIN / "scripts")
+    sys.path.insert(0, scripts)
+    try:
+        spec = importlib.util.spec_from_file_location("opc_lineage_contract", runtime_path)
+        require(spec is not None and spec.loader is not None, "cannot load lineage runtime")
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        contract, contract_hash = runtime._load_contract()
+    finally:
+        sys.path.pop(0)
+    schema = load_json(schema_path)
+    require(
+        contract.get("contract_version") == "opc-knowledge-lineage-contract-v1"
+        and contract.get("schema_version") == "opc-knowledge-lineage-v1"
+        and contract.get("authority") == "file-git-only"
+        and contract.get("causal_claim_allowed") is False
+        and contract.get("evidence_association_only") is True
+        and contract.get("report_claim") == "association/evidence only",
+        "knowledge-lineage authority or claim boundary drifted",
+    )
+    require(
+        contract_hash == hashlib.sha256(contract_path.read_bytes()).hexdigest(),
+        "knowledge-lineage contract hash is not exact file bytes",
+    )
+    storage = contract.get("storage") or {}
+    require(
+        storage.get("project_relative") == ".opc/lineage/{run_id}.json"
+        and storage.get("private_or_git_ignored") is True
+        and storage.get("git_ignored_boundary") == ".opc/lineage/"
+        and set(storage.get("transaction_artifacts", []))
+        == {"final", "lock", "pending", "backup"}
+        and storage.get("subject_binding") == "exact-project-run-instances"
+        and storage.get("filesystem_subject_binding")
+        == "process-local-project-opc-lineage-directory-objects"
+        and storage.get("filesystem_identity_serialized") is False
+        and storage.get("preview_writes") is False
+        and all(
+            storage.get(key) is False
+            for key in (
+                "canonical_write", "provider_write", "project_source_write",
+                "remote_telemetry",
+            )
+        ),
+        "knowledge-lineage storage boundary is incomplete",
+    )
+    require(
+        set(contract.get("knowledge_states", []))
+        == {"recalled", "injected", "adopted", "ignored", "overridden", "contradicted", "omitted"}
+        and set(contract.get("provider_states", []))
+        == {"available", "missing", "disabled", "failed", "stale", "no_memory"}
+        and set(contract.get("evidence_kinds", []))
+        == {"qa", "feedback", "outcome", "shadow", "evaluation"},
+        "knowledge-lineage states or portable evidence kinds drifted",
+    )
+    forbidden = set(contract.get("forbidden_content", []))
+    require(
+        {
+            "raw_chat", "raw_prompt", "chain_of_thought", "hook_payload",
+            "tool_payload", "credentials", "embeddings", "session_id",
+            "turn_id", "thread_id", "user_home_path", "private_body",
+        }
+        <= forbidden,
+        "knowledge-lineage privacy denylist is incomplete",
+    )
+    require(
+        set(contract.get("forbidden_side_effects", []))
+        == {
+            "candidate_approval", "candidate_rejection", "knowledge_rewrite",
+            "knowledge_promotion", "git_write", "provider_index_write",
+            "external_communication",
+        },
+        "knowledge-lineage forbidden side effects are incomplete",
+    )
+    compatibility = contract.get("compatibility") or {}
+    require(
+        compatibility.get("v0_1_without_lineage") == "readable-as-lineage-unavailable"
+        and compatibility.get("migration_required") is False
+        and compatibility.get("fabricate_defaults") is False,
+        "knowledge-lineage v0.1 compatibility is incomplete",
+    )
+    limits = contract.get("limits") or {}
+    require(
+        limits.get("events") == 500
+        and limits.get("states") == 500
+        and limits.get("lineage_bytes") == 1048576
+        and limits.get("context_result_bytes") == 2097152
+        and schema.get("properties", {}).get("events", {}).get("maxItems") == limits["events"]
+        and schema.get("properties", {}).get("states", {}).get("maxItems") == limits["states"],
+        "knowledge-lineage schema/runtime bounds drifted",
+    )
+    require(
+        schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema"
+        and schema.get("additionalProperties") is False
+        and set(schema.get("required", []))
+        == {
+            "schema_version", "contract_version", "contract_sha256", "project_ref",
+            "run_ref", "revision", "created_at", "updated_at", "events", "states",
+        },
+        "knowledge-lineage top-level schema is not strict",
+    )
+    for name in (
+        "instance", "contextPacket", "knowledgeRef", "provider", "evidenceRef",
+        "event", "state",
+    ):
+        require(
+            schema.get("$defs", {}).get(name, {}).get("additionalProperties") is False,
+            f"knowledge-lineage schema {name} must reject extra fields",
+        )
+    event_rules = schema.get("$defs", {}).get("event", {}).get("allOf", [])
+    evidence_rules = {
+        rule.get("if", {}).get("properties", {}).get("event_type", {}).get("const"):
+        rule.get("then", {}).get("properties", {}).get("evidence_refs", {})
+        for rule in event_rules
+    }
+    require(
+        evidence_rules.get("knowledge", {}).get("maxItems") == 0
+        and evidence_rules.get("provider", {}).get("maxItems") == 0
+        and evidence_rules.get("association", {}).get("minItems") == 1,
+        "knowledge-lineage evidence refs must be association-only in schema",
+    )
+    guide = guide_path.read_text(encoding="utf-8")
+    require(
+        "association/evidence only" in guide
+        and "lineage unavailable" in guide
+        and "30 天" in guide
+        and "base-record CAS" in guide
+        and "exact subject binding" in guide
+        and "transaction artifacts" in guide
+        and "ID-only RecallTrace" in guide
+        and "Evidence ref 只允许" in guide
+        and "opc_lineage.py" in guide,
+        "knowledge-lineage guide omits claim, compatibility, retention, or CLI",
+    )
+
+
 def main() -> int:
     checks = [
         validate_manifest,
@@ -764,6 +915,7 @@ def main() -> int:
         validate_shadow_evaluation_contract,
         validate_knowledge_governance_contract,
         validate_hierarchical_recall_contract,
+        validate_knowledge_lineage_contract,
         validate_markdown_links,
     ]
     try:

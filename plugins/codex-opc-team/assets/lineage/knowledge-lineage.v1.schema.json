@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:schema:knowledge-lineage:v1",
+  "title": "OPC private knowledge lineage",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "contract_sha256", "project_ref", "run_ref", "revision", "created_at", "updated_at", "events", "states"],
+  "properties": {
+    "schema_version": {"const": "opc-knowledge-lineage-v1"},
+    "contract_version": {"const": "opc-knowledge-lineage-contract-v1"},
+    "contract_sha256": {"$ref": "#/$defs/sha256"},
+    "project_ref": {"$ref": "#/$defs/id"},
+    "run_ref": {"$ref": "#/$defs/runId"},
+    "revision": {"type": "integer", "minimum": 0, "maximum": 500},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "updated_at": {"$ref": "#/$defs/timestamp"},
+    "events": {"type": "array", "maxItems": 500, "items": {"$ref": "#/$defs/event"}},
+    "states": {"type": "array", "maxItems": 500, "items": {"$ref": "#/$defs/state"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$", "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}},
+    "runId": {"type": "string", "minLength": 5, "maxLength": 128, "pattern": "^opc-(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$", "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}},
+    "eventId": {"type": "string", "minLength": 9, "maxLength": 128, "pattern": "^lineage-(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$", "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}},
+    "sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
+    "gitCommit": {"type": "string", "minLength": 40, "maxLength": 64, "pattern": "^[0-9a-f]{40,64}$"},
+    "timestamp": {"type": "string", "maxLength": 32, "format": "date-time", "pattern": "Z$"},
+    "portableRef": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$", "not": {"anyOf": [{"pattern": "(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._ -]?[Ii][Dd]"}, {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}]}},
+    "instance": {
+      "type": "object",
+      "required": ["schema_version", "sha256"],
+      "properties": {"schema_version": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"}]}, "sha256": {"$ref": "#/$defs/sha256"}},
+      "additionalProperties": false
+    },
+    "contextPacket": {
+      "type": "object",
+      "required": ["schema_version", "sha256", "query_sha256", "mode", "recall_trace_version", "recall_trace_sha256"],
+      "properties": {
+        "schema_version": {"const": "opc-context-packet-v1"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "query_sha256": {"$ref": "#/$defs/sha256"},
+        "mode": {"enum": ["hierarchical-file-git", "flat-file-git-fallback"]},
+        "recall_trace_version": {"const": "opc-recall-trace-v1"},
+        "recall_trace_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "knowledgeRef": {
+      "type": "object",
+      "required": ["record_id", "source_path", "source_commit", "content_sha256", "status", "scope", "project_id", "knowledge_type", "sensitivity"],
+      "properties": {
+        "record_id": {"$ref": "#/$defs/id"},
+        "source_path": {"$ref": "#/$defs/portableRef"},
+        "source_commit": {"$ref": "#/$defs/gitCommit"},
+        "content_sha256": {"$ref": "#/$defs/sha256"},
+        "status": {"enum": ["candidate", "approved", "rejected", "obsolete"]},
+        "scope": {"enum": ["global", "project"]},
+        "project_id": {"oneOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "knowledge_type": {"$ref": "#/$defs/id"},
+        "sensitivity": {"enum": ["public", "internal", "restricted"]}
+      },
+      "additionalProperties": false
+    },
+    "provider": {
+      "type": "object",
+      "required": ["provider_id", "state", "authoritative"],
+      "properties": {"provider_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$"}, "state": {"enum": ["available", "missing", "disabled", "failed", "stale", "no_memory"]}, "authoritative": {"const": false}},
+      "additionalProperties": false
+    },
+    "evidenceRef": {
+      "type": "object",
+      "required": ["kind", "ref", "sha256"],
+      "properties": {"kind": {"enum": ["qa", "feedback", "outcome", "shadow", "evaluation"]}, "ref": {"$ref": "#/$defs/portableRef"}, "sha256": {"$ref": "#/$defs/sha256"}},
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["event_id", "sequence", "recorded_at", "event_type", "role", "step_id", "project_instance", "run_instance", "context_packet", "knowledge_ref", "knowledge_state", "provider", "evidence_refs", "reason_codes", "previous_event_id"],
+      "properties": {
+        "event_id": {"$ref": "#/$defs/eventId"}, "sequence": {"type": "integer", "minimum": 1, "maximum": 500}, "recorded_at": {"$ref": "#/$defs/timestamp"},
+        "event_type": {"enum": ["knowledge", "provider", "association"]}, "role": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$"}, "step_id": {"$ref": "#/$defs/id"},
+        "project_instance": {"$ref": "#/$defs/instance"}, "run_instance": {"$ref": "#/$defs/instance"}, "context_packet": {"oneOf": [{"$ref": "#/$defs/contextPacket"}, {"type": "null"}]}, "knowledge_ref": {"oneOf": [{"$ref": "#/$defs/knowledgeRef"}, {"type": "null"}]},
+        "knowledge_state": {"oneOf": [{"enum": ["recalled", "injected", "adopted", "ignored", "overridden", "contradicted", "omitted"]}, {"type": "null"}]}, "provider": {"oneOf": [{"$ref": "#/$defs/provider"}, {"type": "null"}]},
+        "evidence_refs": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/evidenceRef"}}, "reason_codes": {"type": "array", "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "previous_event_id": {"oneOf": [{"$ref": "#/$defs/eventId"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {"if": {"properties": {"event_type": {"const": "knowledge"}}}, "then": {"properties": {"knowledge_ref": {"$ref": "#/$defs/knowledgeRef"}, "knowledge_state": {"enum": ["recalled", "injected", "adopted", "ignored", "overridden", "contradicted", "omitted"]}, "provider": {"type": "null"}, "evidence_refs": {"maxItems": 0}}}},
+        {"if": {"properties": {"event_type": {"const": "provider"}}}, "then": {"properties": {"knowledge_ref": {"type": "null"}, "knowledge_state": {"type": "null"}, "provider": {"$ref": "#/$defs/provider"}, "previous_event_id": {"type": "null"}, "evidence_refs": {"maxItems": 0}}}},
+        {"if": {"properties": {"event_type": {"const": "association"}}}, "then": {"properties": {"knowledge_state": {"type": "null"}, "provider": {"type": "null"}, "previous_event_id": {"type": "null"}, "evidence_refs": {"minItems": 1}}}},
+        {"if": {"properties": {"knowledge_state": {"enum": ["recalled", "injected", "adopted", "ignored", "overridden", "contradicted"]}}}, "then": {"properties": {"context_packet": {"$ref": "#/$defs/contextPacket"}}}}
+      ],
+      "additionalProperties": false
+    },
+    "state": {
+      "type": "object",
+      "required": ["role", "step_id", "knowledge_ref", "state", "last_event_id", "context_packet"],
+      "properties": {"role": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$"}, "step_id": {"$ref": "#/$defs/id"}, "knowledge_ref": {"$ref": "#/$defs/knowledgeRef"}, "state": {"enum": ["recalled", "injected", "adopted", "ignored", "overridden", "contradicted", "omitted"]}, "last_event_id": {"$ref": "#/$defs/eventId"}, "context_packet": {"oneOf": [{"$ref": "#/$defs/contextPacket"}, {"type": "null"}]}},
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
