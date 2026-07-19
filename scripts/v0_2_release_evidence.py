@@ -10,11 +10,11 @@ private gates.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 import re
-import secrets
 import stat
 import subprocess
 import sys
@@ -590,6 +590,9 @@ def _private_input_bytes(
 
 
 def _write_all_and_verify(descriptor: int, raw: bytes) -> os.stat_result:
+    expected_links = int(getattr(os.fstat(descriptor), "st_nlink", 1))
+    if expected_links not in {0, 1}:
+        raise ReleaseEvidenceError("private verdict output link count is invalid")
     view = memoryview(raw)
     while view:
         written = os.write(descriptor, view)
@@ -607,7 +610,7 @@ def _write_all_and_verify(descriptor: int, raw: bytes) -> os.stat_result:
         verified += chunk
     if (
         not stat.S_ISREG(info.st_mode)
-        or getattr(info, "st_nlink", 1) != 1
+        or getattr(info, "st_nlink", 1) != expected_links
         or info.st_size != len(raw)
         or verified != raw
     ):
@@ -615,92 +618,129 @@ def _write_all_and_verify(descriptor: int, raw: bytes) -> os.stat_result:
     return info
 
 
-def _posix_cleanup_name() -> str:
-    return f".opc-verdict-cleanup-{secrets.token_hex(16)}"
-
-
-def _posix_rename_noreplace(source: str, target: str, parent_fd: int) -> None:
-    import ctypes
-
-    encoded_source = os.fsencode(source)
-    encoded_target = os.fsencode(target)
-    library = ctypes.CDLL(None, use_errno=True)
-    if sys.platform.startswith("linux"):
-        rename = getattr(library, "renameat2", None)
-        flag = 1  # RENAME_NOREPLACE
-    elif sys.platform == "darwin":
-        rename = getattr(library, "renameatx_np", None)
-        flag = 0x00000004  # RENAME_EXCL
-    else:
-        rename = None
-        flag = 0
-    if rename is None:
-        raise ReleaseEvidenceError(
-            "atomic private verdict cleanup is unavailable on this platform"
-        )
-    rename.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    rename.restype = ctypes.c_int
-    if rename(parent_fd, encoded_source, parent_fd, encoded_target, flag) != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
-
-
-def _cleanup_private_output_posix(
+def _posix_publish_unnamed(
+    descriptor: int,
     parent_fd: int,
     name: str,
-    created_identity: tuple[int, int],
 ) -> None:
-    quarantine: str | None = None
-    for _ in range(8):
-        candidate = _posix_cleanup_name()
-        try:
-            _posix_rename_noreplace(name, candidate, parent_fd)
-        except FileExistsError:
-            continue
-        except FileNotFoundError:
-            return
-        quarantine = candidate
-        break
-    if quarantine is None:
-        raise ReleaseEvidenceError(
-            "private verdict cleanup quarantine names are unavailable"
-        )
+    import ctypes
 
+    if not sys.platform.startswith("linux"):
+        raise ReleaseEvidenceError(
+            "unnamed private verdict publication requires Linux O_TMPFILE"
+        )
+    library = ctypes.CDLL(None, use_errno=True)
+    link = getattr(library, "linkat", None)
+    if link is None:
+        raise ReleaseEvidenceError(
+            "atomic private verdict publication is unavailable"
+        )
+    link.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    link.restype = ctypes.c_int
+    encoded_name = os.fsencode(name)
+    if link(descriptor, b"", parent_fd, encoded_name, 0x1000) == 0:
+        return
+    error = ctypes.get_errno()
+    if error in {errno.ENOENT, errno.EPERM}:
+        proc_fd = os.fsencode(f"/proc/self/fd/{descriptor}")
+        if link(-100, proc_fd, parent_fd, encoded_name, 0x400) == 0:
+            return
+        error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+
+
+def _open_posix_unnamed_output(parent_fd: int) -> int:
+    temporary = getattr(os, "O_TMPFILE", 0)
+    if not sys.platform.startswith("linux") or not temporary:
+        raise ReleaseEvidenceError(
+            "unnamed private verdict publication requires Linux O_TMPFILE"
+        )
+    flags = os.O_RDWR | temporary | getattr(os, "O_CLOEXEC", 0)
     try:
-        claimed = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+        return os.open(".", flags, 0o600, dir_fd=parent_fd)
     except OSError as exc:
         raise ReleaseEvidenceError(
-            "private verdict cleanup quarantine changed after claim"
+            "private verdict filesystem does not support unnamed publication"
         ) from exc
-    if stat.S_ISREG(claimed.st_mode) and _file_identity(claimed) == created_identity:
-        try:
-            current = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+
+
+def _posix_verdict_chain_is_bound(
+    root: Path,
+    resolved_root: Path,
+    root_tokens: tuple[tuple[int, int], ...],
+    ancestor_paths: Sequence[Path],
+    ancestor_fds: Sequence[int],
+    relative: Path,
+    parent_tokens: tuple[tuple[int, int], ...],
+    directory_fds: Sequence[int],
+) -> None:
+    try:
+        _assert_private_root_binding(root, resolved_root, root_tokens)
+    except ReleaseEvidenceError as exc:
+        raise ReleaseEvidenceError(
+            "private verdict output boundary changed during write"
+        ) from exc
+    for index, fd in enumerate(ancestor_fds):
+        current = os.fstat(fd)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or _file_identity(current) != root_tokens[index]
+        ):
+            raise ReleaseEvidenceError(
+                "private verdict output boundary changed during write"
+            )
+        if index:
+            try:
+                linked = os.stat(
+                    ancestor_paths[index].name,
+                    dir_fd=ancestor_fds[index - 1],
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise ReleaseEvidenceError(
+                    "private verdict output boundary changed during write"
+                ) from exc
             if (
-                not stat.S_ISREG(current.st_mode)
-                or _file_identity(current) != created_identity
+                not stat.S_ISDIR(linked.st_mode)
+                or _is_reparse(linked)
+                or _file_identity(linked) != _file_identity(current)
             ):
                 raise ReleaseEvidenceError(
-                    "private verdict cleanup quarantine ownership changed"
+                    "private verdict output boundary changed during write"
                 )
-            os.unlink(quarantine, dir_fd=parent_fd)
-        except OSError as exc:
+    for index, fd in enumerate(directory_fds):
+        current = os.fstat(fd)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or _file_identity(current) != parent_tokens[index]
+        ):
             raise ReleaseEvidenceError(
-                "owned private verdict quarantine could not be removed"
-            ) from exc
-        return
-
-    try:
-        _posix_rename_noreplace(quarantine, name, parent_fd)
-    except OSError as exc:
-        raise ReleaseEvidenceError(
-            "private verdict competitor restoration conflicted; quarantine preserved"
-        ) from exc
+                "private verdict output boundary changed during write"
+            )
+        if index:
+            try:
+                linked = os.stat(
+                    relative.parts[index - 1],
+                    dir_fd=directory_fds[index - 1],
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise ReleaseEvidenceError(
+                    "private verdict output boundary changed during write"
+                ) from exc
+            if (
+                not stat.S_ISDIR(linked.st_mode)
+                or _file_identity(linked) != _file_identity(current)
+            ):
+                raise ReleaseEvidenceError(
+                    "private verdict output boundary changed during write"
+                )
 
 
 def _write_private_output_posix(
@@ -723,8 +763,6 @@ def _write_private_output_posix(
     ancestor_fds: list[int] = []
     directory_fds: list[int] = []
     descriptor = -1
-    created = False
-    created_identity: tuple[int, int] | None = None
     parent_fd = -1
     try:
         for index, path in enumerate(ancestor_paths):
@@ -755,93 +793,49 @@ def _write_private_output_posix(
             directory_fds.append(child_fd)
             if _file_identity(os.fstat(child_fd)) != parent_tokens[index]:
                 raise ReleaseEvidenceError("private verdict parent changed before binding")
+        _assert_private_root_binding(root, resolved_root, root_tokens)
+        parent_fd = directory_fds[-1]
+        descriptor = _open_posix_unnamed_output(parent_fd)
+        _write_all_and_verify(descriptor, raw)
+        _posix_verdict_chain_is_bound(
+            root,
+            resolved_root,
+            root_tokens,
+            ancestor_paths,
+            ancestor_fds,
+            relative,
+            parent_tokens,
+            directory_fds,
+        )
         if pre_publish is not None:
             pre_publish()
-        _assert_private_root_binding(root, resolved_root, root_tokens)
-        flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
+        _posix_verdict_chain_is_bound(
+            root,
+            resolved_root,
+            root_tokens,
+            ancestor_paths,
+            ancestor_fds,
+            relative,
+            parent_tokens,
+            directory_fds,
         )
-        parent_fd = directory_fds[-1]
-        descriptor = os.open(relative.name, flags, 0o600, dir_fd=parent_fd)
-        created = True
-        created_identity = _file_identity(os.fstat(descriptor))
-        _write_all_and_verify(descriptor, raw)
-        after = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
-        chain_is_bound = _file_identity(after) == created_identity
         try:
-            _assert_private_root_binding(root, resolved_root, root_tokens)
-        except ReleaseEvidenceError:
-            chain_is_bound = False
-        for index, fd in enumerate(ancestor_fds):
-            current = os.fstat(fd)
-            if (
-                not stat.S_ISDIR(current.st_mode)
-                or _file_identity(current) != root_tokens[index]
-            ):
-                chain_is_bound = False
-            if index:
-                try:
-                    linked = os.stat(
-                        ancestor_paths[index].name,
-                        dir_fd=ancestor_fds[index - 1],
-                        follow_symlinks=False,
-                    )
-                except OSError:
-                    chain_is_bound = False
-                    continue
-                if (
-                    not stat.S_ISDIR(linked.st_mode)
-                    or _is_reparse(linked)
-                    or _file_identity(linked) != _file_identity(current)
-                ):
-                    chain_is_bound = False
-        for index, fd in enumerate(directory_fds):
-            current = os.fstat(fd)
-            if (
-                not stat.S_ISDIR(current.st_mode)
-                or _file_identity(current) != parent_tokens[index]
-            ):
-                chain_is_bound = False
-            if index:
-                try:
-                    linked = os.stat(
-                        relative.parts[index - 1],
-                        dir_fd=directory_fds[index - 1],
-                        follow_symlinks=False,
-                    )
-                except OSError:
-                    chain_is_bound = False
-                    continue
-                if (
-                    not stat.S_ISDIR(linked.st_mode)
-                    or _file_identity(linked) != _file_identity(current)
-                ):
-                    chain_is_bound = False
-        if not chain_is_bound:
-            raise ReleaseEvidenceError("private verdict output boundary changed during write")
-        os.close(descriptor)
-        descriptor = -1
-    except BaseException as write_error:
-        if descriptor >= 0:
-            os.close(descriptor)
-            descriptor = -1
-        if created and created_identity is not None and parent_fd >= 0:
-            try:
-                _cleanup_private_output_posix(
-                    parent_fd, relative.name, created_identity
-                )
-            except ReleaseEvidenceError as cleanup_error:
-                raise cleanup_error from write_error
-        raise
+            _posix_publish_unnamed(descriptor, parent_fd, relative.name)
+        except FileExistsError as exc:
+            raise ReleaseEvidenceError(
+                "private verdict output already exists; choose a new path"
+            ) from exc
     finally:
         if descriptor >= 0:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         for fd in reversed(opened_fds):
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _write_private_output_windows(
