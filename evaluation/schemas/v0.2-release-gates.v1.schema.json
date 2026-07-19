@@ -39,7 +39,7 @@
       "type": "object",
       "required": ["ref", "sha256"],
       "properties": {
-        "ref": {"type": "string", "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))evidence/[A-Za-z0-9._/-]{1,220}$"},
+        "ref": {"type": "string", "maxLength": 240, "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))evidence/[A-Za-z0-9._/-]+$"},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       },
       "additionalProperties": false

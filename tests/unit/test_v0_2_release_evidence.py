@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,7 +30,9 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.private = Path(self.temporary.name) / "private-project"
+        self.temporary_alias = Path(self.temporary.name)
+        self.temporary_canonical = self.temporary_alias.resolve(strict=True)
+        self.private = self.temporary_canonical / "private-project"
         (self.private / ".opc" / "release-evidence").mkdir(parents=True)
         (self.private / "evidence").mkdir()
 
@@ -169,10 +172,12 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
         self.assertIn("improved", verdict["quality_comparison"].values())
 
     def test_public_template_and_quality_regression_fail_closed(self) -> None:
+        private_template = self.private / ".opc" / "release-evidence" / "template.json"
+        private_template.write_bytes(
+            (ROOT / "evaluation" / "private-pilot-v0.2.template.json").read_bytes()
+        )
         with self.assertRaisesRegex(release.ReleaseEvidenceError, "template"):
-            release.validate_private_pilot(
-                ROOT, ROOT / "evaluation" / "private-pilot-v0.2.template.json"
-            )
+            release.validate_private_pilot(self.private, private_template)
         value = self.summary()
         value["arms"]["treatment"]["counts"]["manager_interventions"] = 3
         path, _ = self.write_pilot(value)
@@ -250,6 +255,109 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
                 release._write_private_output(self.private, interrupted, value)
         self.assertFalse(interrupted.exists())
 
+    def test_private_root_cannot_overlap_or_alias_the_public_repository(self) -> None:
+        candidates = (ROOT, ROOT.parent, ROOT / "evaluation")
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                with self.assertRaisesRegex(
+                    release.ReleaseEvidenceError, "filesystem-separated"
+                ):
+                    release._canonical_private_root(candidate)
+
+        alias = self.temporary_canonical / "repository-alias"
+        try:
+            alias.symlink_to(ROOT, target_is_directory=True)
+        except OSError:
+            return
+        with self.assertRaisesRegex(
+            release.ReleaseEvidenceError, "normal directory|link or alias"
+        ):
+            release._canonical_private_root(alias)
+
+    def test_private_sources_are_cumulatively_revalidated_before_pass(self) -> None:
+        path, _ = self.write_pilot()
+        source = (
+            self.private
+            / ".opc"
+            / "release-evidence"
+            / "sources"
+            / "manager_approval.json"
+        )
+        original = release._regular_private_file
+        replaced = False
+
+        def race(*args, **kwargs):
+            nonlocal replaced
+            raw = original(*args, **kwargs)
+            relative = args[1] if len(args) > 1 else kwargs["relative"]
+            if relative.endswith("sources/manager_approval.json") and not replaced:
+                replaced = True
+                source.write_bytes(strict_bytes({"synthetic_private_source_kind": "replaced"}))
+            return raw
+
+        with mock.patch.object(release, "_regular_private_file", side_effect=race):
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "SHA-256 mismatch|changed after validation"
+            ):
+                release.validate_private_pilot(self.private, path)
+
+    @unittest.skipUnless(os.name == "nt", "Windows path semantics only")
+    def test_windows_case_normalization_passes_but_short_or_reparse_aliases_fail(self) -> None:
+        path, _ = self.write_pilot()
+        case_root = Path(str(self.private).swapcase())
+        case_path = Path(str(path).swapcase())
+        self.assertTrue(os.path.samefile(case_root, self.private))
+        verdict = release.validate_private_pilot(case_root, case_path)
+        self.assertEqual("pass", verdict["private_pilot_status"])
+
+        if self.temporary_alias != self.temporary_canonical:
+            alias_root = self.temporary_alias / "private-project"
+            alias_path = alias_root / ".opc" / "release-evidence" / "pilot.json"
+            self.assertTrue(os.path.samefile(alias_root, self.private))
+            with self.assertRaisesRegex(release.ReleaseEvidenceError, "link or alias"):
+                release.validate_private_pilot(alias_root, alias_path)
+
+        reparse_root = self.temporary_canonical / "private-reparse"
+        try:
+            reparse_root.symlink_to(self.private, target_is_directory=True)
+        except OSError:
+            if self.temporary_alias == self.temporary_canonical:
+                self.skipTest("neither a short-name alias nor directory symlink is available")
+        else:
+            reparse_path = reparse_root / ".opc" / "release-evidence" / "pilot.json"
+            with self.assertRaisesRegex(release.ReleaseEvidenceError, "normal directory|link or alias"):
+                release.validate_private_pilot(reparse_root, reparse_path)
+
+    @unittest.skipUnless(os.name == "nt", "Windows directory handle locking only")
+    def test_windows_output_holds_parent_chain_and_releases_every_handle(self) -> None:
+        output = self.private / "evidence" / "locked-verdict.json"
+        displaced = self.private / "evidence-displaced"
+        attempted = False
+        blocked = False
+        original = release._write_all_and_verify
+
+        def race(descriptor, raw):
+            nonlocal attempted, blocked
+            attempted = True
+            try:
+                (self.private / "evidence").rename(displaced)
+            except OSError:
+                blocked = True
+            return original(descriptor, raw)
+
+        with mock.patch.object(release, "_write_all_and_verify", side_effect=race):
+            release._write_private_output(
+                self.private, output, {"private_pilot_status": "pass"}
+            )
+        self.assertTrue(attempted)
+        self.assertTrue(blocked)
+        self.assertTrue(output.is_file())
+        self.assertFalse(displaced.exists())
+
+        # A successful rename after return proves all native directory handles closed.
+        (self.private / "evidence").rename(displaced)
+        displaced.rename(self.private / "evidence")
+
     def test_release_checks_bind_exact_clean_head_private_summary_and_semantics(self) -> None:
         summary_path, _ = self.write_pilot()
         private = release.validate_private_pilot(self.private, summary_path)
@@ -301,12 +409,43 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
         runs = [
             SimpleNamespace(returncode=0, stdout=commit + "\n"),
             SimpleNamespace(returncode=0, stdout=""),
+            SimpleNamespace(returncode=0, stdout=commit + "\n"),
+            SimpleNamespace(returncode=0, stdout=""),
         ]
         with mock.patch.object(release.subprocess, "run", side_effect=runs):
             result = release.validate_release_gates(
                 self.private, gates_path, private["private_summary_sha256"]
             )
         self.assertEqual(commit, result["release_commit"])
+
+        source_path = self.private / "evidence" / "logs" / "windows_ci.txt"
+        source_original = source_path.read_bytes()
+        regular = release._regular_private_file
+        replaced = False
+
+        def race(*args, **kwargs):
+            nonlocal replaced
+            raw = regular(*args, **kwargs)
+            relative = args[1] if len(args) > 1 else kwargs["relative"]
+            if relative == "evidence/logs/windows_ci.txt" and not replaced:
+                replaced = True
+                source_path.write_text("replaced gate log\n", encoding="utf-8")
+            return raw
+
+        runs = [
+            SimpleNamespace(returncode=0, stdout=commit + "\n"),
+            SimpleNamespace(returncode=0, stdout=""),
+        ]
+        with mock.patch.object(release.subprocess, "run", side_effect=runs), mock.patch.object(
+            release, "_regular_private_file", side_effect=race
+        ):
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "SHA-256 mismatch|changed after validation"
+            ):
+                release.validate_release_gates(
+                    self.private, gates_path, private["private_summary_sha256"]
+                )
+        source_path.write_bytes(source_original)
 
         envelope_path = self.private / "evidence" / "windows_ci.json"
         envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
@@ -347,6 +486,48 @@ class V02ReleaseEvidenceTests(unittest.TestCase):
             self.assertFalse(schema["additionalProperties"])
             self.assertIn("source_ref", schema["required"])
             self.assertIn("source_sha256", schema["required"])
+
+    def test_private_ref_schema_and_runtime_syntax_have_bidirectional_parity(self) -> None:
+        fields = []
+        private_schema = json.loads(release.PRIVATE_SCHEMA_PATH.read_text(encoding="utf-8"))
+        gates_schema = json.loads(release.GATES_SCHEMA_PATH.read_text(encoding="utf-8"))
+        fields.append((".opc/", private_schema["$defs"]["evidenceRef"]["properties"]["ref"]))
+        fields.append(("evidence/", gates_schema["$defs"]["evidenceRef"]["properties"]["ref"]))
+        for name, prefix in (
+            ("v0.2-private-evidence-envelope.v1.schema.json", ".opc/"),
+            ("v0.2-release-check-envelope.v1.schema.json", "evidence/"),
+        ):
+            schema = json.loads(
+                (ROOT / "evaluation" / "schemas" / name).read_text(encoding="utf-8")
+            )
+            fields.append((prefix, schema["properties"]["source_ref"]))
+
+        for prefix, field in fields:
+            def schema_accepts(ref: str) -> bool:
+                return len(ref) <= field["maxLength"] and re.fullmatch(field["pattern"], ref) is not None
+
+            def runtime_accepts(ref: str) -> bool:
+                return (
+                    ref.startswith(prefix)
+                    and "\\" not in ref
+                    and "//" not in ref
+                    and len(ref) <= release.MAX_PRIVATE_REF_LENGTH
+                    and re.fullmatch(r"[A-Za-z0-9._/-]+", ref) is not None
+                    and all(part not in {"", ".", ".."} for part in Path(ref).parts)
+                )
+
+            valid = prefix + "a" * (release.MAX_PRIVATE_REF_LENGTH - len(prefix))
+            cases = (
+                valid,
+                valid + "a",
+                prefix + "a/b.json",
+                prefix + "../escape.json",
+                prefix + "a//b.json",
+                prefix + "a\\b.json",
+            )
+            for ref in cases:
+                with self.subTest(prefix=prefix, length=len(ref), ref=ref[-24:]):
+                    self.assertEqual(runtime_accepts(ref), schema_accepts(ref))
 
 
 if __name__ == "__main__":

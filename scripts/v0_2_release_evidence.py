@@ -18,7 +18,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +38,7 @@ PILOT_EVIDENCE_VERSION = "opc-v0.2-private-evidence-envelope-v1"
 RELEASE_CHECK_VERSION = "opc-v0.2-release-check-envelope-v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
+MAX_PRIVATE_REF_LENGTH = 240
 
 TARGETED_TESTS = {
     "context_packet": (
@@ -89,6 +90,15 @@ DELIVERY_ARTIFACTS = {
 
 class ReleaseEvidenceError(ValueError):
     pass
+
+
+class _PrivateReadToken(NamedTuple):
+    root: Path
+    relative: str
+    prefix: str
+    sha256: str
+    snapshot: tuple[int, int, int, int, int, int]
+    parent_tokens: tuple[tuple[int, int], ...]
 
 
 def _pairs_no_duplicates(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
@@ -338,8 +348,50 @@ def verify_public() -> None:
         raise ReleaseEvidenceError("committed v0.2 public evidence report drifted; regenerate it")
 
 
+def _canonical_private_root(root: Path) -> tuple[Path, Path]:
+    root_absolute = Path(os.path.abspath(root))
+    try:
+        before = root_absolute.lstat()
+        resolved = root_absolute.resolve(strict=True)
+        canonical = resolved.lstat()
+    except OSError as exc:
+        raise ReleaseEvidenceError("private root is missing") from exc
+    same_identity = _file_identity(before) == _file_identity(canonical)
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or _is_reparse(before)
+        or not same_identity
+        or not os.path.samefile(root_absolute, resolved)
+    ):
+        raise ReleaseEvidenceError("private root must be a normal directory")
+    # Windows path equality already ignores case, but the explicit normcase
+    # comparison documents the only lexical normalization accepted here.
+    # Short-name, junction, symlink, and other alias spellings resolve to a
+    # different normalized path and therefore remain fail-closed.
+    lexical = os.path.normcase(os.path.normpath(str(root_absolute)))
+    canonical_lexical = os.path.normcase(os.path.normpath(str(resolved)))
+    if lexical != canonical_lexical:
+        raise ReleaseEvidenceError("private root must not be a link or alias")
+    repository = ROOT.resolve(strict=True)
+    try:
+        private_in_repository = resolved == repository or resolved.is_relative_to(repository)
+        repository_in_private = repository.is_relative_to(resolved)
+    except (OSError, ValueError):
+        private_in_repository = repository_in_private = True
+    if private_in_repository or repository_in_private or os.path.samefile(resolved, repository):
+        raise ReleaseEvidenceError(
+            "private root must be filesystem-separated from the public repository"
+        )
+    return root_absolute, resolved
+
+
 def _regular_private_file(
-    root: Path, relative: str, expected_sha: str | None, *, prefix: str
+    root: Path,
+    relative: str,
+    expected_sha: str | None,
+    *,
+    prefix: str,
+    ledger: list[_PrivateReadToken] | None = None,
 ) -> bytes:
     if expected_sha is not None and not HEX64.fullmatch(expected_sha):
         raise ReleaseEvidenceError("private evidence SHA-256 is invalid")
@@ -348,25 +400,24 @@ def _regular_private_file(
         or not relative.startswith(prefix)
         or "\\" in relative
         or "//" in relative
-        or not re.fullmatch(r"[A-Za-z0-9._/-]{1,240}", relative)
+        or len(relative) > MAX_PRIVATE_REF_LENGTH
+        or not re.fullmatch(r"[A-Za-z0-9._/-]+", relative)
     ):
         raise ReleaseEvidenceError("private evidence ref is not portable")
     parts = Path(relative).parts
     if not parts or Path(relative).is_absolute() or any(part in {"", ".", ".."} for part in parts):
         raise ReleaseEvidenceError("private evidence ref is not portable")
-    root_absolute = Path(os.path.abspath(root))
+    root_absolute, resolved_root = _canonical_private_root(root)
     candidate = root_absolute.joinpath(*parts)
     try:
-        resolved_root = root_absolute.resolve(strict=True)
-        if resolved_root != root_absolute:
-            raise ReleaseEvidenceError("private root must not be a link or alias")
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(resolved_root)
         parent_tokens = _directory_chain_tokens(root_absolute, parts[:-1])
         before = candidate.lstat()
     except (OSError, ValueError) as exc:
         raise ReleaseEvidenceError("private evidence ref is missing or escapes its root") from exc
-    if resolved != candidate or not stat.S_ISREG(before.st_mode) or _is_reparse(before):
+    canonical_candidate = resolved_root.joinpath(*parts)
+    if resolved != canonical_candidate or not stat.S_ISREG(before.st_mode) or _is_reparse(before):
         raise ReleaseEvidenceError("private evidence ref must be a regular non-link file")
     if getattr(before, "st_nlink", 1) != 1:
         raise ReleaseEvidenceError("hard-linked private evidence is rejected")
@@ -404,12 +455,40 @@ def _regular_private_file(
         or _file_snapshot(opened) != _file_snapshot(after_fd)
         or _file_identity(before) != _file_identity(after_path)
         or parent_tokens != after_tokens
-        or candidate.resolve(strict=True) != candidate
+        or candidate.resolve(strict=True) != canonical_candidate
     ):
         raise ReleaseEvidenceError("private evidence changed during bound read")
     if expected_sha is not None and _sha(raw) != expected_sha:
         raise ReleaseEvidenceError("private evidence SHA-256 mismatch")
+    if ledger is not None:
+        ledger.append(
+            _PrivateReadToken(
+                root=root_absolute,
+                relative=relative,
+                prefix=prefix,
+                sha256=_sha(raw),
+                snapshot=_file_snapshot(after_fd),
+                parent_tokens=after_tokens,
+            )
+        )
     return raw
+
+
+def _revalidate_private_reads(tokens: Sequence[_PrivateReadToken]) -> None:
+    for token in tokens:
+        replay: list[_PrivateReadToken] = []
+        _regular_private_file(
+            token.root,
+            token.relative,
+            token.sha256,
+            prefix=token.prefix,
+            ledger=replay,
+        )
+        if len(replay) != 1 or (
+            replay[0].snapshot != token.snapshot
+            or replay[0].parent_tokens != token.parent_tokens
+        ):
+            raise ReleaseEvidenceError("private evidence changed after validation")
 
 
 def _is_reparse(info: os.stat_result) -> bool:
@@ -443,18 +522,227 @@ def _directory_chain_tokens(root: Path, parent_parts: Sequence[str]) -> tuple[tu
     return tuple(tokens)
 
 
-def _private_input_bytes(root: Path, path: Path, label: str) -> bytes:
+def _private_input_bytes(
+    root: Path,
+    path: Path,
+    label: str,
+    *,
+    ledger: list[_PrivateReadToken] | None = None,
+) -> bytes:
     try:
         root_absolute = Path(os.path.abspath(root))
         absolute = Path(os.path.abspath(path))
         relative = absolute.relative_to(root_absolute).as_posix()
     except (OSError, ValueError) as exc:
         raise ReleaseEvidenceError(f"{label} must be inside the private root") from exc
-    return _regular_private_file(root_absolute, relative, None, prefix="")
+    return _regular_private_file(root_absolute, relative, None, prefix="", ledger=ledger)
 
 
-def _write_private_output(root: Path, path: Path, value: Mapping[str, Any]) -> None:
-    root_absolute = Path(os.path.abspath(root))
+def _write_all_and_verify(descriptor: int, raw: bytes) -> os.stat_result:
+    view = memoryview(raw)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise ReleaseEvidenceError("private verdict output write failed")
+        view = view[written:]
+    os.fsync(descriptor)
+    info = os.fstat(descriptor)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    verified = b""
+    while len(verified) < len(raw):
+        chunk = os.read(descriptor, len(raw) - len(verified))
+        if not chunk:
+            break
+        verified += chunk
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or getattr(info, "st_nlink", 1) != 1
+        or info.st_size != len(raw)
+        or verified != raw
+    ):
+        raise ReleaseEvidenceError("private verdict output verification failed")
+    return info
+
+
+def _write_private_output_posix(
+    root: Path,
+    relative: Path,
+    raw: bytes,
+    parent_tokens: tuple[tuple[int, int], ...],
+    pre_publish: Callable[[], None] | None,
+) -> None:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    parent_fd = os.open(root, directory_flags)
+    descriptor = -1
+    created = False
+    try:
+        if _file_identity(os.fstat(parent_fd)) != parent_tokens[0]:
+            raise ReleaseEvidenceError("private verdict root changed before binding")
+        for index, part in enumerate(relative.parts[:-1], start=1):
+            child_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = child_fd
+            if _file_identity(os.fstat(parent_fd)) != parent_tokens[index]:
+                raise ReleaseEvidenceError("private verdict parent changed before binding")
+        if pre_publish is not None:
+            pre_publish()
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        descriptor = os.open(relative.name, flags, 0o600, dir_fd=parent_fd)
+        created = True
+        created_identity = _file_identity(os.fstat(descriptor))
+        _write_all_and_verify(descriptor, raw)
+        after = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            _file_identity(after) != created_identity
+            or _file_identity(os.fstat(parent_fd)) != parent_tokens[-1]
+        ):
+            raise ReleaseEvidenceError("private verdict output boundary changed during write")
+        os.close(descriptor)
+        descriptor = -1
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+            descriptor = -1
+        if created:
+            try:
+                os.unlink(relative.name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def _write_private_output_windows(
+    root: Path,
+    absolute: Path,
+    relative: Path,
+    raw: bytes,
+    pre_publish: Callable[[], None] | None,
+) -> None:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    final_path = kernel32.GetFinalPathNameByHandleW
+    final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    final_path.restype = wintypes.DWORD
+    set_info = kernel32.SetFileInformationByHandle
+    set_info.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    set_info.restype = wintypes.BOOL
+
+    invalid = wintypes.HANDLE(-1).value
+    read_attributes = 0x0080
+    generic_read = 0x80000000
+    generic_write = 0x40000000
+    delete = 0x00010000
+    share_read_write = 0x00000001 | 0x00000002  # deliberately excludes FILE_SHARE_DELETE
+    open_existing = 3
+    create_new = 1
+    backup_semantics = 0x02000000
+    open_reparse_point = 0x00200000
+    file_attribute_normal = 0x00000080
+
+    def open_directory(path: Path) -> int:
+        handle = create_file(
+            str(path), read_attributes, share_read_write, None, open_existing,
+            backup_semantics | open_reparse_point, None,
+        )
+        if handle == invalid:
+            raise OSError(ctypes.get_last_error(), "cannot bind private verdict directory")
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = final_path(handle, buffer, len(buffer), 0)
+        if not length or length >= len(buffer):
+            close_handle(handle)
+            raise OSError(ctypes.get_last_error(), "cannot resolve bound private verdict directory")
+        bound = buffer.value
+        if bound.startswith("\\\\?\\UNC\\"):
+            bound = "\\\\" + bound[8:]
+        elif bound.startswith("\\\\?\\"):
+            bound = bound[4:]
+        expected = str(path.resolve(strict=True))
+        if os.path.normcase(os.path.normpath(bound)) != os.path.normcase(os.path.normpath(expected)):
+            close_handle(handle)
+            raise ReleaseEvidenceError("private verdict directory is a link or alias")
+        return int(handle)
+
+    directory_handles: list[int] = []
+    descriptor = -1
+    file_handle: int | None = None
+    try:
+        current = root
+        directory_handles.append(open_directory(current))
+        for part in relative.parts[:-1]:
+            current = current / part
+            directory_handles.append(open_directory(current))
+        if pre_publish is not None:
+            pre_publish()
+        handle = create_file(
+            str(absolute), generic_read | generic_write | delete, 0, None, create_new,
+            file_attribute_normal | open_reparse_point, None,
+        )
+        if handle == invalid:
+            error = ctypes.get_last_error()
+            if error in {80, 183}:
+                raise ReleaseEvidenceError("private verdict output already exists; choose a new path")
+            raise OSError(error, "cannot create private verdict output")
+        file_handle = int(handle)
+        descriptor = msvcrt.open_osfhandle(file_handle, os.O_RDWR | getattr(os, "O_BINARY", 0))
+        _write_all_and_verify(descriptor, raw)
+        os.close(descriptor)
+        descriptor = -1
+        file_handle = None
+    except BaseException:
+        if file_handle is not None:
+            class FileDispositionInfo(ctypes.Structure):
+                _fields_ = [("DeleteFile", wintypes.BOOL)]
+
+            disposition = FileDispositionInfo(True)
+            set_info(file_handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition))
+        if descriptor >= 0:
+            os.close(descriptor)
+            descriptor = -1
+            file_handle = None
+        elif file_handle is not None:
+            close_handle(file_handle)
+            file_handle = None
+        raise
+    finally:
+        for handle in reversed(directory_handles):
+            close_handle(handle)
+
+
+def _write_private_output(
+    root: Path,
+    path: Path,
+    value: Mapping[str, Any],
+    *,
+    pre_publish: Callable[[], None] | None = None,
+) -> None:
+    root_absolute, _ = _canonical_private_root(root)
     absolute = Path(os.path.abspath(path))
     try:
         relative = absolute.relative_to(root_absolute)
@@ -465,56 +753,20 @@ def _write_private_output(root: Path, path: Path, value: Mapping[str, Any]) -> N
     if absolute.exists() or absolute.is_symlink():
         raise ReleaseEvidenceError("private verdict output already exists; choose a new path")
     try:
-        root_resolved = root_absolute.resolve(strict=True)
-        if root_resolved != root_absolute:
-            raise ReleaseEvidenceError("private root must not be a link or alias")
         parent_tokens = _directory_chain_tokens(root_absolute, relative.parts[:-1])
     except OSError as exc:
         raise ReleaseEvidenceError("private verdict parent must already exist") from exc
     raw = _json_bytes(value)
-    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    descriptor = -1
-    created_identity: tuple[int, int] | None = None
     try:
-        descriptor = os.open(absolute, flags, 0o600)
-        created_identity = _file_identity(os.fstat(descriptor))
-        view = memoryview(raw)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise ReleaseEvidenceError("private verdict output write failed")
-            view = view[written:]
-        os.fsync(descriptor)
-        info = os.fstat(descriptor)
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        verified = b""
-        while len(verified) < len(raw):
-            chunk = os.read(descriptor, len(raw) - len(verified))
-            if not chunk:
-                break
-            verified += chunk
-        os.close(descriptor)
-        descriptor = -1
-        after_path = absolute.lstat()
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or getattr(info, "st_nlink", 1) != 1
-            or info.st_size != len(raw)
-            or verified != raw
-            or _file_identity(after_path) != created_identity
-            or _directory_chain_tokens(root_absolute, relative.parts[:-1]) != parent_tokens
-        ):
-            raise ReleaseEvidenceError("private verdict output boundary changed during write")
+        if os.name == "nt":
+            _write_private_output_windows(
+                root_absolute, absolute, relative, raw, pre_publish
+            )
+        else:
+            _write_private_output_posix(
+                root_absolute, relative, raw, parent_tokens, pre_publish
+            )
     except BaseException as exc:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if created_identity is not None:
-            try:
-                current = absolute.lstat()
-                if stat.S_ISREG(current.st_mode) and _file_identity(current) == created_identity:
-                    absolute.unlink()
-            except OSError:
-                pass
         if isinstance(exc, ReleaseEvidenceError):
             raise
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -609,10 +861,18 @@ def _validate_arm(arm: Any, *, pilot_id: str, task_count: int, label: str) -> di
     return result
 
 
-def validate_private_pilot(private_root: Path, summary_path: Path) -> dict[str, Any]:
+def validate_private_pilot(
+    private_root: Path,
+    summary_path: Path,
+    *,
+    _ledger_out: list[_PrivateReadToken] | None = None,
+) -> dict[str, Any]:
     contract, contract_raw = _load_contract()
     del contract
-    raw = _private_input_bytes(private_root, summary_path, "private pilot summary")
+    ledger: list[_PrivateReadToken] = []
+    raw = _private_input_bytes(
+        private_root, summary_path, "private pilot summary", ledger=ledger
+    )
     try:
         summary = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_pairs_no_duplicates,
@@ -718,7 +978,11 @@ def validate_private_pilot(private_root: Path, summary_path: Path) -> dict[str, 
         if not isinstance(evidence["ref"], str) or not evidence["ref"].startswith(".opc/"):
             raise ReleaseEvidenceError("pilot evidence refs must stay in the project .opc boundary")
         evidence_raw = _regular_private_file(
-            private_root, evidence["ref"], evidence["sha256"], prefix=".opc/"
+            private_root,
+            evidence["ref"],
+            evidence["sha256"],
+            prefix=".opc/",
+            ledger=ledger,
         )
         source_ref, source_sha256 = _evidence_envelope(
             evidence_raw,
@@ -733,7 +997,11 @@ def validate_private_pilot(private_root: Path, summary_path: Path) -> dict[str, 
         if source_ref == evidence["ref"]:
             raise ReleaseEvidenceError(f"{name} envelope cannot be its own source evidence")
         _regular_private_file(
-            private_root, source_ref, source_sha256, prefix=".opc/"
+            private_root,
+            source_ref,
+            source_sha256,
+            prefix=".opc/",
+            ledger=ledger,
         )
 
     confounders = summary["confounders"]
@@ -742,7 +1010,7 @@ def validate_private_pilot(private_root: Path, summary_path: Path) -> dict[str, 
     if any(not isinstance(item, str) or not re.fullmatch(r"[a-z][a-z0-9-]{1,63}", item) for item in confounders):
         raise ReleaseEvidenceError("confounders must use portable category identifiers")
 
-    return {
+    verdict = {
         "schema_version": "opc-v0.2-private-pilot-verdict-v1",
         "contract_version": CONTRACT_VERSION,
         "contract_sha256": _sha(contract_raw),
@@ -760,10 +1028,42 @@ def validate_private_pilot(private_root: Path, summary_path: Path) -> dict[str, 
         "private_pilot_status": "pass",
         "claim": "association/evidence only",
     }
+    _revalidate_private_reads(ledger)
+    if _ledger_out is not None:
+        _ledger_out.extend(ledger)
+    return verdict
 
 
-def validate_release_gates(private_root: Path, gates_path: Path, private_sha: str) -> dict[str, Any]:
-    raw = _private_input_bytes(private_root, gates_path, "release gates")
+def _require_exact_clean_head(release_commit: str) -> None:
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if head.returncode or dirty.returncode:
+        raise ReleaseEvidenceError("release gate could not establish repository state")
+    if head.stdout.strip() != release_commit:
+        raise ReleaseEvidenceError("release gate is not bound to the exact HEAD")
+    if dirty.stdout:
+        raise ReleaseEvidenceError("release gate requires a clean working tree")
+
+
+def validate_release_gates(
+    private_root: Path,
+    gates_path: Path,
+    private_sha: str,
+    *,
+    _ledger_out: list[_PrivateReadToken] | None = None,
+) -> dict[str, Any]:
+    ledger: list[_PrivateReadToken] = []
+    raw = _private_input_bytes(
+        private_root, gates_path, "release gates", ledger=ledger
+    )
     try:
         gates = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_pairs_no_duplicates,
@@ -779,10 +1079,7 @@ def validate_release_gates(private_root: Path, gates_path: Path, private_sha: st
     release_commit = gates["release_commit"]
     if not isinstance(release_commit, str) or not HEX40.fullmatch(release_commit):
         raise ReleaseEvidenceError("release commit is invalid")
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=False)
-    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True, check=False)
-    if head.returncode or dirty.returncode or head.stdout.strip() != release_commit or dirty.stdout:
-        raise ReleaseEvidenceError("release gate must run from the exact clean release commit")
+    _require_exact_clean_head(release_commit)
     check_names = {
         "windows_ci", "linux_ci", "repository_validation", "privacy_current_and_history",
         "official_plugin_validator", "all_skill_quick_validators", "independent_release_qa",
@@ -802,7 +1099,11 @@ def validate_release_gates(private_root: Path, gates_path: Path, private_sha: st
         if not isinstance(evidence["ref"], str) or not evidence["ref"].startswith("evidence/"):
             raise ReleaseEvidenceError("release check evidence must use the private evidence directory")
         evidence_raw = _regular_private_file(
-            private_root, evidence["ref"], evidence["sha256"], prefix="evidence/"
+            private_root,
+            evidence["ref"],
+            evidence["sha256"],
+            prefix="evidence/",
+            ledger=ledger,
         )
         try:
             envelope = json.loads(
@@ -841,16 +1142,37 @@ def validate_release_gates(private_root: Path, gates_path: Path, private_sha: st
         ):
             raise ReleaseEvidenceError(f"release check source evidence is invalid: {name}")
         _regular_private_file(
-            private_root, source_ref, source_sha256, prefix="evidence/"
+            private_root,
+            source_ref,
+            source_sha256,
+            prefix="evidence/",
+            ledger=ledger,
         )
+    _revalidate_private_reads(ledger)
+    _require_exact_clean_head(release_commit)
+    if _ledger_out is not None:
+        _ledger_out.extend(ledger)
     return {"release_commit": release_commit, "checks": {name: "pass" for name in sorted(check_names)}}
 
 
-def build_release_verdict(private_root: Path, summary: Path, gates: Path) -> dict[str, Any]:
+def build_release_verdict(
+    private_root: Path,
+    summary: Path,
+    gates: Path,
+    *,
+    _ledger_out: list[_PrivateReadToken] | None = None,
+) -> dict[str, Any]:
     verify_public()
-    private = validate_private_pilot(private_root, summary)
-    exact = validate_release_gates(private_root, gates, private["private_summary_sha256"])
-    return {
+    private_ledger: list[_PrivateReadToken] = []
+    private = validate_private_pilot(private_root, summary, _ledger_out=private_ledger)
+    release_ledger: list[_PrivateReadToken] = []
+    exact = validate_release_gates(
+        private_root,
+        gates,
+        private["private_summary_sha256"],
+        _ledger_out=release_ledger,
+    )
+    verdict = {
         "schema_version": "opc-v0.2-release-verdict-v1",
         "contract_version": CONTRACT_VERSION,
         "release": "v0.2.0",
@@ -865,6 +1187,13 @@ def build_release_verdict(private_root: Path, summary: Path, gates: Path) -> dic
         "claim": "association/evidence only",
         "non_claims": ["no causal attribution", "no statistical generality", "no autonomous self-improvement"],
     }
+    _revalidate_private_reads(private_ledger)
+    _revalidate_private_reads(release_ledger)
+    _require_exact_clean_head(exact["release_commit"])
+    if _ledger_out is not None:
+        _ledger_out.extend(private_ledger)
+        _ledger_out.extend(release_ledger)
+    return verdict
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -896,13 +1225,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_public()
             result = {"public_evidence_status": "pass", "release_status": "blocked"}
         elif args.command == "private-pilot":
-            result = validate_private_pilot(args.private_root, args.summary)
+            final_ledger: list[_PrivateReadToken] = []
+            result = validate_private_pilot(
+                args.private_root, args.summary, _ledger_out=final_ledger
+            )
             if args.output:
-                _write_private_output(args.private_root, args.output, result)
+                _write_private_output(
+                    args.private_root,
+                    args.output,
+                    result,
+                    pre_publish=lambda: _revalidate_private_reads(final_ledger),
+                )
         else:
-            result = build_release_verdict(args.private_root, args.summary, args.gates)
+            final_ledger = []
+            result = build_release_verdict(
+                args.private_root,
+                args.summary,
+                args.gates,
+                _ledger_out=final_ledger,
+            )
             if args.output:
-                _write_private_output(args.private_root, args.output, result)
+                _write_private_output(
+                    args.private_root,
+                    args.output,
+                    result,
+                    pre_publish=lambda: (
+                        _revalidate_private_reads(final_ledger),
+                        _require_exact_clean_head(result["release_commit"]),
+                    ),
+                )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     except (OSError, ReleaseEvidenceError) as exc:

@@ -33,7 +33,7 @@
     "private_pilot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "status": {"const": "pass"},
     "independent_from_implementer": {"type": "boolean"},
-    "source_ref": {"type": "string", "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))evidence/[A-Za-z0-9._/-]{1,220}$"},
+    "source_ref": {"type": "string", "maxLength": 240, "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))evidence/[A-Za-z0-9._/-]+$"},
     "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
   },
   "additionalProperties": false
