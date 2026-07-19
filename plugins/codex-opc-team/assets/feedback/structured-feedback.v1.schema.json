@@ -10,8 +10,8 @@
     "project_ref": {"$ref": "#/$defs/portableProjectId"},
     "run_ref": {"$ref": "#/$defs/portableRunId"},
     "revision": {"type": "integer", "minimum": 0, "maximum": 200},
-    "created_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
-    "updated_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "created_at": {"type": "string", "format": "date-time", "pattern": "Z$", "maxLength": 32},
+    "updated_at": {"type": "string", "format": "date-time", "pattern": "Z$", "maxLength": 32},
     "events": {
       "type": "array",
       "maxItems": 200,
@@ -21,21 +21,25 @@
   "$defs": {
     "portableProjectId": {
       "type": "string",
+      "maxLength": 128,
       "pattern": "^(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$",
       "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
     },
     "portableRunId": {
       "type": "string",
+      "maxLength": 128,
       "pattern": "^opc-(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$",
       "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
     },
     "portableEventId": {
       "type": "string",
+      "maxLength": 128,
       "pattern": "^feedback-(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$",
       "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
     },
     "knowledgeCandidateRef": {
       "type": "string",
+      "maxLength": 128,
       "pattern": "^exp-(?!.*(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._-]?[Ii][Dd])[A-Za-z0-9._-]+$",
       "not": {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
     },
@@ -53,7 +57,14 @@
     },
     "portableRef": {
       "type": "string",
-      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+      "maxLength": 240,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+      "not": {
+        "anyOf": [
+          {"pattern": "(?:[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Tt][Uu][Rr][Nn]|[Tt][Hh][Rr][Ee][Aa][Dd])[._ -]?[Ii][Dd]"},
+          {"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89AaBb][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"}
+        ]
+      }
     },
     "metricRef": {
       "type": "object",
@@ -63,7 +74,7 @@
           "enum": ["manager_intervention_rate", "qa_catch_rate", "rework_loops_per_task", "valid_knowledge_reuse_rate", "false_recall_rate", "scope_leakage_acceptances", "stale_obsolete_acceptances", "context_tokens_per_task", "latency_ms"]
         },
         "aggregate_ref": {"$ref": "#/$defs/portableRef"},
-        "aggregate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "aggregate_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
         "interpretation": {"enum": ["supporting", "conflicting", "unknown"]}
       },
       "additionalProperties": false
@@ -99,7 +110,7 @@
       "required": ["event_id", "recorded_at", "category", "epistemic_status", "summary", "outcome_status", "manager_judgment", "qa_status", "references"],
       "properties": {
         "event_id": {"$ref": "#/$defs/portableEventId"},
-        "recorded_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
+        "recorded_at": {"type": "string", "format": "date-time", "pattern": "Z$", "maxLength": 32},
         "category": {"$ref": "#/$defs/evidenceClass"},
         "epistemic_status": {"$ref": "#/$defs/evidenceClass"},
         "summary": {"type": "string", "minLength": 1, "maxLength": 500, "pattern": "^[^\\r\\n]+$"},

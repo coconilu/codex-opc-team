@@ -11,6 +11,8 @@
 
 采用版本化 contract/schema 和项目私有 `.opc/feedback/<run_id>.json` sidecar。记录由不可变事件组成，以 portable project/run/candidate/metric/artifact reference 关联，使用 revision compare-and-swap、独占锁和 atomic replace 防止丢失更新。同 event ID 的相同内容重试为幂等 no-op，不同内容或 stale/concurrent 更新 fail closed。
 
+更新期间必须绑定单一父目录对象：POSIX 子操作使用 `dir_fd`，Windows 持有不共享删除的目录句柄。pending/backup 使用不可预测 nonce，只有 identity 与本事务记录一致时才允许清理；在 pending 创建前后、replace 前后及最终清理前验证父目录 identity，失败后从绑定目录回滚。事件输入和 sidecar 分别设 64 KiB、512 KiB 读取上限。自由文本与公开仓库隐私扫描共用凭证模式，错误不得回显匹配内容。
+
 缺少 sidecar 表示“未记录”，旧 run 不迁移也不伪造默认值。机器 JSON 是唯一源，紧凑人类报告只能确定性派生。真实反馈不进入公开仓库、canonical knowledge、Mem0 或索引；只允许使用既有评测 contract 的安全聚合引用，不改写评测 baseline。
 
 记录操作不授权候选批准、Git commit、索引、发布、付款或外部通信。反馈只作为后续评测/复盘输入，知识晋升仍走独立候选、验证、经理批准和 File/Git 发布门禁。
@@ -20,6 +22,7 @@
 - 晚到 outcome/metric 可以追加并审计，不覆盖历史判断。
 - PASS、FAIL、partial 和 unknown 均可表达，不强迫二元评价。
 - 严格自由文本和引用门禁降低 raw payload、凭证、运行 ID 与主机路径泄漏风险。
+- 父目录被换名、替换或竞争者占用临时文件时，事务 fail closed 且只清理自己拥有的 identity。
 - 每个项目自行负责私有 sidecar 的保留和备份；本插件不会上传或发布它。
 
 ## Rejected Alternatives

@@ -36,7 +36,16 @@
     "expected_revision_is_required": true,
     "stale_or_concurrent_updates_fail_closed": true,
     "unsupported_versions_require_explicit_migration": true,
-    "absent_feedback_means_not_recorded": true
+    "absent_feedback_means_not_recorded": true,
+    "parent_directory_object_is_bound_for_transaction": true,
+    "cleanup_requires_owned_file_identity": true
+  },
+  "limits": {
+    "event_file_bytes": 65536,
+    "sidecar_bytes": 524288,
+    "identifier_characters": 128,
+    "portable_reference_characters": 240,
+    "summary_characters": 500
   },
   "forbidden_side_effects": [
     "candidate_approval",

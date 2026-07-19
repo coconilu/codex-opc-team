@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import secrets
 import stat
 import sys
 from contextlib import contextmanager
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from opc_memory import OpcMemoryError, load_json, utc_now
+from opc_sensitive import sensitive_text_label
 
 
 SCHEMA_VERSION = "opc-structured-feedback-v1"
@@ -30,33 +32,37 @@ VIEW_VERSION = "opc-structured-feedback-view-v1"
 MAX_EVENTS = 200
 MAX_SUMMARY_LENGTH = 500
 MAX_REFS = 20
+MAX_ID_LENGTH = 128
+MAX_REF_LENGTH = 240
+MAX_TIMESTAMP_LENGTH = 32
+MAX_EVENT_FILE_BYTES = 64 * 1024
+MAX_SIDECAR_BYTES = 512 * 1024
 
 PORTABLE_PROJECT = re.compile(r"^[A-Za-z0-9._-]+$")
 PORTABLE_RUN = re.compile(r"^opc-[A-Za-z0-9._-]+$")
 PORTABLE_EVENT = re.compile(r"^feedback-[A-Za-z0-9._-]+$")
 PORTABLE_CANDIDATE = re.compile(r"^exp-[A-Za-z0-9._-]+$")
 PORTABLE_REF = re.compile(
-    r"^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+$"
+    r"^(?!/)(?![A-Za-z]:)(?!.*//)(?!.*(?:^|/)\.{1,2}(?:/|$))"
+    r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
 )
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 UUID_TOKEN = re.compile(
-    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
-    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
 )
-RUNTIME_ID = re.compile(r"(?i)\b(?:session|turn|thread)[-_ ]?id\b")
+RUNTIME_ID = re.compile(r"(?i)(?:session|turn|thread)[._ -]?id")
 WINDOWS_ABSOLUTE = re.compile(r"(?i)(?:^|[\s\"'])(?:[A-Z]:[\\/]|\\\\)")
 POSIX_ABSOLUTE = re.compile(r"(?:^|[\s\"'])/(?:home|Users|tmp|var|etc|opt)/")
 URL = re.compile(r"(?i)\b(?:https?|file|ssh)://")
-SECRET_MARKER = re.compile(
-    r"(?i)(?:authorization\s*[:=]\s*bearer|api[-_ ]?key\s*[:=]|"
-    r"access[-_ ]?token\s*[:=]|password\s*[:=]|secret\s*[:=]|"
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----)"
-)
 RAW_PAYLOAD = re.compile(
     r"(?i)(?:\braw[-_ ]?(?:chat|conversation|hook|payload)\b|"
     r"\bhook[-_ ]?payload\b|"
     r"\btool[-_ ]?call[-_ ]?id\b|\bmessages\s*[:=]\s*\[)"
+)
+CREDENTIAL_FIELD = re.compile(
+    r"(?i)\b(?:api[-_ ]?key|access[-_ ]?token|token|password|secret)\s*[:=]"
 )
 
 EVENT_CATEGORIES = {
@@ -123,12 +129,19 @@ class FeedbackError(OpcMemoryError):
     """A fail-closed structured-feedback error."""
 
 
-def _strict_json(path: Path) -> dict[str, Any]:
+def _strict_json(path: Path, *, max_bytes: int) -> dict[str, Any]:
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON number is forbidden: {value}")
 
     try:
-        value = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
+        size = path.stat().st_size
+        if size > max_bytes:
+            raise FeedbackError("JSON input exceeds the configured size limit")
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise FeedbackError("JSON input exceeds the configured size limit")
+        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
     except FileNotFoundError as exc:
         raise FeedbackError(f"Missing required file: {path}") from exc
     except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
@@ -159,7 +172,12 @@ def _exact_keys(value: Mapping[str, Any], expected: set[str], label: str) -> Non
 
 
 def _portable(value: Any, pattern: re.Pattern[str], label: str) -> str:
-    if not isinstance(value, str) or not pattern.fullmatch(value):
+    max_length = MAX_REF_LENGTH if pattern is PORTABLE_REF else MAX_ID_LENGTH
+    if (
+        not isinstance(value, str)
+        or len(value) > max_length
+        or not pattern.fullmatch(value)
+    ):
         raise FeedbackError(f"{label} is not a portable identifier")
     if UUID_TOKEN.search(value):
         raise FeedbackError(f"{label} must not contain a UUID runtime token")
@@ -169,7 +187,11 @@ def _portable(value: Any, pattern: re.Pattern[str], label: str) -> str:
 
 
 def _date_time(value: Any, label: str) -> datetime:
-    if not isinstance(value, str) or not UTC_TIMESTAMP.fullmatch(value):
+    if (
+        not isinstance(value, str)
+        or len(value) > MAX_TIMESTAMP_LENGTH
+        or not UTC_TIMESTAMP.fullmatch(value)
+    ):
         raise FeedbackError(f"{label} must be an RFC 3339 UTC timestamp ending in Z")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
@@ -193,12 +215,14 @@ def _safe_text(value: Any, label: str) -> str:
         "host-specific Windows path": WINDOWS_ABSOLUTE,
         "host-specific POSIX path": POSIX_ABSOLUTE,
         "URL": URL,
-        "secret or credential marker": SECRET_MARKER,
         "raw chat or Hook payload marker": RAW_PAYLOAD,
+        "credential field": CREDENTIAL_FIELD,
     }
     for reason, pattern in checks.items():
         if pattern.search(value):
             raise FeedbackError(f"{label} contains forbidden {reason}")
+    if sensitive_text_label(value) is not None:
+        raise FeedbackError(f"{label} contains forbidden credential material")
     return value
 
 
@@ -373,85 +397,350 @@ def _context(project_root: Path, run_id: str | None = None) -> tuple[Path, str, 
     return project, project_id, selected_run_id, path
 
 
-def _directory_token(path: Path) -> tuple[int, int, int, int]:
-    metadata = path.lstat()
-    if path.is_symlink() or _is_reparse(path) or not stat.S_ISDIR(metadata.st_mode):
-        raise FeedbackError("feedback parent is not a stable private directory")
+def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
     return (
-        int(metadata.st_dev),
-        int(metadata.st_ino),
-        int(metadata.st_mode),
-        int(getattr(metadata, "st_file_attributes", 0)),
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(value.st_size),
+        int(value.st_mtime_ns),
     )
 
 
-def _require_directory_token(path: Path, expected: tuple[int, int, int, int]) -> None:
-    if _directory_token(path) != expected:
-        raise FeedbackError("feedback parent changed during the update; refusing TOCTOU write")
+def _directory_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(getattr(value, "st_file_attributes", 0)),
+    )
+
+
+class _BoundDirectory:
+    """Hold one directory object for every child operation in a transaction."""
+
+    def __init__(self, path: Path, project_root: Path):
+        self.path = path
+        self.project_root = project_root
+        self.fd: int | None = None
+        self.windows_handle: int | None = None
+        self.token: tuple[int, int, int, int] | None = None
+
+    def __enter__(self) -> "_BoundDirectory":
+        self.path.mkdir(parents=True, exist_ok=True)
+        _assert_private_containment(self.project_root, self.path / "placeholder")
+        if os.name == "nt":
+            self._open_windows_directory()
+            metadata = self.path.lstat()
+        else:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            self.fd = os.open(self.path, flags)
+            metadata = os.fstat(self.fd)
+        if not stat.S_ISDIR(metadata.st_mode) or self.path.is_symlink() or _is_reparse(self.path):
+            self.close()
+            raise FeedbackError("feedback parent is not a stable private directory")
+        self.token = _directory_identity(metadata)
+        self.verify_current()
+        return self
+
+    def _open_windows_directory(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        create_file = ctypes.windll.kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(
+            str(self.path),
+            0x1 | 0x80,
+            0x1 | 0x2,
+            None,
+            3,
+            0x02000000 | 0x00200000,
+            None,
+        )
+        invalid = ctypes.c_void_p(-1).value
+        if handle == invalid:
+            raise FeedbackError("feedback parent could not be bound safely")
+        self.windows_handle = int(handle)
+
+    def _windows_bound_path(self) -> Path:
+        """Resolve the directory object's current name, not the original path."""
+        if self.windows_handle is None:
+            raise FeedbackError("feedback parent Windows handle is unavailable")
+        import ctypes
+        from ctypes import wintypes
+
+        get_name = ctypes.windll.kernel32.GetFinalPathNameByHandleW
+        get_name.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+        get_name.restype = wintypes.DWORD
+        size = get_name(self.windows_handle, None, 0, 0)
+        if size == 0:
+            raise FeedbackError("feedback parent object name is unavailable")
+        buffer = ctypes.create_unicode_buffer(size + 1)
+        written = get_name(self.windows_handle, buffer, len(buffer), 0)
+        if written == 0 or written >= len(buffer):
+            raise FeedbackError("feedback parent object name is unavailable")
+        value = buffer.value
+        if value.startswith("\\\\?\\UNC\\"):
+            value = "\\\\" + value[8:]
+        elif value.startswith("\\\\?\\"):
+            value = value[4:]
+        return Path(value)
+
+    def _operation_path(self, name: str) -> Path:
+        parent = self._windows_bound_path() if self.windows_handle is not None else self.path
+        return parent / name
+
+    def verify_current(self) -> None:
+        if self.token is None:
+            raise FeedbackError("feedback parent is not bound")
+        _assert_private_containment(self.project_root, self.path / "placeholder")
+        try:
+            current = self.path.lstat()
+        except OSError as exc:
+            raise FeedbackError("feedback parent changed during the update") from exc
+        if self.path.is_symlink() or _is_reparse(self.path) or _directory_identity(current) != self.token:
+            raise FeedbackError("feedback parent changed during the update; refusing TOCTOU write")
+
+    def _child_stat(self, name: str) -> os.stat_result:
+        if self.fd is not None:
+            return os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        return self._operation_path(name).lstat()
+
+    def child_identity(self, name: str) -> tuple[int, int, int, int, int] | None:
+        try:
+            metadata = self._child_stat(name)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            raise FeedbackError("feedback child is a symlink or reparse point")
+        return _file_identity(metadata)
+
+    def open_exclusive(self, name: str) -> int:
+        self.verify_current()
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        if self.fd is not None:
+            descriptor = os.open(name, flags, 0o600, dir_fd=self.fd)
+        else:
+            descriptor = os.open(self._operation_path(name), flags, 0o600)
+        identity = _file_identity(os.fstat(descriptor))
+        try:
+            self.verify_current()
+        except Exception:
+            os.close(descriptor)
+            self.unlink_owned(name, identity)
+            raise
+        return descriptor
+
+    def read_bytes(self, name: str, *, max_bytes: int) -> bytes:
+        self.verify_current()
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = (
+            os.open(name, flags, dir_fd=self.fd)
+            if self.fd is not None
+            else os.open(self._operation_path(name), flags)
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            if metadata.st_size > max_bytes or not stat.S_ISREG(metadata.st_mode):
+                raise FeedbackError("feedback sidecar exceeds the configured size limit")
+            raw = os.read(descriptor, max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise FeedbackError("feedback sidecar exceeds the configured size limit")
+            self.verify_current()
+            return raw
+        finally:
+            os.close(descriptor)
+
+    def link(self, source: str, destination: str) -> tuple[int, int, int, int, int]:
+        self.verify_current()
+        if self.fd is not None:
+            os.link(
+                source,
+                destination,
+                src_dir_fd=self.fd,
+                dst_dir_fd=self.fd,
+                follow_symlinks=False,
+            )
+        else:
+            os.link(
+                self._operation_path(source),
+                self._operation_path(destination),
+                follow_symlinks=False,
+            )
+        identity = self.child_identity(destination)
+        if identity is None:
+            raise FeedbackError("feedback backup disappeared")
+        try:
+            self.verify_current()
+        except Exception:
+            self.unlink_owned(destination, identity)
+            raise
+        return identity
+
+    def replace(
+        self,
+        source: str,
+        destination: str,
+        *,
+        expected_source: tuple[int, int, int, int, int],
+        require_current: bool = True,
+    ) -> None:
+        if require_current:
+            self.verify_current()
+        if self.child_identity(source) != expected_source:
+            raise FeedbackError("feedback temporary file identity changed")
+        if self.fd is not None:
+            os.replace(source, destination, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        else:
+            os.replace(self._operation_path(source), self._operation_path(destination))
+
+    def unlink_owned(
+        self, name: str, expected: tuple[int, int, int, int, int] | None
+    ) -> bool:
+        if expected is None or self.child_identity(name) != expected:
+            return False
+        if self.fd is not None:
+            os.unlink(name, dir_fd=self.fd)
+        else:
+            os.unlink(self._operation_path(name))
+        return True
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        if self.windows_handle is not None:
+            import ctypes
+            from ctypes import wintypes
+
+            close_handle = ctypes.windll.kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+            close_handle(self.windows_handle)
+            self.windows_handle = None
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
+def _verify_checkpoint(bound: _BoundDirectory, label: str) -> None:
+    """Name security-relevant identity checks so every write phase is testable."""
+    del label
+    bound.verify_current()
+
+
+def _decode_json(raw: bytes, *, label: str) -> dict[str, Any]:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON number is forbidden: {value}")
+
+    try:
+        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise FeedbackError(f"Invalid strict JSON in {label}") from exc
+    if not isinstance(value, dict):
+        raise FeedbackError(f"Expected a JSON object in {label}")
+    _reject_non_finite(value)
+    return value
 
 
 @contextmanager
-def _exclusive_update_lock(path: Path) -> Iterator[tuple[int, int, int, int]]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _assert_private_containment(path.parents[2], path)
-    parent_token = _directory_token(path.parent)
-    lock = path.with_suffix(path.suffix + ".lock")
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+def _exclusive_update_lock(
+    bound: _BoundDirectory, target_name: str
+) -> Iterator[None]:
+    lock_name = target_name + ".lock"
+    nonce = secrets.token_hex(32)
     descriptor: int | None = None
-    created = False
+    identity: tuple[int, int, int, int, int] | None = None
     try:
-        descriptor = os.open(lock, flags, 0o600)
-        created = True
-        os.write(descriptor, b"opc-structured-feedback-v1\n")
+        descriptor = bound.open_exclusive(lock_name)
+        os.write(descriptor, nonce.encode("ascii"))
+        os.fsync(descriptor)
+        identity = _file_identity(os.fstat(descriptor))
         os.close(descriptor)
         descriptor = None
-        _assert_private_containment(path.parents[2], path)
-        _require_directory_token(path.parent, parent_token)
-        yield parent_token
+        bound.verify_current()
+        yield
     except FileExistsError as exc:
         raise FeedbackError("feedback update is already locked; refusing concurrent overwrite") from exc
     finally:
         if descriptor is not None:
             os.close(descriptor)
-        if created and lock.exists() and not lock.is_symlink():
-            lock.unlink()
+        bound.unlink_owned(lock_name, identity)
 
 
 def _atomic_write_feedback(
-    path: Path,
+    bound: _BoundDirectory,
+    target_name: str,
     value: Mapping[str, Any],
-    parent_token: tuple[int, int, int, int],
 ) -> None:
-    _require_directory_token(path.parent, parent_token)
-    pending = path.with_suffix(path.suffix + ".pending")
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    operation = secrets.token_hex(24)
+    pending_name = f"{target_name}.pending-{operation}"
+    backup_name = f"{target_name}.backup-{operation}"
+    pending_identity: tuple[int, int, int, int, int] | None = None
+    backup_identity: tuple[int, int, int, int, int] | None = None
+    published = False
+    had_original = bound.child_identity(target_name) is not None
     descriptor: int | None = None
-    created = False
     try:
-        descriptor = os.open(pending, flags, 0o600)
-        created = True
-        _require_directory_token(path.parent, parent_token)
+        if had_original:
+            backup_identity = bound.link(target_name, backup_name)
+        _verify_checkpoint(bound, "before_pending_creation")
+        descriptor = bound.open_exclusive(pending_name)
+        pending_identity = _file_identity(os.fstat(descriptor))
+        _verify_checkpoint(bound, "after_pending_creation")
         payload = (json.dumps(dict(value), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        if len(payload) > MAX_SIDECAR_BYTES:
+            raise FeedbackError("feedback sidecar exceeds the configured size limit")
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = None
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        _require_directory_token(path.parent, parent_token)
-        os.replace(pending, path)
-        created = False
-        _require_directory_token(path.parent, parent_token)
-    except FileExistsError as exc:
-        raise FeedbackError("feedback pending file already exists; refusing ambiguous write") from exc
+            pending_identity = _file_identity(os.fstat(handle.fileno()))
+        _verify_checkpoint(bound, "before_replace")
+        bound.replace(
+            pending_name,
+            target_name,
+            expected_source=pending_identity,
+        )
+        published = True
+        _verify_checkpoint(bound, "after_replace")
+        _verify_checkpoint(bound, "before_final_cleanup")
+        if backup_identity is not None and not bound.unlink_owned(backup_name, backup_identity):
+            raise FeedbackError("feedback backup identity changed during cleanup")
+        backup_identity = None
+    except Exception:
+        if published:
+            if had_original and backup_identity is not None:
+                bound.replace(
+                    backup_name,
+                    target_name,
+                    expected_source=backup_identity,
+                    require_current=False,
+                )
+                backup_identity = None
+            else:
+                bound.unlink_owned(target_name, pending_identity)
+        raise
     finally:
         if descriptor is not None:
             os.close(descriptor)
-        if created and pending.exists() and not pending.is_symlink():
-            pending.unlink()
+        bound.unlink_owned(pending_name, pending_identity)
+        bound.unlink_owned(backup_name, backup_identity)
 
 
 def read_feedback(project_root: Path, run_id: str | None = None) -> dict[str, Any]:
@@ -463,7 +752,7 @@ def read_feedback(project_root: Path, run_id: str | None = None) -> dict[str, An
             "run_ref": selected_run_id,
             "structured_feedback": None,
         }
-    record = _strict_json(path)
+    record = _strict_json(path, max_bytes=MAX_SIDECAR_BYTES)
     validate_record(record)
     if record["project_ref"] != project_id or record["run_ref"] != selected_run_id:
         raise FeedbackError("stored feedback does not match the project run")
@@ -487,9 +776,14 @@ def record_feedback(
         raise FeedbackError("expected_revision must be a non-negative integer")
     project, project_id, selected_run_id, path = _context(project_root, run_id)
     validate_event(event, project_id=project_id, run_id=selected_run_id)
-    with _exclusive_update_lock(path) as parent_token:
-        if path.exists():
-            record = _strict_json(path)
+    with _BoundDirectory(path.parent, project) as bound, _exclusive_update_lock(
+        bound, path.name
+    ):
+        if bound.child_identity(path.name) is not None:
+            record = _decode_json(
+                bound.read_bytes(path.name, max_bytes=MAX_SIDECAR_BYTES),
+                label="feedback sidecar",
+            )
             validate_record(record)
             if record["project_ref"] != project_id or record["run_ref"] != selected_run_id:
                 raise FeedbackError("stored feedback does not match the project run")
@@ -531,9 +825,9 @@ def record_feedback(
         updated["revision"] = record["revision"] + 1
         updated["updated_at"] = timestamp
         validate_record(updated)
-        _assert_private_containment(project, path)
-        _atomic_write_feedback(path, updated, parent_token)
-        _assert_private_containment(project, path)
+        bound.verify_current()
+        _atomic_write_feedback(bound, path.name, updated)
+        bound.verify_current()
         return {"idempotent": False, "record": updated}
 
 
@@ -595,7 +889,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "record":
             result: Any = record_feedback(
                 project_root,
-                _strict_json(Path(args.event_file)),
+                _strict_json(Path(args.event_file), max_bytes=MAX_EVENT_FILE_BYTES),
                 expected_revision=args.expected_revision,
                 run_id=args.run_id,
             )

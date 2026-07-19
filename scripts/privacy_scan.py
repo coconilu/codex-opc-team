@@ -12,6 +12,12 @@ import sys
 from pathlib import Path
 
 
+PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "codex-opc-team" / "scripts"
+if str(PLUGIN_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_SCRIPTS))
+from opc_sensitive import SENSITIVE_PATTERNS
+
+
 TEXT_SUFFIXES = {
     "",
     ".cfg",
@@ -36,16 +42,7 @@ PATTERNS = {
     "Windows user home": re.compile(r"(?i)[a-z]:\\Users\\[^\\\s\"'`]+"),
     "macOS user home": re.compile(r"/" r"Users/[^/\s\"'`]+"),
     "Linux user home": re.compile(r"/" r"home/[^/\s\"'`]+"),
-    "OpenAI-style secret": re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
-    "GitHub token": re.compile(r"\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b"),
-    "AWS access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    "Slack token": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
-    "private key material": re.compile(
-        r"-----BEGIN (?:[A-Z0-9]+(?: [A-Z0-9]+)* )?PRIVATE KEY-----"
-    ),
-    "credential assignment": re.compile(
-        r"(?i)(?:api[_-]?key|token|secret|password)\s*[:=]\s*[\"']?[A-Za-z0-9+/=_-]{24,}"
-    ),
+    **dict(SENSITIVE_PATTERNS),
     "captured session id": re.compile(
         r"[\"'](?:session_id|turn_id)[\"']\s*:\s*[\"'][0-9a-f]{8}-[0-9a-f-]{27,}[\"']",
         re.IGNORECASE,

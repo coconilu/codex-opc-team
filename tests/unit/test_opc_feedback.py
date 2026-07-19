@@ -8,7 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -313,6 +313,68 @@ class StructuredFeedbackTests(unittest.TestCase):
         self.assertIn("mixed", schema["$defs"]["managerAcceptance"]["enum"])
         self.assertIn("neutral", schema["$defs"]["managerAcceptance"]["enum"])
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("jsonschema") is not None,
+        "jsonschema is optional in the dependency-free core job",
+    )
+    def test_draft_2020_schema_and_runtime_reject_the_same_nonportable_values(self):
+        from jsonschema import Draft202012Validator
+
+        schema_path = (
+            ROOT
+            / "plugins"
+            / "codex-opc-team"
+            / "assets"
+            / "feedback"
+            / "structured-feedback.v1.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(schema)
+        uuid = "12345678" + "-1234-4123-8123-123456789abc"
+        cases = {
+            "portableRef": (
+                opc_feedback.PORTABLE_REF,
+                [
+                    "session_id/value",
+                    "evidence/mysession_identity.json",
+                    "thread-id/value",
+                    f"evidence/{uuid}.json",
+                    "evidence//report.json",
+                    "evidence/./report.json",
+                    "evidence/../report.json",
+                    "/evidence/report.json",
+                    "C:/evidence/report.json",
+                    "x" * (opc_feedback.MAX_REF_LENGTH + 1),
+                ],
+            ),
+            "portableProjectId": (
+                opc_feedback.PORTABLE_PROJECT,
+                [
+                    "session_id",
+                    "mysession.identity",
+                    uuid,
+                    "x" * (opc_feedback.MAX_ID_LENGTH + 1),
+                ],
+            ),
+            "portableRunId": (
+                opc_feedback.PORTABLE_RUN,
+                ["opc-thread-id", "opc-" + uuid, "opc-" + ("x" * 125)],
+            ),
+        }
+        for definition, (pattern, illegal_values) in cases.items():
+            validator = Draft202012Validator(
+                {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "$ref": f"#/$defs/{definition}",
+                    "$defs": schema["$defs"],
+                }
+            )
+            for value in illegal_values:
+                with self.subTest(definition=definition, value=value[:40]):
+                    self.assertFalse(validator.is_valid(value))
+                    with self.assertRaises(opc_feedback.FeedbackError):
+                        opc_feedback._portable(value, pattern, definition)
+
     def test_portable_reference_consistency_rejects_paths_urls_runtime_ids_and_uuid(self):
         temporary, fixture = self.make_fixture()
         self.addCleanup(temporary.cleanup)
@@ -372,6 +434,56 @@ class StructuredFeedbackTests(unittest.TestCase):
                         run_id=fixture.run["run_id"],
                     )
 
+    def test_common_credentials_are_rejected_without_echo_in_function_or_cli(self):
+        temporary, fixture = self.make_fixture()
+        self.addCleanup(temporary.cleanup)
+        secrets = [
+            "sk" + "-" + ("a" * 24),
+            "ghp" + "_" + ("b" * 36),
+            "AKIA" + ("C" * 16),
+            "xoxb" + "-" + ("d" * 20),
+            "Authorization: Bearer " + ("e" * 24),
+            "-----BEGIN " + "PRIVATE KEY-----",
+        ]
+        for index, secret in enumerate(secrets):
+            with self.subTest(index=index):
+                event = fixture.event(
+                    f"feedback-secret-{index}", "hypothesis", summary=secret
+                )
+                with self.assertRaises(opc_feedback.FeedbackError) as raised:
+                    opc_feedback.validate_event(
+                        event,
+                        project_id=fixture.project["project_id"],
+                        run_id=fixture.run["run_id"],
+                    )
+                self.assertNotIn(secret, str(raised.exception))
+
+        secret = secrets[0]
+        event_path = Path(temporary.name) / "event.json"
+        event_path.write_text(
+            json.dumps(
+                fixture.event("feedback-cli-secret", "hypothesis", summary=secret)
+            ),
+            encoding="utf-8",
+        )
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = opc_feedback.main(
+                [
+                    "record",
+                    "--project-root",
+                    str(fixture.root),
+                    "--event-file",
+                    str(event_path),
+                    "--expected-revision",
+                    "0",
+                ]
+            )
+        self.assertEqual(2, exit_code)
+        self.assertNotIn(secret, stdout.getvalue() + stderr.getvalue())
+        report = opc_feedback.render_report(opc_feedback.read_feedback(fixture.root))
+        self.assertNotIn(secret, report)
+
     def test_idempotency_stale_revision_and_event_collision_fail_closed(self):
         temporary, fixture = self.make_fixture()
         self.addCleanup(temporary.cleanup)
@@ -403,19 +515,92 @@ class StructuredFeedbackTests(unittest.TestCase):
             opc_feedback.record_feedback(fixture.root, event, expected_revision=0, now=STAMP)
         self.assertEqual("other-writer", lock.read_text(encoding="utf-8"))
 
-    def test_parent_identity_change_fails_before_feedback_write(self):
+    def test_parent_change_at_each_write_checkpoint_rolls_back_without_touching_competitors(self):
+        checkpoints = (
+            "before_pending_creation",
+            "after_pending_creation",
+            "before_replace",
+            "before_final_cleanup",
+        )
+        for checkpoint in checkpoints:
+            with self.subTest(checkpoint=checkpoint):
+                temporary, fixture = self.make_fixture()
+                try:
+                    first = fixture.event("feedback-first", "hypothesis")
+                    opc_feedback.record_feedback(
+                        fixture.root, first, expected_revision=0, now=STAMP
+                    )
+                    feedback = fixture.root / ".opc" / "feedback"
+                    target = feedback / "opc-run-synthetic.json"
+                    before = target.read_bytes()
+                    competitor = feedback / "opc-run-synthetic.json.pending-competitor"
+                    competitor.write_text("other-operation", encoding="utf-8")
+                    moved = Path(temporary.name) / f"bound-{checkpoint}"
+                    original_checkpoint = opc_feedback._verify_checkpoint
+
+                    def change_parent(bound, label):
+                        if label == checkpoint:
+                            if os.name == "nt":
+                                with self.assertRaises(OSError):
+                                    os.replace(feedback, moved)
+                                raise opc_feedback.FeedbackError(
+                                    "synthetic parent identity change"
+                                )
+                            os.replace(feedback, moved)
+                            feedback.mkdir()
+                            (feedback / competitor.name).write_text(
+                                "replacement-parent-competitor", encoding="utf-8"
+                            )
+                        return original_checkpoint(bound, label)
+
+                    second = fixture.event(
+                        "feedback-second", "hypothesis", recorded_at=LATER
+                    )
+                    with mock.patch.object(
+                        opc_feedback, "_verify_checkpoint", side_effect=change_parent
+                    ):
+                        with self.assertRaises(opc_feedback.FeedbackError):
+                            opc_feedback.record_feedback(
+                                fixture.root,
+                                second,
+                                expected_revision=1,
+                                now=LATER,
+                            )
+
+                    stable_parent = feedback if os.name == "nt" else moved
+                    self.assertEqual(before, (stable_parent / target.name).read_bytes())
+                    self.assertEqual(
+                        "other-operation",
+                        (stable_parent / competitor.name).read_text(encoding="utf-8"),
+                    )
+                    self.assertEqual([], list(stable_parent.glob("*.backup-*")))
+                    self.assertEqual([], [p for p in stable_parent.glob("*.pending-*") if p != stable_parent / competitor.name])
+                    self.assertFalse((stable_parent / (target.name + ".lock")).exists())
+                    if os.name != "nt":
+                        self.assertEqual(
+                            "replacement-parent-competitor",
+                            (feedback / competitor.name).read_text(encoding="utf-8"),
+                        )
+                        self.assertEqual([competitor.name], [p.name for p in feedback.iterdir()])
+                    else:
+                        self.assertFalse(moved.exists())
+                finally:
+                    temporary.cleanup()
+
+    def test_owned_lock_cleanup_preserves_replacement_competitor_identity(self):
         temporary, fixture = self.make_fixture()
         self.addCleanup(temporary.cleanup)
         feedback = fixture.root / ".opc" / "feedback"
-        feedback.mkdir()
-        token = opc_feedback._directory_token(feedback)
-        changed = (token[0], token[1] + 1, token[2], token[3])
-        event = fixture.event("feedback-hypothesis", "hypothesis")
-        with mock.patch.object(opc_feedback, "_directory_token", side_effect=[token, changed]):
-            with self.assertRaisesRegex(opc_feedback.FeedbackError, "TOCTOU"):
-                opc_feedback.record_feedback(fixture.root, event, expected_revision=0, now=STAMP)
-        self.assertFalse((feedback / "opc-run-synthetic.json").exists())
-        self.assertFalse((feedback / "opc-run-synthetic.json.lock").exists())
+        with opc_feedback._BoundDirectory(feedback, fixture.root) as bound:
+            lock = feedback / "record.json.lock"
+            displaced = feedback / "displaced-owned-lock"
+            with self.assertRaisesRegex(RuntimeError, "abort"):
+                with opc_feedback._exclusive_update_lock(bound, "record.json"):
+                    os.replace(lock, displaced)
+                    lock.write_text("competitor-lock", encoding="utf-8")
+                    raise RuntimeError("abort")
+            self.assertEqual("competitor-lock", lock.read_text(encoding="utf-8"))
+            self.assertTrue(displaced.exists())
 
     def test_atomic_write_failure_leaves_no_partial_record_and_releases_owned_lock(self):
         temporary, fixture = self.make_fixture()
@@ -428,16 +613,15 @@ class StructuredFeedbackTests(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertFalse(target.with_suffix(".json.lock").exists())
 
-    def test_preexisting_pending_file_is_preserved_and_write_fails_closed(self):
+    def test_preexisting_pending_like_file_is_preserved_and_does_not_collide(self):
         temporary, fixture = self.make_fixture()
         self.addCleanup(temporary.cleanup)
         feedback = fixture.root / ".opc" / "feedback"
         feedback.mkdir()
-        pending = feedback / "opc-run-synthetic.json.pending"
+        pending = feedback / "opc-run-synthetic.json.pending-competitor"
         pending.write_text("other-operation", encoding="utf-8")
         event = fixture.event("feedback-hypothesis", "hypothesis")
-        with self.assertRaisesRegex(opc_feedback.FeedbackError, "pending"):
-            opc_feedback.record_feedback(fixture.root, event, expected_revision=0, now=STAMP)
+        opc_feedback.record_feedback(fixture.root, event, expected_revision=0, now=STAMP)
         self.assertEqual("other-operation", pending.read_text(encoding="utf-8"))
 
     def test_replace_failure_preserves_previous_revision_and_cleans_pending(self):
@@ -454,7 +638,8 @@ class StructuredFeedbackTests(unittest.TestCase):
                     fixture.root, second, expected_revision=1, now=LATER
                 )
         self.assertEqual(before, target.read_bytes())
-        self.assertFalse(target.with_suffix(".json.pending").exists())
+        self.assertEqual([], list(target.parent.glob(target.name + ".pending-*")))
+        self.assertEqual([], list(target.parent.glob(target.name + ".backup-*")))
 
     def test_two_concurrent_writers_cannot_lose_an_update(self):
         temporary, fixture = self.make_fixture()
@@ -532,7 +717,36 @@ class StructuredFeedbackTests(unittest.TestCase):
         path = Path(temporary.name) / "event.json"
         path.write_text('{"value": NaN}', encoding="utf-8")
         with self.assertRaisesRegex(opc_feedback.FeedbackError, "non-finite"):
-            opc_feedback._strict_json(path)
+            opc_feedback._strict_json(path, max_bytes=opc_feedback.MAX_EVENT_FILE_BYTES)
+
+    def test_event_and_sidecar_reads_are_bounded(self):
+        temporary, fixture = self.make_fixture()
+        self.addCleanup(temporary.cleanup)
+        oversized_event = Path(temporary.name) / "oversized-event.json"
+        oversized_event.write_bytes(b"{" + b" " * opc_feedback.MAX_EVENT_FILE_BYTES)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+            exit_code = opc_feedback.main(
+                [
+                    "record",
+                    "--project-root",
+                    str(fixture.root),
+                    "--event-file",
+                    str(oversized_event),
+                    "--expected-revision",
+                    "0",
+                ]
+            )
+        self.assertEqual(2, exit_code)
+        self.assertIn("size limit", stderr.getvalue())
+
+        feedback = fixture.root / ".opc" / "feedback"
+        feedback.mkdir()
+        (feedback / "opc-run-synthetic.json").write_bytes(
+            b"{" + b" " * opc_feedback.MAX_SIDECAR_BYTES
+        )
+        with self.assertRaisesRegex(opc_feedback.FeedbackError, "size limit"):
+            opc_feedback.read_feedback(fixture.root)
 
     def test_timestamp_shape_and_update_time_cannot_move_backward(self):
         temporary, fixture = self.make_fixture()
