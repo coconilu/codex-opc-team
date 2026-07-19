@@ -15,6 +15,7 @@
     "remote_telemetry": false
   },
   "event_types": ["knowledge", "provider", "association"],
+  "evidence_association_only": true,
   "knowledge_states": ["recalled", "injected", "adopted", "ignored", "overridden", "contradicted", "omitted"],
   "provider_states": ["available", "missing", "disabled", "failed", "stale", "no_memory"],
   "evidence_kinds": ["qa", "feedback", "outcome", "shadow", "evaluation"],

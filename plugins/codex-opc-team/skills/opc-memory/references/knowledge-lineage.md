@@ -4,8 +4,8 @@ Lineage is separate from canonical File/Git, hierarchical derived indexes, and M
 
 | Operation | Rule |
 |---|---|
-| Preview event | Zero write; validate event, exact RecallResult, current canonical revision, and evidence refs |
-| Record event | Exact preview token + revision CAS; atomic private sidecar only |
+| Preview event | Zero write; validate event, exact full-citation RecallResult, current canonical revision, association-only evidence refs, and base sidecar identity |
+| Record event | Exact preview token + base-record/revision CAS; atomic private sidecar only; Git/ignore uncertainty fails closed |
 | Show/report | Revalidate current HEAD/governance and evidence hashes before marking usable |
 | Provider degraded/no-memory | Record explicit provider event; continue File/Git |
 | Redact/expire | Delete the private derived sidecar under project policy; do not alter canonical knowledge |

@@ -83,8 +83,8 @@
         "previous_event_id": {"oneOf": [{"$ref": "#/$defs/eventId"}, {"type": "null"}]}
       },
       "allOf": [
-        {"if": {"properties": {"event_type": {"const": "knowledge"}}}, "then": {"properties": {"knowledge_ref": {"$ref": "#/$defs/knowledgeRef"}, "knowledge_state": {"enum": ["recalled", "injected", "adopted", "ignored", "overridden", "contradicted", "omitted"]}, "provider": {"type": "null"}}}},
-        {"if": {"properties": {"event_type": {"const": "provider"}}}, "then": {"properties": {"knowledge_ref": {"type": "null"}, "knowledge_state": {"type": "null"}, "provider": {"$ref": "#/$defs/provider"}, "previous_event_id": {"type": "null"}}}},
+        {"if": {"properties": {"event_type": {"const": "knowledge"}}}, "then": {"properties": {"knowledge_ref": {"$ref": "#/$defs/knowledgeRef"}, "knowledge_state": {"enum": ["recalled", "injected", "adopted", "ignored", "overridden", "contradicted", "omitted"]}, "provider": {"type": "null"}, "evidence_refs": {"maxItems": 0}}}},
+        {"if": {"properties": {"event_type": {"const": "provider"}}}, "then": {"properties": {"knowledge_ref": {"type": "null"}, "knowledge_state": {"type": "null"}, "provider": {"$ref": "#/$defs/provider"}, "previous_event_id": {"type": "null"}, "evidence_refs": {"maxItems": 0}}}},
         {"if": {"properties": {"event_type": {"const": "association"}}}, "then": {"properties": {"knowledge_state": {"type": "null"}, "provider": {"type": "null"}, "previous_event_id": {"type": "null"}, "evidence_refs": {"minItems": 1}}}},
         {"if": {"properties": {"knowledge_state": {"enum": ["recalled", "injected", "adopted", "ignored", "overridden", "contradicted"]}}}, "then": {"properties": {"context_packet": {"$ref": "#/$defs/contextPacket"}}}}
       ],

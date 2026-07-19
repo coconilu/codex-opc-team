@@ -29,7 +29,7 @@ stateDiagram-v2
     adopted --> contradicted
 ```
 
-`recalled`、`injected` 和 `adopted` 是三个事实，不互相推断。`provider` 和 `association` 是不同事件类型，不参与知识状态机。
+`recalled`、`injected` 和 `adopted` 是三个事实，不互相推断。Lineage v1 的 `recalled` 也必须精确匹配 ContextPacket citation 的 path/commit/content Hash/治理字段；ID-only RecallTrace 的 `canonical_reads` 或 discard 不能证明某个 revision。`provider` 和 `association` 是不同事件类型，不参与知识状态机。Evidence ref 只允许出现在 `association` 事件；knowledge/provider 事件必须使用空数组。
 
 ## 2. Preview 与写入
 
@@ -47,7 +47,7 @@ python <plugin-root>/scripts/opc_lineage.py record \
   --expected-revision 0 --plan-token <exact-preview-token>
 ```
 
-Preview 零写入。Record 只写 ignored `.opc/lineage/<run_id>.json`，使用 revision CAS、独占 lock、BoundDirectory、单链接检查、随机 pending/backup、`fsync` 和 atomic replace。相同 event ID 与相同内容重试为幂等；不同内容或 stale revision 拒绝。不要把 event/recall 临时文件放进公开仓库、canonical knowledge 或项目源码。
+Preview 零写入，并把 base sidecar 的存在性与原始文件字节 SHA-256 纳入 exact plan token。Record 只写 ignored `.opc/lineage/<run_id>.json`，使用 base-record CAS + revision CAS、独占 lock、BoundDirectory、单链接检查、随机 pending/backup、`fsync` 和 atomic replace；锁内 base 缺失、出现或同 revision 内容变化都拒绝覆盖。Git worktree/ignore 探测不可用、超时或异常结果一律 fail closed，只有明确的 non-Git 结果可使用项目私有边界。相同 event ID 与相同内容重试为幂等；不同内容或 stale revision 拒绝。不要把 event/recall 临时文件放进公开仓库、canonical knowledge 或项目源码。
 
 ## 3. Provider 降级与 no-memory
 

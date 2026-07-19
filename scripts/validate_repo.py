@@ -781,6 +781,7 @@ def validate_knowledge_lineage_contract() -> None:
         and contract.get("schema_version") == "opc-knowledge-lineage-v1"
         and contract.get("authority") == "file-git-only"
         and contract.get("causal_claim_allowed") is False
+        and contract.get("evidence_association_only") is True
         and contract.get("report_claim") == "association/evidence only",
         "knowledge-lineage authority or claim boundary drifted",
     )
@@ -865,11 +866,26 @@ def validate_knowledge_lineage_contract() -> None:
             schema.get("$defs", {}).get(name, {}).get("additionalProperties") is False,
             f"knowledge-lineage schema {name} must reject extra fields",
         )
+    event_rules = schema.get("$defs", {}).get("event", {}).get("allOf", [])
+    evidence_rules = {
+        rule.get("if", {}).get("properties", {}).get("event_type", {}).get("const"):
+        rule.get("then", {}).get("properties", {}).get("evidence_refs", {})
+        for rule in event_rules
+    }
+    require(
+        evidence_rules.get("knowledge", {}).get("maxItems") == 0
+        and evidence_rules.get("provider", {}).get("maxItems") == 0
+        and evidence_rules.get("association", {}).get("minItems") == 1,
+        "knowledge-lineage evidence refs must be association-only in schema",
+    )
     guide = guide_path.read_text(encoding="utf-8")
     require(
         "association/evidence only" in guide
         and "lineage unavailable" in guide
         and "30 天" in guide
+        and "base-record CAS" in guide
+        and "ID-only RecallTrace" in guide
+        and "Evidence ref 只允许" in guide
         and "opc_lineage.py" in guide,
         "knowledge-lineage guide omits claim, compatibility, retention, or CLI",
     )

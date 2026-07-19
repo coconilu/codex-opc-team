@@ -267,6 +267,7 @@ def _load_contract() -> tuple[dict[str, Any], str]:
         or contract.get("recall_trace_version") != TRACE_VERSION
         or contract.get("authority") != "file-git-only"
         or contract.get("causal_claim_allowed") is not False
+        or contract.get("evidence_association_only") is not True
         or contract.get("report_claim") != "association/evidence only"
         or set(contract.get("event_types", [])) != EVENT_TYPES
         or set(contract.get("knowledge_states", [])) != KNOWLEDGE_STATES
@@ -407,7 +408,12 @@ def validate_event(event: Mapping[str, Any], *, project_id: str, run_id: str) ->
         _portable(event["previous_event_id"], PORTABLE_EVENT, "previous_event_id")
 
     if event["event_type"] == "knowledge":
-        if event["knowledge_ref"] is None or event["knowledge_state"] not in KNOWLEDGE_STATES or event["provider"] is not None:
+        if (
+            event["knowledge_ref"] is None
+            or event["knowledge_state"] not in KNOWLEDGE_STATES
+            or event["provider"] is not None
+            or refs
+        ):
             raise LineageError("knowledge event fields are contradictory")
         ref = event["knowledge_ref"]
         if event["knowledge_state"] != "omitted" and (
@@ -420,7 +426,13 @@ def validate_event(event: Mapping[str, Any], *, project_id: str, run_id: str) ->
         if event["knowledge_state"] == "omitted" and not reasons:
             raise LineageError("omitted knowledge requires an explicit reason")
     elif event["event_type"] == "provider":
-        if event["knowledge_ref"] is not None or event["knowledge_state"] is not None or event["provider"] is None or event["previous_event_id"] is not None:
+        if (
+            event["knowledge_ref"] is not None
+            or event["knowledge_state"] is not None
+            or event["provider"] is None
+            or event["previous_event_id"] is not None
+            or refs
+        ):
             raise LineageError("provider event fields are contradictory")
         degraded = event["provider"]["state"] != "available"
         if degraded != bool(reasons):
@@ -506,15 +518,49 @@ def _lineage_path(project: Path, run_id: str) -> Path:
 def _assert_private_or_ignored(project: Path, path: Path) -> None:
     """A Git worktree may store lineage only at an ignored .opc path."""
 
+    cursor = project.resolve(strict=True)
+    has_git_marker = False
+    while True:
+        try:
+            (cursor / ".git").lstat()
+            has_git_marker = True
+            break
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise LineageError("could not inspect the local Git boundary") from exc
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+
     try:
-        top = subprocess.run(
+        probe = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "--is-inside-work-tree"],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise LineageError("could not verify whether the project is a Git worktree") from exc
+    diagnostic = (probe.stderr or "").lower()
+    if probe.returncode != 0:
+        if (
+            probe.returncode == 128
+            and "not a git repository" in diagnostic
+            and not has_git_marker
+        ):
+            return
+        raise LineageError("Git worktree detection failed closed")
+    if probe.stdout.strip() != "true":
+        raise LineageError("Git worktree detection returned an invalid result")
+    try:
+        top_result = subprocess.run(
             ["git", "-C", str(project), "rev-parse", "--show-toplevel"],
-            check=True, capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return
-    if not top:
-        return
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise LineageError("could not resolve the Git worktree boundary") from exc
+    if top_result.returncode != 0 or not top_result.stdout.strip():
+        raise LineageError("Git worktree boundary resolution failed closed")
+    top = top_result.stdout.strip()
     root = Path(top).resolve()
     try:
         relative = path.resolve(strict=False).relative_to(root).as_posix()
@@ -525,22 +571,30 @@ def _assert_private_or_ignored(project: Path, path: Path) -> None:
             ["git", "-C", str(root), "check-ignore", "-q", "--", relative],
             check=False, capture_output=True, timeout=5,
         )
-    except subprocess.TimeoutExpired as exc:
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
         raise LineageError("could not verify the ignored .opc boundary") from exc
-    if ignored.returncode != 0:
+    if ignored.returncode == 1:
         raise LineageError("project-local lineage requires an ignored .opc path")
+    if ignored.returncode != 0:
+        raise LineageError("Git ignore verification failed closed")
 
 
-def _read_stored(path: Path, project: Path) -> dict[str, Any] | None:
+def _read_stored_snapshot(
+    path: Path, project: Path
+) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
-        return None
+        return None, None
     with _BoundDirectory(path.parent, project) as bound:
         raw = bound.read_bytes(
             path.name, max_bytes=MAX_LINEAGE_BYTES, require_single_link=True, binary=True
         )
     record = _strict_json_bytes(raw, label="lineage sidecar")
     validate_record(record)
-    return record
+    return record, _sha256(raw)
+
+
+def _read_stored(path: Path, project: Path) -> dict[str, Any] | None:
+    return _read_stored_snapshot(path, project)[0]
 
 
 def _packet_reference(result: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -573,19 +627,14 @@ def _validate_recall_membership(event: Mapping[str, Any], result: Mapping[str, A
     if reference is None:
         return
     packet = result["context_packet"]
-    trace = result["recall_trace"]
     citations = packet["citations"]
     state = event.get("knowledge_state")
-    if state in {"injected", "adopted", "ignored", "overridden", "contradicted"}:
+    if state in {
+        "recalled", "injected", "adopted", "ignored", "overridden",
+        "contradicted",
+    }:
         if not any(_citation_matches(reference, citation) for citation in citations):
             raise LineageError("knowledge revision is not present in the exact ContextPacket")
-    elif state == "recalled":
-        recalled_ids = set(trace["canonical_reads"])
-        recalled_ids.update(
-            item.get("record_id") for item in trace["discards"] if isinstance(item, Mapping)
-        )
-        if reference["record_id"] not in recalled_ids:
-            raise LineageError("knowledge revision is not present in the exact RecallTrace")
     elif state == "omitted":
         injected_ids = {item["record_id"] for item in citations}
         if reference["record_id"] in injected_ids:
@@ -727,7 +776,7 @@ def preview_event(
     project, project_id, run_id, project_instance, run_instance = _read_project_subject(project_root)
     path = _lineage_path(project, run_id)
     _assert_private_or_ignored(project, path)
-    existing = _read_stored(path, project)
+    existing, existing_sha256 = _read_stored_snapshot(path, project)
     _, contract_hash = _load_contract()
     # The two-phase CLI runs preview and record as separate processes.  Bind
     # the default update time to the immutable event time so an unchanged plan
@@ -752,6 +801,10 @@ def preview_event(
         record = existing
         if record["project_ref"] != project_id or record["run_ref"] != run_id:
             raise LineageError("stored lineage belongs to another project or run")
+    base_record = {
+        "exists": existing is not None,
+        "sha256": existing_sha256,
+    }
 
     packet_ref = _packet_reference(recall_result)
     event = _build_event(
@@ -787,6 +840,7 @@ def preview_event(
                 "run_ref": run_id,
                 "expected_revision": expected_revision,
                 "current_revision": record["revision"],
+                "base_record": base_record,
                 "idempotent": True,
                 "event": prior,
             }
@@ -819,6 +873,7 @@ def preview_event(
         "run_ref": run_id,
         "expected_revision": expected_revision,
         "current_revision": record["revision"],
+        "base_record": base_record,
         "idempotent": False,
         "event": event,
         "record_sha256": _sha256(_canonical_bytes(updated)),
@@ -891,26 +946,37 @@ def record_event(
     )
     if preview["plan_token"] != plan_token:
         raise LineageError("lineage plan token no longer matches the exact preview")
-    if preview["idempotent"]:
-        return {"idempotent": True, "record": preview["record"]}
     project, _, run_id, _, _ = _read_project_subject(project_root)
     path = _lineage_path(project, run_id)
     parent_existed = path.parent.exists()
     bound: _BoundDirectory | None = None
     try:
         with _BoundDirectory(path.parent, project) as bound, _exclusive_update_lock(bound, path.name):
+            _assert_private_or_ignored(project, path)
+            _verify_checkpoint(bound, "after_lineage_lock")
             current = None
+            current_sha256 = None
             if bound.child_identity(path.name) is not None:
+                current_raw = bound.read_bytes(
+                    path.name,
+                    max_bytes=MAX_LINEAGE_BYTES,
+                    require_single_link=True,
+                    binary=True,
+                )
                 current = _strict_json_bytes(
-                    bound.read_bytes(
-                        path.name,
-                        max_bytes=MAX_LINEAGE_BYTES,
-                        require_single_link=True,
-                        binary=True,
-                    ),
+                    current_raw,
                     label="lineage sidecar",
                 )
                 validate_record(current)
+                current_sha256 = _sha256(current_raw)
+            current_base = {
+                "exists": current is not None,
+                "sha256": current_sha256,
+            }
+            if current_base != preview["base_record"]:
+                raise LineageError("lineage base record changed after preview")
+            if preview["idempotent"]:
+                return {"idempotent": True, "record": current}
             current_revision = current["revision"] if current else 0
             if current_revision != expected_revision:
                 raise LineageError("stale lineage revision")
