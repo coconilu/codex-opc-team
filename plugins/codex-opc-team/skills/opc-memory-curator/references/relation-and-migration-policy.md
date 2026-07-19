@@ -1,0 +1,17 @@
+# Relation and Migration Policy
+
+## Deterministic recall boundary
+
+Use `query-context`, not Provider rank, to decide what may enter execution context. The fixed hard-filter order is scope/project identity, approved status, current-HEAD commit and hash, sensitivity permission, explicit applicability, then invalidation/supersession. Missing project context means global-only; never infer a project ID from an absolute path.
+
+An unresolved conflict withholds both records. Show both canonical citations and no body. Build the bounded relation graph only after status, provenance, scope, sensitivity, and applicability hard filters; use iterative cycle detection so a long irrelevant chain cannot exhaust the call stack. Freeze structural failures first, then compute all supersession and invalidation effects simultaneously: a middle record excluded by one valid edge still contributes its own valid outgoing edges, so chains, branches, and diamonds are independent of record and edge order. Missing targets, invalid relation data, ineligible targets, and directed cycles fail only the related records. An invalid approved record emits only its portable record ID plus `record_invalid`; never expose its body.
+
+## Schema migration
+
+Schema 1 remains readable but must be migrated before relation, applicability, or sensitivity curation. Create an external private backup directory first. Run `migrate-schema --dry-run --backup-root <root>` for inventory, select one record, then rerun preview with `--record-id <id>`. Inventory scans every canonical status before selection, rejects duplicate IDs across statuses, and enforces the per-status record limit. Apply only with that single-record preview's unchanged unique record ID, backup root, and exact plan token. Review and commit only returned transition paths. Never batch-migrate implicitly or put private backups in the public plugin checkout.
+
+## Exact curation
+
+Use `curate --dry-run` with the complete manager approval reference, target status, validation/reason, relations, applicability, and sensitivity. Ask the manager to approve that exact preview. The preview returns a normalized `transition_at`, complete `changed_fields`, and SHA-256 of the exact final canonical bytes. Apply with identical arguments, `--transition-at <preview-transition-at>`, and its `plan_token`; changed inputs, timestamps, or canonical source require a new preview. Apply verifies the final disk bytes against the preview hash.
+
+Relations are strict JSON objects passed through repeatable `--relation` arguments and require an explicit kind, target ID, scope, and `project_id` (`null` for global). Curation writes only canonical File/Git paths and never writes the optional Provider. A successful apply is still unpublished until the exact paths are committed and verified at current HEAD. Optional reindex remains a separate preview and approval.

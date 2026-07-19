@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added a versioned, deterministic File/Git evaluation contract, public synthetic fixtures, machine and human baseline artifacts, and a strict aggregate-only protocol for private 3–5-task pilots.
 - Added a strict, versioned structured-feedback sidecar with portable references, auditable late updates, deterministic reporting, and fail-closed privacy/concurrency gates.
 - Added read-only candidate Shadow Evaluation with exact File/Git preflight, #4-compatible control/treatment metrics, #5 feedback evidence, deterministic confidence/reporting, and no promotion or canonical/provider writes.
+- Added deterministic Schema 2 knowledge governance for applicability, sensitivity, conflicts, supersession and invalidation, with Schema 1 compatibility, previewed backed-up migration, exact manager curation, and File/Git-authoritative context filtering.
 
 ## [0.1.1-rc.1] - 2026-07-19
 

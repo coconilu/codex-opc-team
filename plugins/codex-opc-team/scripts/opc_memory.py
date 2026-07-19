@@ -28,8 +28,29 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 from uuid import UUID, uuid4
 
+from opc_governance import (
+    CONTEXT_VERSION,
+    CURATION_VERSION,
+    MAX_RECORD_BYTES,
+    MAX_RECORDS,
+    MIGRATION_VERSION,
+    SCHEMA_V2,
+    GovernanceError,
+    applicability_reasons,
+    canonical_citation,
+    load_contract as load_governance_contract,
+    migrate_record,
+    normalize_relations,
+    relation_applies,
+    relation_cycles,
+    strict_json_bytes,
+    validate_query_context,
+    validate_record,
+)
+
 
 SCHEMA_VERSION = 1
+KNOWLEDGE_SCHEMA_VERSION = SCHEMA_V2
 INDEX_STATE_VERSION = 1
 MEMORY_STATUSES = ("candidate", "approved", "rejected", "obsolete")
 STATUS_DIRS = {
@@ -118,6 +139,32 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def normalized_event_time(value: str | None, *, label: str) -> str:
+    candidate = value if value is not None else utc_now()
+    if not isinstance(candidate, str) or not candidate or len(candidate) > 64:
+        raise OpcMemoryError(f"{label} must be a bounded timezone-aware timestamp")
+    try:
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timezone is required")
+    except (TypeError, ValueError) as exc:
+        raise OpcMemoryError(f"{label} must be a timezone-aware RFC 3339 timestamp") from exc
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def canonical_record_bytes(value: Mapping[str, Any]) -> bytes:
+    try:
+        validate_record(value)
+        payload = (
+            json.dumps(dict(value), ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+    except (GovernanceError, TypeError, ValueError) as exc:
+        raise OpcMemoryError("canonical record is not valid strict JSON") from exc
+    if len(payload) > MAX_RECORD_BYTES:
+        raise OpcMemoryError("canonical record exceeds the configured size limit")
+    return payload
+
+
 def resolve_knowledge_root(value: str | None = None) -> Path:
     configured = value or os.environ.get("OPC_KNOWLEDGE_HOME")
     return (
@@ -195,6 +242,34 @@ def parse_pairs(values: Sequence[str] | None) -> dict[str, Any]:
     return result
 
 
+def parse_json_object(value: str | None, *, label: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if len(value.encode("utf-8")) > 64 * 1024:
+        raise OpcMemoryError(f"{label} exceeds the configured size limit")
+    try:
+        parsed = json.loads(
+            value,
+            parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token)),
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise OpcMemoryError(f"{label} must be strict JSON") from exc
+    if not isinstance(parsed, dict):
+        raise OpcMemoryError(f"{label} must be a JSON object")
+    return parsed
+
+
+def parse_relation_objects(values: Sequence[str] | None) -> list[dict[str, Any]] | None:
+    if values is None:
+        return None
+    if len(values) > 64:
+        raise OpcMemoryError("relations exceeds the configured item limit")
+    return [
+        parse_json_object(value, label=f"relation[{index}]") or {}
+        for index, value in enumerate(values)
+    ]
+
+
 def _reject_machine_paths(value: Any, label: str) -> None:
     """Reject absolute path references in structured portable metadata."""
     if isinstance(value, dict):
@@ -209,6 +284,90 @@ def _reject_machine_paths(value: Any, label: str) -> None:
         return
     if Path(value).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\\\"):
         raise OpcMemoryError(f"{label} must use a portable relative reference, not: {value}")
+
+
+def _lexical_absolute(path: Path) -> Path:
+    expanded = path.expanduser()
+    return expanded if expanded.is_absolute() else Path.cwd() / expanded
+
+
+def _is_reparse(path: Path) -> bool:
+    metadata = path.lstat()
+    return bool(
+        getattr(metadata, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _assert_unlinked_ancestors(path: Path, *, label: str) -> Path:
+    """Inspect lexical ancestors before resolve; accept normal Windows aliases by identity."""
+
+    candidate = _lexical_absolute(path)
+    current = candidate
+    while True:
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise OpcMemoryError(f"{label} boundary could not be inspected") from exc
+        else:
+            if stat.S_ISLNK(metadata.st_mode) or _is_reparse(current):
+                raise OpcMemoryError(f"{label} crosses a symlink or reparse boundary")
+        parent = current.parent
+        if parent == current:
+            return candidate
+        current = parent
+
+
+def _strict_record_json(raw: bytes, *, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token)),
+        )
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise OpcMemoryError(f"{label} is not strict UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise OpcMemoryError(f"{label} must be a JSON object")
+    try:
+        validate_record(value)
+    except GovernanceError as exc:
+        raise OpcMemoryError(f"{label}: {exc}") from exc
+    return value
+
+
+def _read_bounded_bytes(path: Path, *, label: str, maximum: int = MAX_RECORD_BYTES) -> bytes:
+    candidate = _assert_unlinked_ancestors(path, label=label)
+    try:
+        metadata = candidate.lstat()
+    except OSError as exc:
+        raise OpcMemoryError(f"{label} is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_size > maximum
+    ):
+        raise OpcMemoryError(f"{label} must be one bounded, uniquely linked regular file")
+    try:
+        # Lazy import avoids a module cycle: opc_feedback itself uses opc_memory.
+        from opc_feedback import FeedbackError, _BoundDirectory
+
+        with _BoundDirectory(candidate.parent, candidate.parent) as bound:
+            return bound.read_bytes(
+                candidate.name,
+                max_bytes=maximum,
+                require_single_link=True,
+            )
+    except (FeedbackError, OSError) as exc:
+        raise OpcMemoryError(f"{label} could not be read through a stable directory") from exc
+
+
+def _read_bounded_record(path: Path, *, label: str) -> dict[str, Any]:
+    return _strict_record_json(
+        _read_bounded_bytes(path, label=label),
+        label=label,
+    )
 
 
 def redact_error(error: Exception) -> str:
@@ -463,8 +622,43 @@ class FileGitBackend:
     """Canonical JSON-file repository with optional Git provenance checks."""
 
     def __init__(self, root: Path | str):
-        self.root = Path(root).expanduser().resolve()
+        lexical = _assert_unlinked_ancestors(Path(root), label="knowledge_root")
+        self.root = lexical.resolve()
         validate_private_root_against_plugin(self.root, label="knowledge_root")
+
+    def _load_record(self, path: Path) -> dict[str, Any]:
+        # Compare parent directory objects, not path spellings.  This accepts a
+        # normal Windows 8.3 alias of an authorized status directory without
+        # allowing an arbitrary descendant or relying on case folding.  The
+        # actual read still uses the lexical path and rejects symlink/reparse
+        # ancestors before following anything.
+        authorized_parent = False
+        for status in MEMORY_STATUSES:
+            try:
+                if os.path.samefile(path.parent, self._folder(status)):
+                    authorized_parent = True
+                    break
+            except OSError:
+                continue
+        if not authorized_parent:
+            raise OpcMemoryError("knowledge record escaped the canonical root")
+        return _read_bounded_record(path, label="canonical knowledge record")
+
+    def _invalid_record_id(self, path: Path) -> str | None:
+        """Recover only a portable ID for a redacted invalid-record omission."""
+
+        try:
+            raw = _read_bounded_bytes(path, label="invalid knowledge record")
+            value = json.loads(
+                raw.decode("utf-8"),
+                parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token)),
+            )
+            if not isinstance(value, dict) or not isinstance(value.get("id"), str):
+                return None
+            record_id = safe_record_id(value["id"])
+            return record_id if path.stem == record_id else None
+        except (OpcMemoryError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            return None
 
     def ensure_layout(self) -> None:
         for relative in STATUS_DIRS.values():
@@ -513,6 +707,12 @@ class FileGitBackend:
         confidence: float = 0.5,
         project_id: str | None = None,
         source: str | None = None,
+        sensitivity: str = "internal",
+        applicable_roles: Sequence[str] | None = None,
+        applicability: Mapping[str, Sequence[str]] | None = None,
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+        relations: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not memory_type.strip() or not summary.strip() or not content.strip():
             raise OpcMemoryError("type, summary, and content must be non-empty")
@@ -539,7 +739,7 @@ class FileGitBackend:
         now = utc_now()
         record_id = f"exp-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
         record: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": KNOWLEDGE_SCHEMA_VERSION,
             "id": record_id,
             "type": memory_type.strip(),
             "summary": summary.strip(),
@@ -551,6 +751,26 @@ class FileGitBackend:
             "evidence": dict(evidence or {}),
             "confidence": confidence,
             "status": "candidate",
+            "sensitivity": sensitivity,
+            "applicability": {
+                "roles": sorted(set(applicable_roles or [])),
+                "knowledge_types": [memory_type.strip()],
+                "constraints": {
+                    str(key): sorted(set(str(item) for item in values))
+                    for key, values in sorted((applicability or {}).items())
+                },
+                "valid_from": valid_from,
+                "valid_until": valid_until,
+            },
+            "relations": sorted(
+                [dict(item) for item in relations or []],
+                key=lambda item: (
+                    str(item.get("kind", "")),
+                    str(item.get("target_id", "")),
+                    str(item.get("scope", "")),
+                    str(item.get("project_id") or ""),
+                ),
+            ),
             "created_at": now,
             "updated_at": now,
         }
@@ -558,6 +778,10 @@ class FileGitBackend:
             record["project_id"] = project_id
         if source:
             record["source"] = source
+        try:
+            validate_record(record)
+        except GovernanceError as exc:
+            raise OpcMemoryError(str(exc)) from exc
         path = self._path("candidate", record_id)
         atomic_write_json(path, record)
         return self._with_source(record, path)
@@ -568,7 +792,7 @@ class FileGitBackend:
         if not approved_by.strip() or not validation.strip():
             raise OpcMemoryError("approval requires approved_by and validation")
         _, source = self._locate(record_id, ("candidate",))
-        record = load_json(source)
+        record = self._load_record(source)
         record.update(
             {
                 "status": "approved",
@@ -578,6 +802,10 @@ class FileGitBackend:
                 "updated_at": utc_now(),
             }
         )
+        try:
+            validate_record(record)
+        except GovernanceError as exc:
+            raise OpcMemoryError(str(exc)) from exc
         destination = self._path("approved", record_id)
         if destination.exists():
             raise OpcMemoryError(f"Approved destination already exists: {destination}")
@@ -591,7 +819,7 @@ class FileGitBackend:
         if not rejected_by.strip() or not reason.strip():
             raise OpcMemoryError("rejection requires rejected_by and reason")
         _, source = self._locate(record_id, ("candidate",))
-        record = load_json(source)
+        record = self._load_record(source)
         record.update(
             {
                 "status": "rejected",
@@ -601,6 +829,10 @@ class FileGitBackend:
                 "updated_at": utc_now(),
             }
         )
+        try:
+            validate_record(record)
+        except GovernanceError as exc:
+            raise OpcMemoryError(str(exc)) from exc
         destination = self._path("rejected", record_id)
         atomic_write_json(destination, record)
         source.unlink()
@@ -612,7 +844,7 @@ class FileGitBackend:
         if not reason.strip():
             raise OpcMemoryError("obsolete transition requires a reason")
         _, source = self._locate(record_id, ("approved",))
-        record = load_json(source)
+        record = self._load_record(source)
         record.update(
             {
                 "status": "obsolete",
@@ -622,7 +854,31 @@ class FileGitBackend:
             }
         )
         if superseded_by:
-            record["superseded_by"] = safe_record_id(superseded_by)
+            target_id = safe_record_id(superseded_by)
+            if record.get("schema_version") == 2:
+                record.setdefault("relations", []).append(
+                    {
+                        "kind": "superseded_by",
+                        "target_id": target_id,
+                        "scope": record["scope"],
+                        "project_id": record.get("project_id"),
+                    }
+                )
+                record["relations"] = sorted(
+                    record["relations"],
+                    key=lambda item: (
+                        item["kind"],
+                        item["target_id"],
+                        item["scope"],
+                        item.get("project_id") or "",
+                    ),
+                )
+            else:
+                record["superseded_by"] = target_id
+        try:
+            validate_record(record)
+        except GovernanceError as exc:
+            raise OpcMemoryError(str(exc)) from exc
         destination = self._path("obsolete", record_id)
         atomic_write_json(destination, record)
         source.unlink()
@@ -707,48 +963,340 @@ class FileGitBackend:
         keywords: Sequence[str] | None = None,
         project_id: str | None = None,
         limit: int = 20,
+        role: str | None = None,
+        applicability: Mapping[str, str] | None = None,
+        allowed_sensitivity: Sequence[str] | None = None,
+        at: str | None = None,
+        extra_candidate_ids: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
-        if limit < 1:
-            return []
-        if project_id and not re.fullmatch(r"[A-Za-z0-9._-]+", project_id):
-            raise OpcMemoryError("project_id must be portable and contain no path separators")
-        statuses = ("approved",) if approved_only else MEMORY_STATUSES
-        hits: list[dict[str, Any]] = []
-        for status in statuses:
-            for path in sorted(self._folder(status).glob("*.json")):
-                record = load_json(path)
-                if record.get("status") == "approved":
-                    relative_source = path.relative_to(self.root).as_posix()
-                    try:
-                        provenance = self.source_metadata(relative_source)
-                    except (OpcMemoryError, OSError):
+        if not approved_only:
+            # Unapproved records are inspection-only and never enter the governed
+            # Context contract.  Preserve the legacy debug surface without
+            # presenting it as executable context.
+            records: list[dict[str, Any]] = []
+            for status in MEMORY_STATUSES:
+                for record in self.list_by_status(status, limit=MAX_RECORDS):
+                    if self.record_matches(
+                        record,
+                        text=text,
+                        memory_type=memory_type,
+                        metadata=metadata,
+                        keywords=keywords,
+                        project_id=project_id,
+                    ):
+                        records.append(record)
+            return records[: max(0, limit)]
+        return self.query_context(
+            text,
+            memory_type=memory_type,
+            metadata=metadata,
+            keywords=keywords,
+            project_id=project_id,
+            limit=limit,
+            role=role,
+            applicability=applicability,
+            allowed_sensitivity=allowed_sensitivity,
+            at=at,
+            extra_candidate_ids=extra_candidate_ids,
+        )["records"]
+
+    def query_context(
+        self,
+        text: str = "",
+        *,
+        memory_type: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        keywords: Sequence[str] | None = None,
+        project_id: str | None = None,
+        limit: int = 20,
+        role: str | None = None,
+        applicability: Mapping[str, str] | None = None,
+        allowed_sensitivity: Sequence[str] | None = None,
+        at: str | None = None,
+        extra_candidate_ids: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            load_governance_contract()
+        except GovernanceError as exc:
+            raise OpcMemoryError(str(exc)) from exc
+        try:
+            context_values, sensitivities = validate_query_context(
+                project_id=project_id,
+                role=role,
+                applicability=applicability,
+                allowed_sensitivity=allowed_sensitivity,
+                limit=limit,
+            )
+        except GovernanceError as exc:
+            raise OpcMemoryError(str(exc)) from exc
+        try:
+            if at is None:
+                evaluation_time = datetime.now(timezone.utc)
+            else:
+                parsed_time = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                if parsed_time.tzinfo is None or parsed_time.utcoffset() is None:
+                    raise ValueError("timezone is required")
+                evaluation_time = parsed_time.astimezone(timezone.utc)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise OpcMemoryError("at must be a timezone-aware RFC 3339 timestamp") from exc
+        extra_ids = {safe_record_id(value) for value in extra_candidate_ids or []}
+
+        inventory: dict[str, dict[str, Any]] = {}
+        provenance: dict[str, dict[str, Any]] = {}
+        duplicate_ids: set[str] = set()
+        invalid_count = 0
+        invalid_omissions: list[dict[str, Any]] = []
+        for status in MEMORY_STATUSES:
+            paths = sorted(self._folder(status).glob("*.json"))
+            if len(paths) > MAX_RECORDS:
+                raise OpcMemoryError("knowledge repository exceeds the configured record limit")
+            for path in paths:
+                try:
+                    record = self._load_record(path)
+                    record_id = str(record["id"])
+                    if record_id in duplicate_ids:
+                        invalid_count += 1
                         continue
-                    if not provenance.get("source_commit"):
-                        # ``approved`` is a canonical transition state; normal
-                        # recall treats it as published only after Git HEAD can
-                        # verify the exact blob.
+                    if record_id in inventory:
+                        inventory.pop(record_id, None)
+                        provenance.pop(record_id, None)
+                        duplicate_ids.add(record_id)
+                        # Both the previously accepted occurrence and this one
+                        # are invalid once uniqueness is disproved.
+                        invalid_count += 2
                         continue
-                if not self.record_matches(
-                    record,
-                    text=text,
-                    memory_type=memory_type,
-                    metadata=metadata,
-                    keywords=keywords,
-                    project_id=project_id,
-                ):
+                    record = self._with_source(record, path)
+                    inventory[record_id] = record
+                    if record.get("status") == "approved":
+                        provenance[record_id] = self.source_metadata(record["_source_path"])
+                except (OpcMemoryError, OSError):
+                    invalid_count += 1
+                    if status == "approved":
+                        invalid_id = self._invalid_record_id(path)
+                        if invalid_id is not None:
+                            invalid_omissions.append(
+                                {
+                                    "record_id": invalid_id,
+                                    "reason_codes": ["record_invalid"],
+                                }
+                            )
+
+        base_reasons: dict[str, list[str]] = {}
+        for record_id, record in inventory.items():
+            reasons: list[str] = []
+            if record.get("status") != "approved":
+                reasons.append(str(record.get("status") or "status_invalid"))
+            if not self._scope_matches(record, project_id):
+                reasons.append("project_scope_mismatch")
+            source = provenance.get(record_id, {})
+            if not source.get("source_commit"):
+                reasons.append("stale_provenance")
+            if record.get("sensitivity", "internal") not in sensitivities:
+                reasons.append("sensitivity_not_authorized")
+            try:
+                reasons.extend(
+                    applicability_reasons(
+                        record,
+                        role=role,
+                        knowledge_type=memory_type,
+                        context=context_values,
+                        at=evaluation_time,
+                    )
+                )
+            except GovernanceError:
+                reasons.append("applicability_invalid")
+            base_reasons[record_id] = sorted(set(reasons))
+
+        candidate_ids: set[str] = set(extra_ids)
+        for record_id, record in inventory.items():
+            if record.get("status") != "approved":
+                continue
+            if self.record_matches(
+                record,
+                text=text,
+                memory_type=memory_type,
+                metadata=metadata,
+                keywords=keywords,
+                project_id=project_id,
+            ):
+                candidate_ids.add(record_id)
+
+        relation_reasons: dict[str, set[str]] = {record_id: set() for record_id in inventory}
+        hard_filter_eligible = {
+            record_id for record_id in inventory if not base_reasons.get(record_id)
+        }
+        normalized_by_source: dict[str, list[dict[str, Any]]] = {}
+        for source_id in sorted(hard_filter_eligible):
+            try:
+                normalized_by_source[source_id] = normalize_relations(
+                    inventory[source_id]
+                )
+            except GovernanceError:
+                relation_reasons[source_id].add("relations_invalid")
+
+        edges: dict[str, set[str]] = {}
+        active_relations: list[tuple[str, str, str]] = []
+        for source_id in sorted(hard_filter_eligible):
+            if relation_reasons[source_id]:
+                continue
+            for relation in normalized_by_source.get(source_id, []):
+                if not relation_applies(relation, project_id):
                     continue
-                hit = self._with_source(record, path)
-                hit["_score"] = self._score(record, text)
-                hit["_recall_source"] = "file"
-                hits.append(hit)
-        hits.sort(
+                target_id = relation["target_id"]
+                if target_id not in inventory:
+                    relation_reasons[source_id].add("relation_target_missing")
+                    continue
+                kind = relation["kind"]
+                if (
+                    target_id not in hard_filter_eligible
+                    or relation_reasons[target_id]
+                ):
+                    if kind in {"superseded_by", "invalidated_by"}:
+                        relation_reasons[source_id].add("relation_target_ineligible")
+                    continue
+                active_relations.append((source_id, target_id, kind))
+                if kind != "conflicts":
+                    edges.setdefault(source_id, set()).add(target_id)
+
+        for record_id in relation_cycles(edges):
+            relation_reasons[record_id].add("relation_cycle")
+
+        # Finish structural eligibility before computing any governance effect.
+        # For inverse relations, an ineligible target makes the source
+        # ineligible too; propagate that fact with a bounded work queue so the
+        # result cannot depend on record or edge order.
+        inverse_dependents: dict[str, set[str]] = {}
+        for source_id, target_id, kind in active_relations:
+            if kind in {"superseded_by", "invalidated_by"}:
+                inverse_dependents.setdefault(target_id, set()).add(source_id)
+        structurally_ineligible = [
+            record_id
+            for record_id in sorted(hard_filter_eligible)
+            if relation_reasons[record_id]
+        ]
+        queue_index = 0
+        while queue_index < len(structurally_ineligible):
+            target_id = structurally_ineligible[queue_index]
+            queue_index += 1
+            for source_id in sorted(inverse_dependents.get(target_id, set())):
+                if relation_reasons[source_id]:
+                    continue
+                relation_reasons[source_id].add("relation_target_ineligible")
+                structurally_ineligible.append(source_id)
+
+        # Compute effects simultaneously from the frozen, structurally valid
+        # graph. A middle node that is superseded/invalidated by one edge still
+        # contributes all of its own valid outgoing edges in the same graph.
+        relation_effects: dict[str, set[str]] = {
+            record_id: set() for record_id in inventory
+        }
+        for source_id, target_id, kind in active_relations:
+            if base_reasons.get(source_id) or relation_reasons[source_id]:
+                continue
+            target_eligible = (
+                not base_reasons.get(target_id)
+                and not relation_reasons[target_id]
+            )
+            if kind in {"supersedes", "invalidates"}:
+                if target_eligible:
+                    relation_effects[target_id].add(
+                        "superseded" if kind == "supersedes" else "invalidated"
+                    )
+            elif kind in {"superseded_by", "invalidated_by"}:
+                if target_eligible:
+                    relation_effects[source_id].add(
+                        "superseded" if kind == "superseded_by" else "invalidated"
+                    )
+        for record_id, effects in relation_effects.items():
+            relation_reasons[record_id].update(effects)
+
+        conflict_pairs: set[tuple[str, str]] = set()
+        for source_id, target_id, kind in active_relations:
+            if kind != "conflicts":
+                continue
+            if (
+                not base_reasons.get(source_id)
+                and not relation_reasons[source_id]
+                and not base_reasons.get(target_id)
+                and not relation_reasons[target_id]
+            ):
+                conflict_pairs.add(tuple(sorted((source_id, target_id))))
+
+        conflicted = {record_id for pair in conflict_pairs for record_id in pair}
+        records: list[dict[str, Any]] = []
+        omissions: list[dict[str, Any]] = []
+        for record_id in sorted(candidate_ids):
+            record = inventory.get(record_id)
+            if record is None:
+                continue
+            reasons = sorted(set(base_reasons.get(record_id, [])) | relation_reasons[record_id])
+            if record_id in conflicted:
+                reasons.append("unresolved_conflict")
+            if reasons:
+                item: dict[str, Any] = {
+                    "record_id": record_id,
+                    "reason_codes": sorted(set(reasons)),
+                }
+                try:
+                    item["citation"] = canonical_citation(record, provenance.get(record_id, {}))
+                except GovernanceError:
+                    pass
+                omissions.append(item)
+                continue
+            hit = dict(record)
+            hit["_score"] = self._score(record, text)
+            hit["_recall_source"] = "file"
+            hit["_authority"] = "file-git"
+            hit["_citation"] = canonical_citation(record, provenance[record_id])
+            records.append(hit)
+
+        omitted_ids = {item["record_id"] for item in omissions}
+        for item in invalid_omissions:
+            if item["record_id"] not in omitted_ids:
+                omissions.append(item)
+                omitted_ids.add(item["record_id"])
+
+        records.sort(
             key=lambda item: (
                 -float(item.get("_score", 0)),
-                str(item.get("updated_at", "")),
                 str(item.get("id", "")),
             )
         )
-        return hits[:limit]
+        conflicts: list[dict[str, Any]] = []
+        for left, right in sorted(conflict_pairs):
+            conflicts.append(
+                {
+                    "reason_code": "unresolved_conflict",
+                    "citations": [
+                        canonical_citation(inventory[left], provenance[left]),
+                        canonical_citation(inventory[right], provenance[right]),
+                    ],
+                }
+            )
+        return {
+            "schema_version": CONTEXT_VERSION,
+            "query": {
+                "project_id": project_id,
+                "role": role,
+                "knowledge_type": memory_type,
+                "applicability": context_values,
+                "allowed_sensitivity": list(sensitivities),
+            },
+            "records": records[:limit],
+            "conflicts": conflicts[:limit],
+            "omissions": omissions[:limit],
+            "omitted_summary": {
+                "count": len(omissions) + invalid_count - len(invalid_omissions),
+                "invalid_record_count": invalid_count,
+                "reason_codes": sorted(
+                    {
+                        reason
+                        for item in omissions
+                        for reason in item["reason_codes"]
+                    }
+                ),
+            },
+        }
 
     def list_by_type(
         self, memory_type: str, *, approved_only: bool = True, limit: int = 100
@@ -777,7 +1325,7 @@ class FileGitBackend:
             raise OpcMemoryError(f"Unsupported memory status: {status}")
         records: list[dict[str, Any]] = []
         for path in sorted(self._folder(status).glob("*.json")):
-            record = load_json(path)
+            record = self._load_record(path)
             if memory_type and record.get("type") != memory_type:
                 continue
             records.append(self._with_source(record, path))
@@ -792,16 +1340,22 @@ class FileGitBackend:
         memory_type: str | None = "decision",
         project_id: str | None = None,
         limit: int = 20,
+        role: str | None = None,
+        applicability: Mapping[str, str] | None = None,
+        allowed_sensitivity: Sequence[str] | None = None,
     ) -> str:
-        records = self.query(
+        context = self.query_context(
             query,
-            approved_only=True,
             memory_type=memory_type,
             project_id=project_id,
             limit=limit,
+            role=role,
+            applicability=applicability,
+            allowed_sensitivity=allowed_sensitivity,
         )
+        records = context["records"]
         lines = ["# OPC decision context", ""]
-        if not records:
+        if not records and not context["conflicts"]:
             lines.append("No approved decision memory matched the request.")
             return "\n".join(lines) + "\n"
         for record in records:
@@ -821,12 +1375,46 @@ class FileGitBackend:
             if record.get("validation"):
                 lines.append(f"- Validation: {record['validation']}")
             lines.append("")
+        if context["conflicts"]:
+            lines.extend(["## Unresolved knowledge conflicts", ""])
+            for conflict in context["conflicts"]:
+                citations = conflict["citations"]
+                lines.append(
+                    "- `unresolved_conflict`: "
+                    + " <> ".join(
+                        f"`{item['source_path']}@{item['source_commit']}#{item['content_sha256']}`"
+                        for item in citations
+                    )
+                )
+            lines.extend(
+                [
+                    "",
+                    "Conflicting bodies were withheld; manager curation is required.",
+                    "",
+                ]
+            )
+        if context["omitted_summary"]["count"]:
+            lines.append(
+                "- Omitted reason codes: "
+                + ", ".join(context["omitted_summary"]["reason_codes"])
+            )
         return "\n".join(lines)
 
     def _resolve_source(self, source_path: str) -> Path:
-        if not source_path or Path(source_path).is_absolute():
+        lexical = Path(source_path)
+        if (
+            not source_path
+            or lexical.is_absolute()
+            or "\\" in source_path
+            or any(part in {"", ".", ".."} for part in lexical.parts)
+        ):
             raise StaleSourceError("Recall source_path must be relative to the knowledge root")
-        candidate = (self.root / Path(source_path)).resolve()
+        unchecked = self.root / lexical
+        try:
+            _assert_unlinked_ancestors(unchecked, label="canonical source")
+        except OpcMemoryError as exc:
+            raise StaleSourceError(str(exc)) from exc
+        candidate = unchecked.resolve()
         try:
             candidate.relative_to(self.root)
         except ValueError as exc:
@@ -852,7 +1440,9 @@ class FileGitBackend:
         path = self._resolve_source(source_path)
         if not path.is_file():
             raise StaleSourceError(f"Authoritative source is missing: {source_path}")
-        content_hash = sha256_file(path)
+        raw = _read_bounded_bytes(path, label="canonical source")
+        _strict_record_json(raw, label="canonical source")
+        content_hash = sha256_bytes(raw)
         return {
             "source_path": source_path,
             "content_hash": content_hash,
@@ -870,10 +1460,14 @@ class FileGitBackend:
         path = self._resolve_source(source_path)
         if not path.is_file():
             raise StaleSourceError(f"Authoritative source is missing: {source_path}")
-        actual_hash = sha256_file(path)
+        raw = _read_bounded_bytes(path, label="canonical source")
+        actual_hash = sha256_bytes(raw)
         if not content_hash or actual_hash != content_hash:
             raise StaleSourceError(f"Authoritative source hash changed: {source_path}")
         if source_commit:
+            current = self.source_commit(path, actual_hash)
+            if current != source_commit:
+                raise StaleSourceError("source_commit is not the current Git HEAD provenance")
             top_text = _git(self.root, ("rev-parse", "--show-toplevel"))
             if not isinstance(top_text, str):
                 raise StaleSourceError("Cannot verify source_commit outside a Git repository")
@@ -887,7 +1481,7 @@ class FileGitBackend:
                 raise StaleSourceError(f"Cannot resolve source_commit: {source_commit}")
             if sha256_bytes(committed) != content_hash:
                 raise StaleSourceError("source_commit does not contain the indexed source content")
-        record = load_json(path)
+        record = _strict_record_json(raw, label="canonical source")
         if approved_only and record.get("status") != "approved":
             raise StaleSourceError("Recall source is no longer approved")
         return self._with_source(record, path)
@@ -1215,6 +1809,494 @@ class FileGitBackend:
             "automatic_actions_performed": ["move"] if moved else [],
         }
 
+    def schema_migration_plan(
+        self,
+        *,
+        record_id: str | None = None,
+        backup_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Preview a bounded Schema 1 -> 2 migration; never writes."""
+
+        selected = safe_record_id(record_id) if record_id else None
+        backup_token: str | None = None
+        if backup_root is not None:
+            lexical_backup = _assert_unlinked_ancestors(
+                backup_root, label="migration backup root"
+            )
+            if not lexical_backup.is_dir():
+                raise OpcMemoryError("migration backup root must already exist")
+            resolved_backup = lexical_backup.resolve(strict=True)
+            if _paths_overlap(resolved_backup, self.root):
+                raise OpcMemoryError(
+                    "migration backup root must not overlap canonical knowledge"
+                )
+            validate_private_root_against_plugin(
+                resolved_backup, label="migration backup root"
+            )
+            metadata = resolved_backup.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or resolved_backup.is_symlink()
+                or _is_reparse(resolved_backup)
+            ):
+                raise OpcMemoryError("migration backup root is not a stable directory")
+            backup_token = _directory_object_token(_lstat_identity(resolved_backup))
+
+        items: list[dict[str, Any]] = []
+        seen_ids: dict[str, str] = {}
+        for status in MEMORY_STATUSES:
+            paths = sorted(self._folder(status).glob("*.json"))
+            if len(paths) > MAX_RECORDS:
+                raise OpcMemoryError(
+                    f"migration inventory exceeds the per-status record limit: {status}"
+                )
+            for path in paths:
+                record = self._load_record(path)
+                record_id_value = str(record["id"])
+                source_path = path.relative_to(self.root).as_posix()
+                previous = seen_ids.get(record_id_value)
+                if previous is not None:
+                    raise OpcMemoryError(
+                        "migration inventory contains a duplicate record id across "
+                        f"canonical paths: {record_id_value}"
+                    )
+                seen_ids[record_id_value] = source_path
+                if selected and record["id"] != selected:
+                    continue
+                raw = _read_bounded_bytes(path, label="canonical migration source")
+                action = (
+                    "migrate_schema_1_to_2"
+                    if record.get("schema_version") == 1
+                    else "skip_schema_2"
+                )
+                items.append(
+                    {
+                        "record_id": record["id"],
+                        "source_path": source_path,
+                        "source_sha256": sha256_bytes(raw),
+                        "status": record["status"],
+                        "from_schema": record["schema_version"],
+                        "to_schema": 2,
+                        "action": action,
+                    }
+                )
+        if selected and not items:
+            raise OpcMemoryError(f"Memory record not found: {selected}")
+        fingerprint = {
+            "migration_version": MIGRATION_VERSION,
+            "knowledge_root_identity": _directory_object_token(
+                _lstat_identity(self.root)
+            ),
+            "backup_root_identity": backup_token,
+            "items": items,
+        }
+        return {
+            "schema_version": MIGRATION_VERSION,
+            "dry_run": True,
+            "zero_write": True,
+            "backup_root_bound": backup_token is not None,
+            "items": items,
+            "pending_count": sum(
+                item["action"] == "migrate_schema_1_to_2" for item in items
+            ),
+            "apply_requires_single_record": True,
+            "plan_token": _metadata_token(fingerprint),
+            "note": "No canonical knowledge, backup, Git, or provider write was performed.",
+        }
+
+    def apply_schema_migration(
+        self,
+        *,
+        record_id: str,
+        backup_root: Path,
+        plan_token: str | None,
+    ) -> dict[str, Any]:
+        """Apply one previewed record migration with an external immutable backup."""
+
+        preview = self.schema_migration_plan(
+            record_id=record_id,
+            backup_root=backup_root,
+        )
+        if not plan_token or plan_token != preview["plan_token"]:
+            raise OpcMemoryError(
+                "MIGRATION_PLAN_CHANGED: preview the exact record and backup root again"
+            )
+        if (
+            len(preview["items"]) != 1
+            or preview["items"][0].get("record_id") != safe_record_id(record_id)
+        ):
+            raise OpcMemoryError(
+                "MIGRATION_PLAN_CHANGED: apply requires exactly one unique record"
+            )
+        item = preview["items"][0]
+        if item["action"] == "skip_schema_2":
+            return {
+                **preview,
+                "dry_run": False,
+                "changed": False,
+                "idempotent": True,
+            }
+        source = self.root / item["source_path"]
+        raw = _read_bounded_bytes(source, label="canonical migration source")
+        if sha256_bytes(raw) != item["source_sha256"]:
+            raise OpcMemoryError("MIGRATION_PLAN_CHANGED: canonical source changed")
+        record = _strict_record_json(raw, label="canonical migration source")
+        try:
+            migrated = migrate_record(record)
+        except GovernanceError as exc:
+            raise OpcMemoryError(str(exc)) from exc
+        backup = _assert_unlinked_ancestors(
+            backup_root, label="migration backup root"
+        ).resolve(strict=True)
+        backup_name = f"{record_id}-schema1-{item['source_sha256']}.json"
+        backup_created = False
+        backup_identity = None
+        try:
+            from opc_feedback import (
+                FeedbackError,
+                _BoundDirectory,
+                _atomic_write_feedback,
+                _file_identity,
+            )
+
+            with _BoundDirectory(backup, backup) as bound_backup:
+                existing = bound_backup.child_identity(backup_name)
+                if existing is None:
+                    descriptor = bound_backup.open_exclusive(backup_name)
+                    try:
+                        with os.fdopen(descriptor, "wb") as handle:
+                            descriptor = -1
+                            handle.write(raw)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                            backup_identity = _file_identity(os.fstat(handle.fileno()))
+                    finally:
+                        if descriptor >= 0:
+                            os.close(descriptor)
+                    backup_created = True
+                else:
+                    current = bound_backup.read_bytes(
+                        backup_name,
+                        max_bytes=MAX_RECORD_BYTES,
+                        require_single_link=True,
+                    )
+                    if current != raw:
+                        raise OpcMemoryError(
+                            "migration backup name exists with different content"
+                        )
+                    backup_identity = existing
+                with _BoundDirectory(source.parent, source.parent) as bound_source:
+                    if bound_source.read_bytes(
+                        source.name,
+                        max_bytes=MAX_RECORD_BYTES,
+                        require_single_link=True,
+                    ) != raw:
+                        raise OpcMemoryError(
+                            "MIGRATION_PLAN_CHANGED: canonical source changed before write"
+                        )
+                    _atomic_write_feedback(bound_source, source.name, migrated)
+        except Exception as exc:
+            if backup_created:
+                try:
+                    from opc_feedback import _BoundDirectory
+
+                    with _BoundDirectory(backup, backup) as cleanup:
+                        cleanup.unlink_owned(backup_name, backup_identity)
+                except Exception:
+                    pass
+            if isinstance(exc, OpcMemoryError) and not isinstance(exc, FeedbackError):
+                raise
+            raise OpcMemoryError(
+                "schema migration failed without a canonical partial write"
+            ) from exc
+        verified = self._load_record(source)
+        if verified.get("schema_version") != 2:
+            raise OpcMemoryError("schema migration verification failed")
+        return {
+            **preview,
+            "dry_run": False,
+            "changed": True,
+            "backup_ref": backup_name,
+            "transition_paths": [item["source_path"]],
+            "git_commit_required": True,
+            "provider_write_performed": False,
+        }
+
+    def curation_plan(
+        self,
+        record_id: str,
+        *,
+        manager_approval: str,
+        set_status: str | None = None,
+        validation: str | None = None,
+        reason: str | None = None,
+        relations: Sequence[Mapping[str, Any]] | None = None,
+        applicability: Mapping[str, Any] | None = None,
+        sensitivity: str | None = None,
+        transition_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview one exact manager-governed relation/status transition."""
+
+        record_id = safe_record_id(record_id)
+        if not manager_approval.strip() or len(manager_approval) > 4096:
+            raise OpcMemoryError("curation requires an explicit manager approval reference")
+        current_status, source = self._locate(record_id, MEMORY_STATUSES)
+        record = self._load_record(source)
+        if record.get("schema_version") != 2:
+            raise OpcMemoryError(
+                "Schema 1 record must use previewed migration before curation"
+            )
+        target_status = set_status or current_status
+        allowed = {
+            ("candidate", "candidate"),
+            ("candidate", "approved"),
+            ("candidate", "rejected"),
+            ("approved", "approved"),
+            ("approved", "obsolete"),
+        }
+        if (current_status, target_status) not in allowed:
+            raise OpcMemoryError("unsupported governed curation transition")
+        if target_status == "approved" and current_status == "candidate" and not validation:
+            raise OpcMemoryError("approval transition requires validation evidence")
+        if target_status in {"rejected", "obsolete"} and not reason:
+            raise OpcMemoryError(f"{target_status} transition requires a reason")
+        transition_time = normalized_event_time(
+            transition_at, label="transition_at"
+        )
+        proposal: dict[str, Any] = {
+            "manager_approval": manager_approval.strip(),
+            "from_status": current_status,
+            "to_status": target_status,
+            "validation": validation,
+            "reason": reason,
+            "relations": (
+                sorted(
+                    [dict(item) for item in relations],
+                    key=lambda item: (
+                        str(item.get("kind", "")),
+                        str(item.get("target_id", "")),
+                        str(item.get("scope", "")),
+                        str(item.get("project_id") or ""),
+                    ),
+                )
+                if relations is not None
+                else None
+            ),
+            "applicability": dict(applicability) if applicability is not None else None,
+            "sensitivity": sensitivity,
+            "transition_at": transition_time,
+        }
+        proposed = dict(record)
+        if proposal["relations"] is not None:
+            proposed["relations"] = proposal["relations"]
+        if proposal["applicability"] is not None:
+            proposed["applicability"] = proposal["applicability"]
+        if sensitivity is not None:
+            proposed["sensitivity"] = sensitivity
+        proposed["status"] = target_status
+        proposed["updated_at"] = transition_time
+        if target_status == "approved" and current_status == "candidate":
+            proposed.update(
+                {
+                    "approved_by": manager_approval.strip(),
+                    "approved_at": transition_time,
+                    "validation": validation,
+                }
+            )
+        elif target_status == "rejected":
+            proposed.update(
+                {
+                    "rejected_by": manager_approval.strip(),
+                    "rejected_at": transition_time,
+                    "rejection_reason": reason,
+                }
+            )
+        elif target_status == "obsolete":
+            proposed.update(
+                {"obsolete_at": transition_time, "obsolete_reason": reason}
+            )
+        try:
+            validate_record(proposed)
+        except GovernanceError as exc:
+            raise OpcMemoryError(str(exc)) from exc
+        proposed_raw = canonical_record_bytes(proposed)
+        proposed_sha256 = sha256_bytes(proposed_raw)
+        destination = self._path(target_status, record_id)
+        source_raw = _read_bounded_bytes(source, label="canonical curation source")
+        source_path = source.relative_to(self.root).as_posix()
+        destination_path = destination.relative_to(self.root).as_posix()
+        fingerprint = {
+            "curation_version": CURATION_VERSION,
+            "record_id": record_id,
+            "source_path": source_path,
+            "source_sha256": sha256_bytes(source_raw),
+            "proposal": proposal,
+            "destination_path": destination_path,
+            "proposed_sha256": proposed_sha256,
+        }
+        return {
+            "schema_version": CURATION_VERSION,
+            "dry_run": True,
+            "zero_write": True,
+            "record_id": record_id,
+            "from_status": current_status,
+            "to_status": target_status,
+            "source_path": source_path,
+            "destination_path": destination_path,
+            "source_sha256": fingerprint["source_sha256"],
+            "proposed_sha256": proposed_sha256,
+            "transition_at": transition_time,
+            "changed_fields": sorted(
+                key
+                for key in set(record) | set(proposed)
+                if record.get(key) != proposed.get(key)
+            ),
+            "transition_paths": sorted(set((source_path, destination_path))),
+            "plan_token": _metadata_token(fingerprint),
+            "manager_approval_ref": manager_approval.strip(),
+            "next_required_step": "apply exact preview, then commit only transition_paths",
+            "provider_write_performed": False,
+        }
+
+    def apply_curation(
+        self,
+        record_id: str,
+        *,
+        plan_token: str | None,
+        manager_approval: str,
+        set_status: str | None = None,
+        validation: str | None = None,
+        reason: str | None = None,
+        relations: Sequence[Mapping[str, Any]] | None = None,
+        applicability: Mapping[str, Any] | None = None,
+        sensitivity: str | None = None,
+        transition_at: str | None = None,
+    ) -> dict[str, Any]:
+        if transition_at is None:
+            raise OpcMemoryError(
+                "curation apply requires the exact preview transition_at"
+            )
+        preview = self.curation_plan(
+            record_id,
+            manager_approval=manager_approval,
+            set_status=set_status,
+            validation=validation,
+            reason=reason,
+            relations=relations,
+            applicability=applicability,
+            sensitivity=sensitivity,
+            transition_at=transition_at,
+        )
+        if not plan_token or plan_token != preview["plan_token"]:
+            raise OpcMemoryError(
+                "CURATION_PLAN_CHANGED: preview the exact transition again"
+            )
+        source = self.root / preview["source_path"]
+        destination = self.root / preview["destination_path"]
+        record = self._load_record(source)
+        if relations is not None:
+            record["relations"] = sorted(
+                [dict(item) for item in relations],
+                key=lambda item: (
+                    str(item.get("kind", "")),
+                    str(item.get("target_id", "")),
+                    str(item.get("scope", "")),
+                    str(item.get("project_id") or ""),
+                ),
+            )
+        if applicability is not None:
+            record["applicability"] = dict(applicability)
+        if sensitivity is not None:
+            record["sensitivity"] = sensitivity
+        target_status = preview["to_status"]
+        current_status = preview["from_status"]
+        record["status"] = target_status
+        record["updated_at"] = preview["transition_at"]
+        if target_status == "approved" and current_status == "candidate":
+            record.update(
+                {
+                    "approved_by": manager_approval.strip(),
+                    "approved_at": preview["transition_at"],
+                    "validation": validation,
+                }
+            )
+        elif target_status == "rejected":
+            record.update(
+                {
+                    "rejected_by": manager_approval.strip(),
+                    "rejected_at": preview["transition_at"],
+                    "rejection_reason": reason,
+                }
+            )
+        elif target_status == "obsolete":
+            record.update(
+                {
+                    "obsolete_at": preview["transition_at"],
+                    "obsolete_reason": reason,
+                }
+            )
+        proposed_raw = canonical_record_bytes(record)
+        if sha256_bytes(proposed_raw) != preview["proposed_sha256"]:
+            raise OpcMemoryError("CURATION_PLAN_CHANGED: proposed record changed")
+        source_raw = _read_bounded_bytes(source, label="canonical curation source")
+        if sha256_bytes(source_raw) != preview["source_sha256"]:
+            raise OpcMemoryError("CURATION_PLAN_CHANGED: canonical source changed")
+        try:
+            from opc_feedback import FeedbackError, _BoundDirectory, _atomic_write_feedback
+
+            if source == destination:
+                with _BoundDirectory(source.parent, source.parent) as bound:
+                    if bound.read_bytes(
+                        source.name,
+                        max_bytes=MAX_RECORD_BYTES,
+                        require_single_link=True,
+                    ) != source_raw:
+                        raise OpcMemoryError("CURATION_PLAN_CHANGED: source changed")
+                    _atomic_write_feedback(bound, source.name, record)
+            else:
+                if destination.exists() or destination.is_symlink():
+                    raise OpcMemoryError("curation destination already exists")
+                destination_identity = None
+                with _BoundDirectory(destination.parent, destination.parent) as target_bound:
+                    _atomic_write_feedback(target_bound, destination.name, record)
+                    destination_identity = target_bound.child_identity(destination.name)
+                try:
+                    with _BoundDirectory(source.parent, source.parent) as source_bound:
+                        source_identity = source_bound.child_identity(source.name)
+                        current = source_bound.read_bytes(
+                            source.name,
+                            max_bytes=MAX_RECORD_BYTES,
+                            require_single_link=True,
+                        )
+                        if current != source_raw or not source_bound.unlink_owned(
+                            source.name, source_identity
+                        ):
+                            raise OpcMemoryError("CURATION_PLAN_CHANGED: source changed")
+                except Exception:
+                    with _BoundDirectory(destination.parent, destination.parent) as rollback:
+                        rollback.unlink_owned(destination.name, destination_identity)
+                    raise
+        except (FeedbackError, OSError) as exc:
+            raise OpcMemoryError(
+                "curation transaction failed without an owned partial transition"
+            ) from exc
+        final_raw = _read_bounded_bytes(destination, label="canonical curation result")
+        if final_raw != proposed_raw or sha256_bytes(final_raw) != preview["proposed_sha256"]:
+            raise OpcMemoryError("curation verification did not reproduce preview bytes")
+        final = self._load_record(destination)
+        return {
+            **preview,
+            "dry_run": False,
+            "changed": True,
+            "canonical_citation_pending_commit": {
+                "record_id": final["id"],
+                "source_path": preview["destination_path"],
+            },
+            "git_commit_required": True,
+            "git_stage_pathspecs": preview["transition_paths"],
+            "provider_write_performed": False,
+        }
+
     def git_audit(self) -> dict[str, Any]:
         """Report Git provenance without staging, committing, or changing files."""
         legacy_artifacts = self.legacy_runtime_artifacts()
@@ -1328,7 +2410,7 @@ class FileGitBackend:
             counts[status] = len(paths)
             for path in paths:
                 try:
-                    record = load_json(path)
+                    record = self._load_record(path)
                     record_id = safe_record_id(str(record.get("id", "")))
                     if record.get("status") != status:
                         invalid.append(f"Status mismatch in {path}")
@@ -1875,21 +2957,67 @@ class MemoryService:
         keywords: Sequence[str] | None = None,
         project_id: str | None = None,
         limit: int = 20,
+        role: str | None = None,
+        applicability: Mapping[str, str] | None = None,
+        allowed_sensitivity: Sequence[str] | None = None,
+        at: str | None = None,
     ) -> list[dict[str, Any]]:
-        file_hits = self.backend.query(
+        if not approved_only:
+            return self.backend.query(
+                text,
+                approved_only=False,
+                memory_type=memory_type,
+                metadata=metadata,
+                keywords=keywords,
+                project_id=project_id,
+                limit=limit,
+            )
+        return self.query_context(
             text,
-            approved_only=approved_only,
             memory_type=memory_type,
             metadata=metadata,
             keywords=keywords,
             project_id=project_id,
             limit=limit,
-        )
-        if not self.mem0_enabled or not text.strip() or limit < 1:
-            return file_hits
-        if isinstance(self.provider, Mem0Provider) and self.provider.supported_version() is False:
-            return file_hits
-        semantic: list[dict[str, Any]] = []
+            role=role,
+            applicability=applicability,
+            allowed_sensitivity=allowed_sensitivity,
+            at=at,
+        )["records"]
+
+    def query_context(
+        self,
+        text: str = "",
+        *,
+        memory_type: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        keywords: Sequence[str] | None = None,
+        project_id: str | None = None,
+        limit: int = 20,
+        role: str | None = None,
+        applicability: Mapping[str, str] | None = None,
+        allowed_sensitivity: Sequence[str] | None = None,
+        at: str | None = None,
+    ) -> dict[str, Any]:
+        semantic_ids: list[str] = []
+        if (
+            not self.mem0_enabled
+            or not text.strip()
+            or isinstance(self.provider, Mem0Provider)
+            and self.provider.supported_version() is False
+        ):
+            return self.backend.query_context(
+                text,
+                memory_type=memory_type,
+                metadata=metadata,
+                keywords=keywords,
+                project_id=project_id,
+                limit=limit,
+                role=role,
+                applicability=applicability,
+                allowed_sensitivity=allowed_sensitivity,
+                at=at,
+            )
         try:
             provider_hits = _call_with_timeout(
                 lambda: self.provider.search(text, limit), self.timeout_seconds
@@ -1908,7 +3036,7 @@ class MemoryService:
                         source_path=str(provenance.get("source_path", "")),
                         content_hash=str(provenance.get("content_hash", "")),
                         source_commit=source_commit,
-                        approved_only=approved_only,
+                        approved_only=True,
                     )
                 except (OpcMemoryError, OSError):
                     continue
@@ -1932,22 +3060,30 @@ class MemoryService:
                     project_id=project_id,
                 ):
                     continue
-                record["_score"] = float(hit.get("score", 0) or 0)
-                record["_recall_source"] = "mem0"
-                semantic.append(record)
+                # Provider scores and order are intentionally discarded.  The
+                # canonical File/Git pass below owns hard filters and ordering.
+                semantic_ids.append(str(record["id"]))
         except Exception:
-            return file_hits
-
-        merged: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for record in [*semantic, *file_hits]:
-            record_id = str(record.get("id", ""))
-            if record_id and record_id not in seen:
-                seen.add(record_id)
-                merged.append(record)
-            if len(merged) >= limit:
-                break
-        return merged
+            semantic_ids = []
+        context = self.backend.query_context(
+            text,
+            memory_type=memory_type,
+            metadata=metadata,
+            keywords=keywords,
+            project_id=project_id,
+            limit=limit,
+            role=role,
+            applicability=applicability,
+            allowed_sensitivity=allowed_sensitivity,
+            at=at,
+            extra_candidate_ids=semantic_ids,
+        )
+        semantic_set = set(semantic_ids)
+        for record in context["records"]:
+            if record.get("id") in semantic_set:
+                record["_recall_source"] = "mem0"
+                record["_authority"] = "file-git"
+        return context
 
     def list_by_type(
         self, memory_type: str, *, approved_only: bool = True, limit: int = 100
@@ -1974,16 +3110,22 @@ class MemoryService:
         memory_type: str | None = "decision",
         project_id: str | None = None,
         limit: int = 20,
+        role: str | None = None,
+        applicability: Mapping[str, str] | None = None,
+        allowed_sensitivity: Sequence[str] | None = None,
     ) -> str:
-        records = self.query(
+        context = self.query_context(
             query,
-            approved_only=True,
             memory_type=memory_type,
             project_id=project_id,
             limit=limit,
+            role=role,
+            applicability=applicability,
+            allowed_sensitivity=allowed_sensitivity,
         )
+        records = context["records"]
         lines = ["# OPC decision context", ""]
-        if not records:
+        if not records and not context["conflicts"]:
             return "# OPC decision context\n\nNo approved decision memory matched the request.\n"
         for record in records:
             lines.extend(
@@ -1997,6 +3139,28 @@ class MemoryService:
                     f"- Source: `{record['_source_path']}`",
                     "",
                 ]
+            )
+        if context["conflicts"]:
+            lines.extend(["## Unresolved knowledge conflicts", ""])
+            for conflict in context["conflicts"]:
+                lines.append(
+                    "- `unresolved_conflict`: "
+                    + " <> ".join(
+                        f"`{item['source_path']}@{item['source_commit']}#{item['content_sha256']}`"
+                        for item in conflict["citations"]
+                    )
+                )
+            lines.extend(
+                [
+                    "",
+                    "Conflicting bodies were withheld; manager curation is required.",
+                    "",
+                ]
+            )
+        if context["omitted_summary"]["count"]:
+            lines.append(
+                "- Omitted reason codes: "
+                + ", ".join(context["omitted_summary"]["reason_codes"])
             )
         return "\n".join(lines)
 
@@ -2321,6 +3485,16 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--confidence", type=float, default=0.5)
     add.add_argument("--project-id")
     add.add_argument("--source")
+    add.add_argument(
+        "--sensitivity",
+        choices=("public", "internal", "restricted"),
+        default="internal",
+    )
+    add.add_argument("--applicable-role", action="append", default=[])
+    add.add_argument("--applicability-json")
+    add.add_argument("--valid-from")
+    add.add_argument("--valid-until")
+    add.add_argument("--relation", action="append")
 
     approve = commands.add_parser("approve")
     approve.add_argument("record_id")
@@ -2339,7 +3513,32 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--metadata", action="append", default=[])
     query.add_argument("--include-unapproved", action="store_true")
     query.add_argument("--project-id")
+    query.add_argument("--role")
+    query.add_argument("--applicability", action="append", default=[])
+    query.add_argument(
+        "--allow-sensitivity",
+        action="append",
+        choices=("public", "internal", "restricted"),
+    )
     query.add_argument("--limit", type=int, default=20)
+
+    query_context = commands.add_parser(
+        "query-context", help="Return governed records, conflicts, and omissions"
+    )
+    query_context.add_argument("text", nargs="?", default="")
+    query_context.add_argument("--type", dest="memory_type")
+    query_context.add_argument("--keyword", action="append", default=[])
+    query_context.add_argument("--metadata", action="append", default=[])
+    query_context.add_argument("--project-id")
+    query_context.add_argument("--role")
+    query_context.add_argument("--applicability", action="append", default=[])
+    query_context.add_argument(
+        "--allow-sensitivity",
+        action="append",
+        choices=("public", "internal", "restricted"),
+    )
+    query_context.add_argument("--at")
+    query_context.add_argument("--limit", type=int, default=20)
 
     listing = commands.add_parser("list")
     listing.add_argument(
@@ -2358,7 +3557,45 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--query", default="")
     export.add_argument("--type", dest="memory_type", default="decision")
     export.add_argument("--project-id")
+    export.add_argument("--role")
+    export.add_argument("--applicability", action="append", default=[])
+    export.add_argument(
+        "--allow-sensitivity",
+        action="append",
+        choices=("public", "internal", "restricted"),
+    )
     export.add_argument("--limit", type=int, default=20)
+
+    migrate = commands.add_parser(
+        "migrate-schema",
+        help="Preview or apply one backed-up Schema 1 to Schema 2 migration",
+    )
+    _plan_mode(migrate)
+    migrate.add_argument("--record-id")
+    migrate.add_argument("--backup-root")
+    migrate.add_argument("--plan-token")
+
+    curate = commands.add_parser(
+        "curate", help="Preview or apply one exact manager-approved curation"
+    )
+    _plan_mode(curate)
+    curate.add_argument("record_id")
+    curate.add_argument("--manager-approval", required=True)
+    curate.add_argument(
+        "--set-status", choices=("candidate", "approved", "rejected", "obsolete")
+    )
+    curate.add_argument("--validation")
+    curate.add_argument("--reason")
+    curate.add_argument("--relation", action="append")
+    curate.add_argument("--applicability-json")
+    curate.add_argument(
+        "--sensitivity", choices=("public", "internal", "restricted")
+    )
+    curate.add_argument(
+        "--transition-at",
+        help="Exact timezone-aware transition timestamp returned by dry-run",
+    )
+    curate.add_argument("--plan-token")
     return parser
 
 
@@ -2464,6 +3701,10 @@ def main(argv: list[str] | None = None) -> int:
                     else service.reindex_plan(args.limit, force=args.force)
                 )
             elif args.command == "add-candidate":
+                applicability_value = parse_json_object(
+                    args.applicability_json,
+                    label="applicability constraints",
+                ) or {}
                 result = service.add_candidate(
                     memory_type=args.memory_type,
                     summary=args.summary,
@@ -2476,6 +3717,12 @@ def main(argv: list[str] | None = None) -> int:
                     confidence=args.confidence,
                     project_id=args.project_id,
                     source=args.source,
+                    sensitivity=args.sensitivity,
+                    applicable_roles=args.applicable_role,
+                    applicability=applicability_value,
+                    valid_from=args.valid_from,
+                    valid_until=args.valid_until,
+                    relations=parse_relation_objects(args.relation),
                 )
             elif args.command == "approve":
                 result = service.approve(
@@ -2498,6 +3745,28 @@ def main(argv: list[str] | None = None) -> int:
                     keywords=args.keyword,
                     project_id=args.project_id,
                     limit=args.limit,
+                    role=args.role,
+                    applicability={
+                        key: str(value)
+                        for key, value in parse_pairs(args.applicability).items()
+                    },
+                    allowed_sensitivity=args.allow_sensitivity,
+                )
+            elif args.command == "query-context":
+                result = service.query_context(
+                    args.text,
+                    memory_type=args.memory_type,
+                    metadata=parse_pairs(args.metadata),
+                    keywords=args.keyword,
+                    project_id=args.project_id,
+                    limit=args.limit,
+                    role=args.role,
+                    applicability={
+                        key: str(value)
+                        for key, value in parse_pairs(args.applicability).items()
+                    },
+                    allowed_sensitivity=args.allow_sensitivity,
+                    at=args.at,
                 )
             elif args.command == "list":
                 if args.include_unapproved:
@@ -2525,10 +3794,56 @@ def main(argv: list[str] | None = None) -> int:
                         memory_type=args.memory_type,
                         project_id=args.project_id,
                         limit=args.limit,
+                        role=args.role,
+                        applicability={
+                            key: str(value)
+                            for key, value in parse_pairs(args.applicability).items()
+                        },
+                        allowed_sensitivity=args.allow_sensitivity,
                     ),
                     end="",
                 )
                 return 0
+            elif args.command == "migrate-schema":
+                backup_root = Path(args.backup_root) if args.backup_root else None
+                if args.apply:
+                    if not args.record_id or backup_root is None:
+                        raise OpcMemoryError(
+                            "migration apply requires --record-id and --backup-root"
+                        )
+                    result = service.backend.apply_schema_migration(
+                        record_id=args.record_id,
+                        backup_root=backup_root,
+                        plan_token=args.plan_token,
+                    )
+                else:
+                    result = service.backend.schema_migration_plan(
+                        record_id=args.record_id,
+                        backup_root=backup_root,
+                    )
+            elif args.command == "curate":
+                values = {
+                    "manager_approval": args.manager_approval,
+                    "set_status": args.set_status,
+                    "validation": args.validation,
+                    "reason": args.reason,
+                    "relations": parse_relation_objects(args.relation),
+                    "applicability": parse_json_object(
+                        args.applicability_json,
+                        label="applicability",
+                    ),
+                    "sensitivity": args.sensitivity,
+                    "transition_at": args.transition_at,
+                }
+                result = (
+                    service.backend.apply_curation(
+                        args.record_id,
+                        plan_token=args.plan_token,
+                        **values,
+                    )
+                    if args.apply
+                    else service.backend.curation_plan(args.record_id, **values)
+                )
             else:
                 parser.error(f"Unhandled command: {args.command}")
                 return 2

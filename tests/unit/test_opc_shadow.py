@@ -53,6 +53,7 @@ class ShadowEvaluationTests(unittest.TestCase):
         status: str = "candidate",
         scope: str = "project",
         project_id: str | None = None,
+        schema_version: int = 1,
     ) -> tuple[dict, str, str]:
         self.knowledge.mkdir()
         self.git("init", "-q")
@@ -67,7 +68,7 @@ class ShadowEvaluationTests(unittest.TestCase):
         path = self.knowledge / folder / f"{self.candidate_id}.json"
         path.parent.mkdir(parents=True)
         record = {
-            "schema_version": 1,
+            "schema_version": schema_version,
             "id": self.candidate_id,
             "type": "decision",
             "summary": "Synthetic candidate",
@@ -84,6 +85,20 @@ class ShadowEvaluationTests(unittest.TestCase):
         }
         if scope == "project":
             record["project_id"] = project_id or self.project_id
+        if schema_version == 2:
+            record.update(
+                {
+                    "sensitivity": "internal",
+                    "applicability": {
+                        "roles": [],
+                        "knowledge_types": ["decision"],
+                        "constraints": {},
+                        "valid_from": None,
+                        "valid_until": None,
+                    },
+                    "relations": [],
+                }
+            )
         if status == "obsolete":
             record["obsolete_at"] = "2026-01-02T00:00:00Z"
             record["obsolete_reason"] = "synthetic supersession"
@@ -264,6 +279,20 @@ class ShadowEvaluationTests(unittest.TestCase):
         self.assertEqual(result["recommendation"], "consider_for_separate_curation")
         self.assertFalse(result["governance"]["automatic_promotion"])
         self.assertFalse(result["confidence"]["approval_permission"])
+
+    def test_schema2_candidate_uses_same_read_only_shadow_boundary(self) -> None:
+        _, source, provenance = self.make_candidate(schema_version=2)
+        replay, raw = self.replay(source, provenance, treatment="beneficial")
+        preview, _ = shadow.build_preview(self.knowledge, replay, raw)
+        result = shadow.evaluate(
+            self.knowledge,
+            replay,
+            raw,
+            expected_preview_sha256=preview["preview_sha256"],
+        )
+        self.assertEqual(self.candidate_id, result["candidate"]["candidate_id"])
+        self.assertEqual("consider_for_separate_curation", result["recommendation"])
+        self.assertFalse(result["governance"]["canonical_knowledge_written"])
 
     def test_neutral_candidate_is_not_positive(self) -> None:
         result = self.run_result(treatment="neutral")

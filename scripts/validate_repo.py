@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -202,8 +203,9 @@ def validate_architecture_api_contract() -> None:
     ):
         require(token in architecture, f"architecture must map the v0.1 API: {token}")
     require(
-        "v0.1 尚未发布独立 `ContextPacket` 类型" in memory,
-        "memory architecture must label ContextPacket as a conceptual target",
+        "当前仍未发布独立 `ContextPacket` 类" in memory
+        and "`FileGitBackend.query_context(...)`" in memory,
+        "memory architecture must map the governed ContextPacket surface",
     )
     require(
         "health=unavailable-file-fallback" in memory and "`not_installed`" not in memory,
@@ -530,6 +532,99 @@ def validate_shadow_evaluation_contract() -> None:
     )
 
 
+def validate_knowledge_governance_contract() -> None:
+    """Bind the published knowledge contract, runtime, schema, and ADR."""
+    asset_root = PLUGIN / "assets" / "knowledge"
+    contract_path = asset_root / "knowledge-governance-contract.v1.json"
+    schema_path = PLUGIN / "assets" / "knowledge-template" / "schemas" / "experience.schema.json"
+    runtime_path = PLUGIN / "scripts" / "opc_governance.py"
+    adr_path = ROOT / "docs" / "adr" / "0011-deterministic-knowledge-governance.md"
+    guide_path = ROOT / "docs" / "knowledge-governance.md"
+    for path in (contract_path, schema_path, runtime_path, adr_path, guide_path):
+        require(path.is_file(), f"missing knowledge-governance artifact: {path}")
+
+    spec = importlib.util.spec_from_file_location("opc_governance_contract", runtime_path)
+    require(spec is not None and spec.loader is not None, "cannot load governance runtime")
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    contract = load_json(contract_path)
+    try:
+        runtime.validate_contract(contract)
+    except runtime.GovernanceError as exc:
+        raise ValueError(str(exc)) from exc
+
+    schema = load_json(schema_path)
+    require(
+        schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema"
+        and schema.get("$id") == "urn:codex-opc-team:schema:experience:v2",
+        "knowledge record schema must publish Draft 2020-12 Schema 2",
+    )
+    versions = {
+        branch.get("allOf", [{}, {}])[1]
+        .get("properties", {})
+        .get("schema_version", {})
+        .get("const")
+        for branch in schema.get("oneOf", [])
+        if len(branch.get("allOf", [])) == 2
+    }
+    require(versions == {1, 2}, "knowledge schema must preserve Schema 1/2 readability")
+    require(
+        contract.get("ranking_boundary")
+        == {
+            "file_git_authority": True,
+            "provider_is_candidate_source_only": True,
+            "provider_score_can_override_hard_filter": False,
+            "provider_score_can_override_canonical_order": False,
+        },
+        "provider ranking boundary must preserve File/Git authority",
+    )
+    require(
+        contract.get("conflict_policy")
+        == {
+            "unresolved_records_enter_context": False,
+            "both_canonical_citations_required": True,
+            "body_in_diagnostics": False,
+            "manager_curation_required": True,
+        },
+        "unresolved conflict policy must withhold both bodies",
+    )
+    require(
+        set(contract.get("fail_safe_relation_reasons", []))
+        == {
+            "relation_target_missing",
+            "relation_target_ineligible",
+            "relation_cycle",
+            "relations_invalid",
+        },
+        "relation failure policy is incomplete",
+    )
+    require(
+        "record_invalid" in set(contract.get("excluded_reason_codes", [])),
+        "invalid canonical records require a redacted omission reason",
+    )
+    governance = contract.get("governance", {})
+    require(
+        all(
+            governance.get(key) is True
+            for key in (
+                "migration_inventory_unique_across_statuses",
+                "relation_graph_after_hard_filters",
+                "relation_cycle_detection_iterative_and_bounded",
+                "relation_effects_order_independent",
+                "curation_preview_binds_final_timestamp_and_bytes",
+                "timezone_aware_evaluation_required",
+            )
+        ),
+        "knowledge governance safety invariants are incomplete",
+    )
+    require(
+        "knowledge-governance-contract.v1.json" in guide_path.read_text(encoding="utf-8")
+        and "Schema 1" in guide_path.read_text(encoding="utf-8")
+        and "Schema 2" in guide_path.read_text(encoding="utf-8"),
+        "knowledge-governance guide must document the contract and migration",
+    )
+
+
 def main() -> int:
     checks = [
         validate_manifest,
@@ -543,6 +638,7 @@ def main() -> int:
         validate_evaluation_baseline,
         validate_structured_feedback_contract,
         validate_shadow_evaluation_contract,
+        validate_knowledge_governance_contract,
         validate_markdown_links,
     ]
     try:
