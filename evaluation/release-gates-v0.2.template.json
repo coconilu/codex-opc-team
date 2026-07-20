@@ -1,0 +1,17 @@
+{
+  "$instructions": "Copy outside this public repository after the exact release commit exists. Replace nulls with hashes of private/local gate logs. This intentionally invalid template is not release evidence.",
+  "schema_version": "TEMPLATE-NOT-EVIDENCE",
+  "contract_version": "opc-v0.2-release-contract-v1",
+  "release_commit": null,
+  "private_pilot_sha256": null,
+  "checks": {
+    "windows_ci": null,
+    "linux_ci": null,
+    "repository_validation": null,
+    "privacy_current_and_history": null,
+    "official_plugin_validator": null,
+    "all_skill_quick_validators": null,
+    "independent_release_qa": null,
+    "rollback_evidence": null
+  }
+}

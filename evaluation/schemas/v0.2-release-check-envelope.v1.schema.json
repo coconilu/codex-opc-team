@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:evaluation:v0.2-release-check-envelope:v1",
+  "title": "OPC v0.2 exact release check evidence attestation",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract_version",
+    "evidence_kind",
+    "release_commit",
+    "private_pilot_sha256",
+    "status",
+    "independent_from_implementer",
+    "source_ref",
+    "source_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "opc-v0.2-release-check-envelope-v1"},
+    "contract_version": {"const": "opc-v0.2-release-contract-v1"},
+    "evidence_kind": {
+      "enum": [
+        "windows_ci",
+        "linux_ci",
+        "repository_validation",
+        "privacy_current_and_history",
+        "official_plugin_validator",
+        "all_skill_quick_validators",
+        "independent_release_qa",
+        "rollback_evidence"
+      ]
+    },
+    "release_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "private_pilot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"const": "pass"},
+    "independent_from_implementer": {"type": "boolean"},
+    "source_ref": {"type": "string", "maxLength": 240, "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))evidence/[A-Za-z0-9._/-]+$"},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

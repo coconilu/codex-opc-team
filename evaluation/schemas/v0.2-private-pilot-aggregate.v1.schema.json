@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:evaluation:v0.2-private-pilot-aggregate:v1",
+  "title": "OPC v0.2 representative private pilot aggregate",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract_version",
+    "pilot_id",
+    "evidence_class",
+    "task_count",
+    "task_selection",
+    "arms",
+    "capability_coverage",
+    "provider_fallback",
+    "attestations",
+    "confounders"
+  ],
+  "properties": {
+    "schema_version": {"const": "opc-v0.2-private-pilot-aggregate-v1"},
+    "contract_version": {"const": "opc-v0.2-release-contract-v1"},
+    "pilot_id": {"type": "string", "pattern": "^pilot-[0-9a-f]{12}$"},
+    "evidence_class": {"const": "representative-private-pilot"},
+    "task_count": {"type": "integer", "minimum": 3, "maximum": 5},
+    "task_selection": {
+      "type": "object",
+      "required": ["fixed_before_execution", "risk_class_count", "work_type_count"],
+      "properties": {
+        "fixed_before_execution": {"const": true},
+        "risk_class_count": {"type": "integer", "minimum": 2, "maximum": 5},
+        "work_type_count": {"type": "integer", "minimum": 2, "maximum": 5}
+      },
+      "additionalProperties": false
+    },
+    "arms": {
+      "type": "object",
+      "required": ["same_evaluation_contract", "control", "treatment"],
+      "properties": {
+        "same_evaluation_contract": {"const": "opc-evaluation-contract-v1"},
+        "control": {"$ref": "#/$defs/arm"},
+        "treatment": {"$ref": "#/$defs/arm"}
+      },
+      "additionalProperties": false
+    },
+    "capability_coverage": {
+      "type": "object",
+      "required": [
+        "context_packets",
+        "structured_feedback_records",
+        "lineage_records",
+        "shadow_pairs",
+        "conflicts_seeded",
+        "conflicts_rejected",
+        "evolution_pilot_cases",
+        "rollback_drills",
+        "exact_rollback_restores"
+      ],
+      "properties": {
+        "context_packets": {"type": "integer", "minimum": 3, "maximum": 5},
+        "structured_feedback_records": {"type": "integer", "minimum": 3, "maximum": 5},
+        "lineage_records": {"type": "integer", "minimum": 3, "maximum": 5},
+        "shadow_pairs": {"type": "integer", "minimum": 3, "maximum": 5},
+        "conflicts_seeded": {"type": "integer", "minimum": 1, "maximum": 5},
+        "conflicts_rejected": {"type": "integer", "minimum": 1, "maximum": 5},
+        "evolution_pilot_cases": {"type": "integer", "minimum": 3, "maximum": 5},
+        "rollback_drills": {"type": "integer", "minimum": 1, "maximum": 5},
+        "exact_rollback_restores": {"type": "integer", "minimum": 1, "maximum": 5}
+      },
+      "additionalProperties": false
+    },
+    "provider_fallback": {
+      "type": "object",
+      "required": ["disabled_core_pass", "delete_rebuild_pass", "canonical_digest_unchanged"],
+      "properties": {
+        "disabled_core_pass": {"const": true},
+        "delete_rebuild_pass": {"const": true},
+        "canonical_digest_unchanged": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "attestations": {
+      "type": "object",
+      "required": ["manager_approval", "independent_qa", "shadow_evaluation", "capability_evolution"],
+      "properties": {
+        "manager_approval": {"$ref": "#/$defs/approvedAttestation"},
+        "independent_qa": {"$ref": "#/$defs/qaAttestation"},
+        "shadow_evaluation": {"$ref": "#/$defs/beneficialAttestation"},
+        "capability_evolution": {"$ref": "#/$defs/beneficialAttestation"}
+      },
+      "additionalProperties": false
+    },
+    "confounders": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"}
+    }
+  },
+  "$defs": {
+    "counts": {
+      "type": "object",
+      "required": [
+        "manager_interventions",
+        "eligible_manager_decisions",
+        "known_defects",
+        "qa_caught_defects",
+        "rework_loops",
+        "valid_reuse_opportunities",
+        "valid_reuses",
+        "accepted_recalls",
+        "false_recall_acceptances",
+        "scope_leakage_acceptances",
+        "stale_obsolete_acceptances",
+        "privacy_failures"
+      ],
+      "properties": {
+        "manager_interventions": {"type": "integer", "minimum": 0},
+        "eligible_manager_decisions": {"type": "integer", "minimum": 1},
+        "known_defects": {"type": "integer", "minimum": 1},
+        "qa_caught_defects": {"type": "integer", "minimum": 0},
+        "rework_loops": {"type": "integer", "minimum": 0},
+        "valid_reuse_opportunities": {"type": "integer", "minimum": 1},
+        "valid_reuses": {"type": "integer", "minimum": 0},
+        "accepted_recalls": {"type": "integer", "minimum": 1},
+        "false_recall_acceptances": {"type": "integer", "minimum": 0},
+        "scope_leakage_acceptances": {"const": 0},
+        "stale_obsolete_acceptances": {"const": 0},
+        "privacy_failures": {"const": 0}
+      },
+      "additionalProperties": false
+    },
+    "integerDistribution": {
+      "type": "object",
+      "required": ["total", "median", "p95_nearest_rank"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 1},
+        "median": {"type": "number", "exclusiveMinimum": 0, "multipleOf": 0.5},
+        "p95_nearest_rank": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "numberDistribution": {
+      "type": "object",
+      "required": ["total", "median", "p95_nearest_rank"],
+      "properties": {
+        "total": {"type": "number", "exclusiveMinimum": 0},
+        "median": {"type": "number", "exclusiveMinimum": 0},
+        "p95_nearest_rank": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "arm": {
+      "type": "object",
+      "required": ["counts", "context_tokens", "latency_ms"],
+      "properties": {
+        "counts": {"$ref": "#/$defs/counts"},
+        "context_tokens": {"$ref": "#/$defs/integerDistribution"},
+        "latency_ms": {"$ref": "#/$defs/numberDistribution"}
+      },
+      "additionalProperties": false
+    },
+    "evidenceRef": {
+      "type": "object",
+      "required": ["ref", "sha256"],
+      "properties": {
+        "ref": {"type": "string", "maxLength": 240, "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))\\.opc/[A-Za-z0-9._/-]+$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "approvedAttestation": {
+      "type": "object",
+      "required": ["decision", "evidence"],
+      "properties": {
+        "decision": {"const": "approved"},
+        "evidence": {"$ref": "#/$defs/evidenceRef"}
+      },
+      "additionalProperties": false
+    },
+    "qaAttestation": {
+      "type": "object",
+      "required": ["decision", "independent_from_implementer", "evidence"],
+      "properties": {
+        "decision": {"const": "pass"},
+        "independent_from_implementer": {"const": true},
+        "evidence": {"$ref": "#/$defs/evidenceRef"}
+      },
+      "additionalProperties": false
+    },
+    "beneficialAttestation": {
+      "type": "object",
+      "required": ["decision", "safety", "evidence"],
+      "properties": {
+        "decision": {"const": "beneficial"},
+        "safety": {"const": "safe"},
+        "evidence": {"$ref": "#/$defs/evidenceRef"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

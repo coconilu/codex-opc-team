@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-opc-team:evaluation:v0.2-private-evidence-envelope:v1",
+  "title": "OPC v0.2 private pilot evidence attestation",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract_version",
+    "evidence_kind",
+    "pilot_id",
+    "pilot_core_sha256",
+    "task_count",
+    "decision",
+    "safety",
+    "independent_from_implementer",
+    "source_ref",
+    "source_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "opc-v0.2-private-evidence-envelope-v1"},
+    "contract_version": {"const": "opc-v0.2-release-contract-v1"},
+    "evidence_kind": {"enum": ["manager_approval", "independent_qa", "shadow_evaluation", "capability_evolution"]},
+    "pilot_id": {"type": "string", "pattern": "^pilot-[0-9a-f]{12}$"},
+    "pilot_core_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "task_count": {"type": "integer", "minimum": 3, "maximum": 5},
+    "decision": {"enum": ["approved", "pass", "beneficial"]},
+    "safety": {"enum": ["safe", "not_applicable"]},
+    "independent_from_implementer": {"type": "boolean"},
+    "source_ref": {"type": "string", "maxLength": 240, "pattern": "^(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))\\.opc/[A-Za-z0-9._/-]+$"},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}
