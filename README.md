@@ -55,6 +55,79 @@ codex plugin add codex-opc-team@opc
 
 The default File/Git memory mode has no Mem0 dependency. Mem0 setup is optional and must degrade safely when unavailable. Detailed install, upgrade, removal, and data-retention behavior is documented in [installation and distribution](docs/installation-and-distribution.md); release-specific compatibility, migration, rollback, and evidence are in the [v0.1.0 release notes](docs/release-notes-v0.1.0.en.md).
 
+## Quick start after installation
+
+After installing, upgrading, or rolling back the plugin, start a new Codex task so the plugin catalog is reloaded. Most work should begin with `$opc-manager`; choose another Skill when you only need one bounded step.
+
+| What you want to do | Entry point | What you get |
+|---|---|---|
+| Deliver a feature, fix, or small project from idea to an experience-ready result | `$opc-manager` | Goal alignment, project contract, role delegation, independent QA, manager handoff, and governed retrospective |
+| Onboard an existing repository without starting implementation | `$opc-project-bootstrap` | Minimal, versionable project metadata, brief, and acceptance contract |
+| Independently validate an existing implementation | `$opc-qa-gate` | Criterion-by-criterion evidence; failures return a reproducible repair contract instead of a weak PASS |
+| Extract reusable candidates from completed or failed work | `$opc-retrospective` | Source- and evidence-backed experience candidates that are not automatically promoted |
+| Decide whether a candidate is safe and reusable | `$opc-memory-curator` | Scope, conflict, privacy, replay, and rollback checks followed by an explicit manager approval request |
+| Inspect or manage the recall layer | `$opc-memory` | File/Git status and Doctor; optional Mem0 setup, rebuild, and disable operations use preview before authorization |
+
+The first `$opc-manager` run performs a Doctor check. If the private File/Git knowledge repository is not initialized, it shows the target directory and explains that initialization creates an independent private Git repository with a baseline commit. Nothing is written until you explicitly confirm, and Mem0 is not enabled as part of that initialization.
+
+### Who owns which decisions
+
+| Manager (you) | OPC team |
+|---|---|
+| Decide product direction, scope changes, risk tradeoffs, and whether to continue | Inspect the real repository and turn the request into scope, assumptions, non-goals, and acceptance criteria |
+| Explicitly authorize commits, pushes, deployments, external messages, credentials, purchases, or destructive actions | Delegate roles, implement, test, and repair within the authorized boundary |
+| Experience independently accepted results and approve or reject knowledge promotion | Validate with independent evidence; implementer self-report never counts as QA PASS |
+
+### Copyable examples
+
+The names and data below are synthetic. Open a new Codex task in the target repository and adapt the example to your real requirements.
+
+**Example 1: deliver a feature end to end**
+
+```text
+$opc-manager
+Take ownership of the current repository and deliver “add theme selection to the settings page.”
+
+Goal: users can choose light, dark, or system mode, and the choice survives a refresh.
+Flow: align the goal with me and create the project contract before delegating implementation; use independent QA after implementation, hand off only after PASS, and finish with a governed retrospective candidate.
+Acceptance: all three options work in the real UI; refresh preserves the correct state; existing tests pass; the new behavior has automated coverage; independent QA passes the same acceptance matrix.
+Authority boundary: you may edit this repository and run local tests; do not commit, push, deploy, use real accounts, or change global Codex configuration unless I authorize it separately.
+Non-goals: do not redesign the entire design system or add cloud synchronization.
+Handoff: explain what changed, how I can try it, verification evidence, known limitations, and decisions that still require me.
+```
+
+**Example 2: onboard an existing repository**
+
+```text
+$opc-project-bootstrap
+Onboard the current existing repository into the OPC team.
+
+Goal: derive a minimal project contract from the real README, AGENTS.md, manifests, and test commands.
+Acceptance: create versionable .opc/project.json, .opc/project.md, and .opc/acceptance.md; keep runtime files ignored; preserve the existing AGENTS.md and working-tree changes.
+Authority boundary: create only the minimum onboarding files; ask before changing AGENTS.md; do not start implementation, commit, or push.
+Non-goals: do not refactor source code or create a new service, database, or agent runtime.
+Handoff: list created files, inferred verification commands, missing information, and whether the repository is ready for $opc-manager.
+```
+
+**Example 3: fix a defect, independently accept it, and retrospect**
+
+```text
+$opc-manager
+Fix “exports fail on Windows when the filename contains a colon,” then complete independent acceptance and a retrospective.
+
+Goal: Windows exports produce legal, traceable filenames without regressing other platforms.
+Acceptance: reproduce the original failure first; cover colons, reserved characters, duplicate names, and ordinary names; run targeted tests plus every repository-required gate; use a QA role independent from implementation, and if it fails, repair and rerun the unchanged matrix.
+Authority boundary: you may edit and test this repository; do not read real user files, commit, push, or publish.
+Non-goals: do not change the export format or spread platform-specific rules into unrelated modules.
+Handoff: provide reproduction and repair evidence, the QA verdict, and a trial path; the retrospective may only create candidates and must not auto-approve or rewrite organizational rules.
+```
+
+Typical versionable project artifacts are `.opc/project.json`, `.opc/project.md`, `.opc/acceptance.md`, and, when useful, evidence under `.opc/qa/`. Active-run markers and Hook fallback events are local runtime state and must not be published as organizational knowledge.
+
+These entry points describe the six canonical Skills in stable `v0.1.0`. Mem0 is only an optional, rebuildable recall index. `v0.1.1-rc.1` remains a pre-release candidate, and v0.2 components on `main` are not the same as released stable capabilities. The project has no always-on autonomous service: experience is never auto-promoted, and the plugin does not silently commit, deploy, or change global Codex configuration.
+
+Learn more: [installation and distribution](docs/installation-and-distribution.md) · [architecture](docs/architecture.md) · [testing and acceptance](docs/testing-and-acceptance.md) · [memory architecture](docs/memory-architecture.md) · [knowledge governance](docs/knowledge-governance.md)
+
 ## Public code, private knowledge
 
 This repository contains plugin behavior, schemas, empty templates, tests, and documentation. It must not contain a user's manager profile, project history, approved organizational experience, raw conversations, credentials, local paths, or runtime identifiers.
