@@ -70,6 +70,16 @@ After installing, upgrading, or rolling back the plugin, start a new Codex task 
 
 The first `$opc-manager` run performs a Doctor check. If the private File/Git knowledge repository is not initialized, it shows the target directory and explains that initialization creates an independent private Git repository with a baseline commit. Nothing is written until you explicitly confirm, and Mem0 is not enabled as part of that initialization.
 
+### Development-only local Dashboard
+
+The `main` branch includes an explicitly started, loopback-only, read-only Dashboard for manager visibility. It is not part of stable `v0.1.0`, does not scan for projects, and has no approval or promotion actions:
+
+```powershell
+python plugins/codex-opc-team/scripts/opc_dashboard.py --project-root .
+```
+
+The command prints the local URL and attempts to open it in the default browser; press `Ctrl+C` to stop. See [OPC Dashboard](docs/opc-dashboard.md) for its data, privacy, and degradation boundaries.
+
 ### Who owns which decisions
 
 | Manager (you) | OPC team |
@@ -163,6 +173,7 @@ Capability evolution is an evidence-gated private lifecycle for versioned roles,
 | [Hierarchical recall](docs/hierarchical-recall.md) | Private L0/L1 navigation, canonical L2 validation, ContextPacket/RecallTrace, and flat comparison |
 | [Knowledge lineage](docs/knowledge-lineage.md) | Private role/step knowledge states, portable outcome links, current-HEAD revalidation, and non-causal reports |
 | [Capability evolution](docs/capability-evolution.md) | Versioned role/Skill/policy pilots, evidence gates, one-path Git handoff, observation, and rollback |
+| [OPC Dashboard](docs/opc-dashboard.md) | Explicitly started local read-only manager view, data semantics, security boundaries, and limitations |
 | [v0.2 release readiness](docs/release-readiness-v0.2.0.md) | Public synthetic evidence, private 3–5 task pilot protocol, exact-commit gates, blockers, and non-claims |
 | [Roadmap](docs/roadmap.md) | Planned delivery stages |
 
