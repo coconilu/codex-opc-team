@@ -75,7 +75,7 @@
 - 经理反馈与真实产品指标的结构化关联，以及角色/步骤知识使用链路（v1 已实现；仅 association/evidence，不证明因果）；
 - 角色、Skill 与组织策略的版本化候选、同合同 paired pilot、经理/独立 QA 门禁、单路径 Git 晋升、观察与回滚（v1 已实现；不自动 stage/commit，不改全局 Codex 配置）；
 
-v0.2 release-level contract、公开 synthetic runner 和严格私有 aggregate/envelope Gate 已实现，当前状态明确为 `BLOCKED`。退出 R4 还必须完成[代表性私有 3–5 task pilot 与 exact release commit 验证](release-readiness-v0.2.0.md)；公开 fixture、模板、Developer 自测或单项 token/latency 改善都不能替代。知识导出、合并和审计 UI 仍是后续候选，不属于 v0.2 发布阻断项。
+v0.2 release-level contract、公开 synthetic runner 和严格私有 aggregate/envelope Gate 已实现，当前状态明确为 `BLOCKED`。退出 R4 还必须完成[代表性私有 3–5 task pilot 与 exact release commit 验证](release-readiness-v0.2.0.md)；公开 fixture、模板、Developer 自测或单项 token/latency 改善都不能替代。`main` 已提供显式启动的本地只读 OPC Dashboard，但写操作、知识导出、合并和远程访问仍是后续候选，不属于 v0.2 发布阻断项。
 
 这些能力仍遵守“不得自动晋升”的基础决策。任何自动化批准提议都需要新的 ADR 和安全评估。
 

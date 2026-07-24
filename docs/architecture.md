@@ -143,6 +143,7 @@ sequenceDiagram
 | 项目运行标记和契约 | 项目自身 `.opc` 或约定目录 | 随项目版本控制策略管理 |
 | 组织知识 | 用户配置的 `OPC_KNOWLEDGE_HOME` | 独立于插件，用户拥有 |
 | Mem0 索引 | 用户私有数据目录 | 可删除、可重建，不是权威源 |
+| Dashboard 展示状态 | 进程内即时只读投影，不持久化 | 关闭本地进程即消失，不成为事实来源 |
 | 原始运行日志 | 默认最小化并设置保留策略 | 不进入公共仓库和知识层 |
 
 具体路径应由安装器和环境解析，代码和文档示例不得硬编码作者本机路径。
@@ -184,6 +185,7 @@ v0.1 以 `plugins/codex-opc-team/scripts/opc_memory.py` 为真实可调用契约
 | Mem0 实现 | `Mem0Provider.add(...)` / `search(...)` |
 | 显式索引计划和写入 | `MemoryService.reindex_plan(...)` / `reindex_apply(...)` |
 | 健康与运行状态 | `MemoryService.status()` / `doctor()` |
+| 本地只读经理视图 | `opc_dashboard.py` 的固定字段 `/api/snapshot`；loopback-only，不提供治理写操作 |
 | 候选只读回放与 control/treatment 证据 | `opc_shadow.py preview` / `evaluate` / `report`；不属于 `MemoryService` 状态迁移 |
 | 角色/Skill/组织策略版本生命周期 | `opc_evolution.py` 的 private proposal/pilot/evaluate/transition/confirm；只产生一个 unstaged allowlisted diff，不修改全局 Codex 配置 |
 

@@ -1,0 +1,96 @@
+{
+  "schema_version": "opc-dashboard.snapshot.v1",
+  "generated_at": "2026-07-23T06:00:00Z",
+  "mode": "demo",
+  "summary": {
+    "active_projects": 2,
+    "pending_acceptance": 3,
+    "candidates": 4,
+    "published": 12
+  },
+  "projects": [
+    {
+      "id": "synthetic-dashboard",
+      "name": "本地 OPC Dashboard",
+      "source_state": "available",
+      "run": {
+        "title": "实现本地只读管理台",
+        "status": "validating",
+        "active": true,
+        "updated_at": "2026-07-23T05:45:00Z"
+      },
+      "acceptance": {
+        "passed": 5,
+        "total": 7,
+        "state": "available"
+      },
+      "feedback_status": "available",
+      "lineage_status": "available"
+    },
+    {
+      "id": "synthetic-memory",
+      "name": "组织知识治理",
+      "source_state": "degraded",
+      "run": {
+        "title": "复核候选经验",
+        "status": "planned",
+        "active": true,
+        "updated_at": "2026-07-23T05:20:00Z"
+      },
+      "acceptance": {
+        "passed": 2,
+        "total": 3,
+        "state": "available"
+      },
+      "feedback_status": "unavailable",
+      "lineage_status": "degraded"
+    }
+  ],
+  "knowledge": {
+    "candidate": 4,
+    "approved_uncommitted": 1,
+    "published": 12,
+    "rejected": 2,
+    "obsolete": 3,
+    "state": "available"
+  },
+  "manager_queue": [
+    {
+      "id": "knowledge-uncommitted",
+      "type": "knowledge_publish",
+      "severity": "high",
+      "title": "1 条已批准知识尚未提交",
+      "description": "批准状态尚无当前 Git HEAD provenance。",
+      "project_id": null,
+      "next_step": "复核精确变更后提交规范知识仓库。"
+    },
+    {
+      "id": "knowledge-candidates",
+      "type": "knowledge_review",
+      "severity": "medium",
+      "title": "4 条经验候选待审",
+      "description": "候选经验不会自动成为组织知识。",
+      "project_id": null,
+      "next_step": "核对证据、适用范围与冲突后再决定是否批准。"
+    }
+  ],
+  "health": {
+    "file_git": {
+      "state": "degraded",
+      "label": "File/Git 需关注",
+      "detail": "1 条已批准知识尚未获得当前 Git HEAD provenance。"
+    },
+    "mem0": {
+      "state": "disabled",
+      "label": "Mem0 已停用",
+      "detail": "当前使用 File/Git 检索，功能可正常降级。"
+    }
+  },
+  "warnings": [
+    {
+      "code": "SYNTHETIC_DATA",
+      "severity": "info",
+      "message": "当前为明确启用的合成演示数据，不代表真实组织状态。"
+    }
+  ]
+}

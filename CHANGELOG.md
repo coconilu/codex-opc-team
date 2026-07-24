@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added an explicitly started, loopback-only, read-only OPC Dashboard for project status, acceptance, knowledge governance, manager queue, lineage evidence, and provider health.
+- Added fixed-field privacy projection, safe optional-provider degradation, synthetic demo data, and local server security gates without introducing Node, a database, or remote assets.
 - Added evidence-gated capability evolution for versioned repository roles, Skills, and organization policies, with exact Git provenance, paired bounded pilots, manager and independent-QA approvals, one-path unstaged promotion/rollback, explicit commit confirmation, v0.1 compatibility, and private auditable history.
 - Added strict, bounded private knowledge-use lineage with exact Packet/Trace and canonical revision identities, deterministic role/step states, explicit provider degradation, portable late evidence associations, current-HEAD report revalidation, and no causal or promotion authority.
 - Added zero-dependency hierarchical File/Git recall with private rebuildable L0/L1 navigation, bounded current-HEAD L2 reads, strict ContextPacket/RecallTrace contracts, flat/provider degradation, and a versioned public flat-vs-hierarchical evaluation.
