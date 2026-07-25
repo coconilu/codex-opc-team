@@ -21,6 +21,7 @@ spec = importlib.util.spec_from_file_location("opc_dashboard", SCRIPTS / "opc_da
 opc_dashboard = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(opc_dashboard)
+import opc_snapshot_service  # noqa: E402
 
 
 STAMP = "2026-07-23T05:00:00Z"
@@ -144,15 +145,15 @@ class SnapshotTests(unittest.TestCase):
             knowledge.mkdir()
             data.mkdir()
             with (
-                mock.patch.object(opc_dashboard, "FileGitBackend", FakeBackend),
-                mock.patch.object(opc_dashboard, "MemoryService", FakeService),
+                mock.patch.object(opc_snapshot_service, "FileGitBackend", FakeBackend),
+                mock.patch.object(opc_snapshot_service, "MemoryService", FakeService),
                 mock.patch.object(
-                    opc_dashboard,
+                    opc_snapshot_service,
                     "read_feedback",
                     return_value={"structured_feedback": {"events": []}},
                 ),
                 mock.patch.object(
-                    opc_dashboard,
+                    opc_snapshot_service,
                     "build_view",
                     return_value={"lineage_status": "available"},
                 ),
@@ -186,12 +187,12 @@ class SnapshotTests(unittest.TestCase):
             project = ProjectFixture(base / "project")
             with (
                 mock.patch.object(
-                    opc_dashboard,
+                    opc_snapshot_service,
                     "read_feedback",
                     return_value={"structured_feedback": None},
                 ),
                 mock.patch.object(
-                    opc_dashboard,
+                    opc_snapshot_service,
                     "build_view",
                     return_value={"lineage_status": "unavailable"},
                 ),
@@ -218,8 +219,8 @@ class SnapshotTests(unittest.TestCase):
             (project / ".opc").mkdir(parents=True)
             (project / ".opc" / "project.json").write_text("{bad", encoding="utf-8")
             with (
-                mock.patch.object(opc_dashboard, "FileGitBackend", FakeBackend),
-                mock.patch.object(opc_dashboard, "MemoryService", FakeService),
+                mock.patch.object(opc_snapshot_service, "FileGitBackend", FakeBackend),
+                mock.patch.object(opc_snapshot_service, "MemoryService", FakeService),
             ):
                 snapshot = opc_dashboard.aggregate_snapshot(
                     [project],
@@ -257,15 +258,15 @@ class SnapshotTests(unittest.TestCase):
             run["active"] = False
             run_path.write_text(json.dumps(run), encoding="utf-8")
             with (
-                mock.patch.object(opc_dashboard, "FileGitBackend", FakeBackend),
-                mock.patch.object(opc_dashboard, "MemoryService", FakeService),
+                mock.patch.object(opc_snapshot_service, "FileGitBackend", FakeBackend),
+                mock.patch.object(opc_snapshot_service, "MemoryService", FakeService),
                 mock.patch.object(
-                    opc_dashboard,
+                    opc_snapshot_service,
                     "read_feedback",
                     return_value={"structured_feedback": None},
                 ),
                 mock.patch.object(
-                    opc_dashboard,
+                    opc_snapshot_service,
                     "build_view",
                     return_value={"lineage_status": "unavailable"},
                 ),
@@ -385,7 +386,7 @@ class StableReadTests(unittest.TestCase):
                 os.utime(path, ns=(1_000_000_000, 1_000_000_000))
 
         with (
-            mock.patch.object(opc_dashboard, "_read_checkpoint", side_effect=mutate),
+            mock.patch.object(opc_snapshot_service, "_read_checkpoint", side_effect=mutate),
             self.assertRaises(opc_dashboard.DashboardError) as caught,
         ):
             opc_dashboard._read_stable_bytes(
@@ -558,7 +559,7 @@ class ServerConfigurationTests(unittest.TestCase):
                 return_value=Path("private-data"),
             ) as data_root,
             mock.patch.object(
-                opc_dashboard,
+                opc_snapshot_service,
                 "aggregate_snapshot",
                 return_value=opc_dashboard.load_demo_snapshot(),
             ) as aggregate,

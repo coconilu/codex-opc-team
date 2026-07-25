@@ -20,5 +20,6 @@ ADR 用于保存影响长期架构、安全边界或用户数据的决策。每�
 | [0014](0014-evidence-gated-capability-evolution.md) | Accepted | 能力版本通过证据门禁、bounded pilot 与单路径 Git 交接晋升或回滚 |
 | [0015](0015-release-evidence-separates-public-fixtures-and-private-pilots.md) | Accepted | v0.2 发布证据严格分离公开 fixture、私有 pilot 与 exact-commit Gate |
 | [0016](0016-local-read-only-opc-dashboard.md) | Accepted | OPC Dashboard 采用显式启动、loopback-only、固定字段投影的本地只读架构 |
+| [0017](0017-independent-local-opc-app-control-plane.md) | Accepted | 独立 OPC App 只扩展本地控制平面，不成为 Agent Harness 或第二事实来源 |
 
 新 ADR 使用递增四位编号，至少包含：Status、Date、Context、Decision、Consequences、Rejected Alternatives。

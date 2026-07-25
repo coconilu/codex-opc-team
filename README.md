@@ -70,7 +70,25 @@ After installing, upgrading, or rolling back the plugin, start a new Codex task 
 
 The first `$opc-manager` run performs a Doctor check. If the private File/Git knowledge repository is not initialized, it shows the target directory and explains that initialization creates an independent private Git repository with a baseline commit. Nothing is written until you explicitly confirm, and Mem0 is not enabled as part of that initialization.
 
-### Development-only local Dashboard
+### Development-only independent OPC App
+
+The `main` branch includes an independently installable, explicitly started,
+loopback-only OPC App. It can run without an active Agent session, but it is a
+read-only control plane rather than an Agent harness. It never scans for
+projects and writes only its own explicit-project registry:
+
+```text
+python plugins/codex-opc-team/scripts/opc_app.py --demo
+python scripts/opc_app_admin.py install
+```
+
+Administration previews by default. After an explicit `--apply`, launch from
+the reported Windows or Linux entry. App update, rollback, and uninstall
+preserve project `.opc`, File/Git knowledge, Git history, user configuration,
+and Mem0 data. See [OPC App](docs/opc-app.en.md) for the product, installation,
+privacy, and recovery contract.
+
+### Compatible local Dashboard
 
 The `main` branch includes an explicitly started, loopback-only, read-only Dashboard for manager visibility. It is not part of stable `v0.1.0`, does not scan for projects, and has no approval or promotion actions:
 
@@ -174,6 +192,7 @@ Capability evolution is an evidence-gated private lifecycle for versioned roles,
 | [Knowledge lineage](docs/knowledge-lineage.md) | Private role/step knowledge states, portable outcome links, current-HEAD revalidation, and non-causal reports |
 | [Capability evolution](docs/capability-evolution.md) | Versioned role/Skill/policy pilots, evidence gates, one-path Git handoff, observation, and rollback |
 | [OPC Dashboard](docs/opc-dashboard.md) | Explicitly started local read-only manager view, data semantics, security boundaries, and limitations |
+| [OPC App](docs/opc-app.en.md) | Independent local control plane, App-owned settings, install lifecycle, privacy, and Dashboard compatibility |
 | [v0.2 release readiness](docs/release-readiness-v0.2.0.md) | Public synthetic evidence, private 3–5 task pilot protocol, exact-commit gates, blockers, and non-claims |
 | [Roadmap](docs/roadmap.md) | Planned delivery stages |
 

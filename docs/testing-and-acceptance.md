@@ -146,6 +146,19 @@ G5/G7 的发布证据必须使用两个不同的固定 Ref；本地路径对同�
 | 体验 | 原生桌面视口与窄屏可读；键盘可操作；经理队列说明下一步但不执行写操作 |
 | 证据 | 单元测试、完整仓库门禁、官方 Plugin/Skill 校验、真实浏览器截图与独立 QA 全部通过 |
 
+### OPC App 增量验收
+
+| 维度 | 通过条件 |
+|---|---|
+| 独立生命周期 | 从安装后的 Windows/Linux 入口启动；不要求 Agent 会话；停止后没有必须常驻 Agent 进程 |
+| 旧入口兼容 | 不安装/不启动 App 时 Plugin、Skills、Hook、脚本和旧 Dashboard 的测试与 Gate 不回退 |
+| 单一语义 | Dashboard 与 App 共用 `opc_snapshot_service.py` 和同一 DTO/脱敏实现 |
+| App 状态 | 只保存显式项目清单与选择；位于 runtime/checkout/项目/知识之外，损坏时拒绝覆盖并降级 |
+| 隐私与网络 | 响应无路径/正文/凭据/运行标识/Hook 原文；loopback、Host、Origin、CSRF、方法和路由 fail closed |
+| 安装数据保留 | install/update/rollback/uninstall 不覆盖或删除 `.opc`、File/Git、Git 历史、用户配置、App 状态或 Mem0 |
+| 体验 | 桌面、小窗口、移动、键盘、刷新上下文、无横向溢出、文本状态与零 console error |
+| 证据 | unit、clean-room lifecycle、仓库三项门禁、官方 Plugin/全部 Skill validators、浏览器对比和独立 QA |
+
 Private verdict 的路径输出仅支持 Windows，并且必须位于已批准的 private root 内。POSIX runner 为 stdout-only，传入 `--output` 必须在创建任何目录项前失败；若调用者捕获 stdout，目标必须由调用者置于已批准的私有边界，且不得位于本公开仓库或公开 CI Artifact。
 
 ## 10. 验收证据格式
