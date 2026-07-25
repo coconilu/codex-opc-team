@@ -123,6 +123,9 @@ $env:HOME = Join-Path $qaRoot 'home'
 $env:USERPROFILE = $env:HOME
 $env:APPDATA = Join-Path $qaRoot 'appdata'
 $env:LOCALAPPDATA = Join-Path $qaRoot 'localappdata'
+$env:PSModuleAnalysisCachePath = Join-Path $env:LOCALAPPDATA (
+  'Microsoft\Windows\PowerShell\ModuleAnalysisCache'
+)
 $env:CODEX_HOME = Join-Path $qaRoot 'codex'
 $env:CLAUDE_CONFIG_DIR = Join-Path $qaRoot 'claude'
 $env:KIMI_CODE_HOME = Join-Path $qaRoot 'kimi'
@@ -146,6 +149,9 @@ $appJob = Start-Job -ScriptBlock {
   $env:USERPROFILE = $env:HOME
   $env:APPDATA = Join-Path $qaRoot 'appdata'
   $env:LOCALAPPDATA = Join-Path $qaRoot 'localappdata'
+  $env:PSModuleAnalysisCachePath = Join-Path $env:LOCALAPPDATA (
+    'Microsoft\Windows\PowerShell\ModuleAnalysisCache'
+  )
   $env:CODEX_HOME = Join-Path $qaRoot 'codex'
   $env:CLAUDE_CONFIG_DIR = Join-Path $qaRoot 'claude'
   $env:KIMI_CODE_HOME = Join-Path $qaRoot 'kimi'
