@@ -51,7 +51,10 @@ def default_install_root() -> Path:
 def default_state_root() -> Path:
     configured = os.environ.get("OPC_APP_HOME")
     if configured:
-        return Path(os.path.abspath(Path(configured).expanduser()))
+        expanded = Path(configured).expanduser()
+        if not expanded.is_absolute():
+            raise AppInstallError("OPC_APP_HOME must be an absolute path")
+        return Path(os.path.abspath(expanded))
     if os.name == "nt":
         local = os.environ.get("LOCALAPPDATA")
         base = Path(local) if local else Path.home() / "AppData" / "Local"

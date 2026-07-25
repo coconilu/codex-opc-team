@@ -16,8 +16,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "plugins" / "codex-opc-team" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 import opc_app  # noqa: E402
+import opc_app_admin  # noqa: E402
 import opc_dashboard  # noqa: E402
 import opc_snapshot_service  # noqa: E402
 from opc_snapshot_service import SnapshotService  # noqa: E402
@@ -107,6 +109,24 @@ def request(
 
 
 class SettingsStoreTests(unittest.TestCase):
+    def test_relative_app_state_root_is_rejected_by_runtime_and_installer(self):
+        with self.assertRaises(opc_app.AppSettingsError) as runtime:
+            opc_app.resolve_app_state_root("relative/app-state")
+        self.assertEqual(
+            runtime.exception.code,
+            "ABSOLUTE_APP_STATE_ROOT_REQUIRED",
+        )
+        previous = os.environ.get("OPC_APP_HOME")
+        os.environ["OPC_APP_HOME"] = "relative/app-state"
+        try:
+            with self.assertRaises(opc_app_admin.AppInstallError):
+                opc_app_admin.default_state_root()
+        finally:
+            if previous is None:
+                os.environ.pop("OPC_APP_HOME", None)
+            else:
+                os.environ["OPC_APP_HOME"] = previous
+
     def test_state_root_rejects_checkout_before_directory_creation(self):
         candidate = ROOT / f".opc-app-state-test-{os.getpid()}"
         self.assertFalse(candidate.exists())

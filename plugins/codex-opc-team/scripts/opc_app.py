@@ -60,7 +60,10 @@ class AppSettingsError(RuntimeError):
 def resolve_app_state_root(value: str | None = None) -> Path:
     configured = value or os.environ.get("OPC_APP_HOME")
     if configured:
-        return Path(os.path.abspath(Path(configured).expanduser()))
+        expanded = Path(configured).expanduser()
+        if not expanded.is_absolute():
+            raise AppSettingsError("ABSOLUTE_APP_STATE_ROOT_REQUIRED")
+        return Path(os.path.abspath(expanded))
     if os.name == "nt":
         local = os.environ.get("LOCALAPPDATA")
         base = Path(local) if local else Path.home() / "AppData" / "Local"
