@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -27,7 +28,9 @@ from typing import Any, Callable, Mapping, Sequence
 ADAPTER_API_SCHEMA = "opc-adapters.api.v1"
 ADAPTER_PLAN_SCHEMA = "opc-adapters.plan.v1"
 OWNERSHIP_SCHEMA = "opc-adapters.ownership.v1"
+CAPABILITY_CONTRACT_SCHEMA = "opc-adapters.capability-matrix.v1"
 ADAPTER_VERSION = "1.0.0"
+DEFAULT_PLAN_TTL_SECONDS = 120.0
 HOST_IDS = ("codex", "claude", "kimi")
 PLUGIN_ID = "codex-opc-team"
 MARKETPLACE_ID = "opc"
@@ -65,6 +68,8 @@ def _run_command(
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=45,
             env=dict(environment) if environment is not None else None,
         )
@@ -82,6 +87,14 @@ def _version_tuple(value: str) -> tuple[int, int, int] | None:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _canonical_digest(value: Any) -> str:
+    return _sha256_bytes(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
 
 
 def _is_link(path: Path) -> bool:
@@ -278,13 +291,16 @@ class HostAdapter:
     def source_version(self) -> str:
         payload = _read_json(self.plugin_root / ".codex-plugin" / "plugin.json")
         value = payload.get("version")
-        if not isinstance(value, str) or not value:
+        if not isinstance(value, str) or VERSION.fullmatch(value) is None:
             raise AdapterError("INVALID_SOURCE")
         return value
 
     @property
     def source_ref(self) -> str:
-        value = os.environ.get("OPC_ADAPTER_SOURCE_REF", "").strip()
+        value = (
+            (self.environment or {}).get("OPC_ADAPTER_SOURCE_REF")
+            or os.environ.get("OPC_ADAPTER_SOURCE_REF", "")
+        ).strip()
         return value if PORTABLE_TOKEN.fullmatch(value) else f"release/{self.source_version}"
 
     @property
@@ -299,6 +315,26 @@ class HostAdapter:
 
     def probe(self) -> dict[str, Any]:
         raise NotImplementedError
+
+    def target_fingerprint(self) -> dict[str, Any]:
+        """Return a privacy-safe snapshot of adapter-owned target state."""
+        return {"kind": self.integration_unit}
+
+    def capture_plan_state(self) -> dict[str, Any]:
+        """Capture every immutable input a plan is authorized against."""
+        return {
+            "capability_contract_schema": CAPABILITY_CONTRACT_SCHEMA,
+            "verified_contract": self.verified_contract,
+            "adapter_version": ADAPTER_VERSION,
+            "source": {
+                "version": self.source_version,
+                "ref": self.source_ref,
+                "content_hash": self.content_hash,
+            },
+            "probe": self.probe(),
+            "ownership_manifest": self.store.read(self.host_id),
+            "target": self.target_fingerprint(),
+        }
 
     def changes(self, operation: str, manifest: dict[str, Any] | None) -> list[dict[str, str]]:
         raise NotImplementedError
@@ -328,22 +364,28 @@ class HostAdapter:
             **extra,
         }
 
-    def plan(self, operation: str) -> dict[str, Any]:
+    def plan(
+        self,
+        operation: str,
+        captured_state: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if operation not in {"install", "update", "uninstall"}:
             raise AdapterError("UNSUPPORTED_OPERATION")
-        probe = self.probe()
+        state = dict(captured_state or self.capture_plan_state())
+        probe = state["probe"]
         if probe["state"] not in {"available", "installed", "drifted"}:
             raise AdapterError("HOST_BLOCKED", detail=probe.get("reason"))
-        manifest = self.store.read(self.host_id)
+        manifest = state["ownership_manifest"]
         if operation == "uninstall" and manifest is None:
             raise AdapterError("NOT_OPC_OWNED")
         if probe.get("state") == "drifted" and manifest is None:
             raise AdapterError("OWNERSHIP_CONFLICT")
         changes = self.changes(operation, manifest)
+        source = state["source"]
         no_change = bool(
             operation == "update"
             and manifest
-            and manifest.get("content_hash") == self.content_hash
+            and manifest.get("content_hash") == source["content_hash"]
             and probe.get("state") == "installed"
         )
         return {
@@ -351,9 +393,10 @@ class HostAdapter:
             "host_id": self.host_id,
             "operation": operation,
             "adapter_version": ADAPTER_VERSION,
-            "source_version": self.source_version,
-            "source_ref": self.source_ref,
-            "content_hash": self.content_hash,
+            "source_version": source["version"],
+            "source_ref": source["ref"],
+            "content_hash": source["content_hash"],
+            "state_fingerprint": _canonical_digest(state),
             "changes": changes,
             "no_change": no_change,
             "preserves": [
@@ -393,15 +436,17 @@ class CodexAdapter(HostAdapter):
                 reason="HOST_VERSION_INCOMPATIBLE",
             )
         listed = self._command("plugin", "list", "--json")
+        if listed.returncode != 0:
+            return self._status("blocked", reason="HOST_DISCOVERY_FAILED")
         installed = False
-        if listed.returncode == 0:
-            try:
-                installed = any(
-                    item.get("pluginId") == f"{PLUGIN_ID}@{MARKETPLACE_ID}"
-                    for item in json.loads(listed.stdout).get("installed", [])
-                )
-            except (ValueError, AttributeError):
-                return self._status("blocked", reason="HOST_DISCOVERY_INVALID")
+        try:
+            discovery = json.loads(listed.stdout)
+            installed = any(
+                item.get("pluginId") == f"{PLUGIN_ID}@{MARKETPLACE_ID}"
+                for item in discovery.get("installed", [])
+            )
+        except (ValueError, AttributeError):
+            return self._status("blocked", reason="HOST_DISCOVERY_INVALID")
         manifest = self.store.read(self.host_id)
         state = "installed" if installed and manifest else "available"
         if installed != bool(manifest):
@@ -413,7 +458,25 @@ class CodexAdapter(HostAdapter):
             target_version=self.source_version,
             drift=state == "drifted",
             ownership=bool(manifest),
+            discovery_fingerprint=_canonical_digest(discovery),
         )
+
+    def target_fingerprint(self) -> dict[str, Any]:
+        projection = (
+            self.store.root
+            / self.host_id
+            / "projection"
+            / f"{self.source_version}-{self.content_hash[:16]}"
+        )
+        return {
+            "projection_exists": projection.is_dir(),
+            "projection_is_link": _is_link(projection),
+            "projection_hash": (
+                tree_digest(projection / "plugins" / PLUGIN_ID / "skills")
+                if projection.is_dir() and not _is_link(projection)
+                else None
+            ),
+        }
 
     def changes(self, operation: str, manifest: dict[str, Any] | None) -> list[dict[str, str]]:
         action = {
@@ -576,8 +639,20 @@ class ClaudeAdapter(HostAdapter):
     integration_unit = "Marketplace Plugin"
     verified_contract = "claude-code >=2.1.212,<3.0.0"
 
-    def projection_root(self) -> Path:
-        return self.store.root / self.host_id / "projection" / self.source_version
+    def projection_root(
+        self,
+        source_version: str | None = None,
+        content_hash: str | None = None,
+    ) -> Path:
+        version = source_version or self.source_version
+        digest = content_hash or self.content_hash
+        if not PORTABLE_TOKEN.fullmatch(version) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise AdapterError("INVALID_PROJECTION_REF")
+        return self.store.root / self.host_id / "projection" / f"{version}-{digest[:16]}"
+
+    @property
+    def marketplace_root(self) -> Path:
+        return self.store.root / self.host_id / "marketplace-current"
 
     def probe(self) -> dict[str, Any]:
         result = self._command("--version")
@@ -594,13 +669,13 @@ class ClaudeAdapter(HostAdapter):
         if listed.returncode != 0:
             return self._status("blocked", reason="HOST_DISCOVERY_FAILED")
         try:
-            values = json.loads(listed.stdout)
-            entries = values if isinstance(values, list) else values.get("plugins", [])
-            installed = any(
-                str(item.get("id") or item.get("name", "")).startswith(PLUGIN_ID)
-                for item in entries
-                if isinstance(item, dict)
+            discovery = json.loads(listed.stdout)
+            entries = (
+                discovery
+                if isinstance(discovery, list)
+                else discovery.get("plugins", [])
             )
+            installed = self._is_installed(entries)
         except (ValueError, AttributeError):
             return self._status("blocked", reason="HOST_DISCOVERY_INVALID")
         manifest = self.store.read(self.host_id)
@@ -614,7 +689,57 @@ class ClaudeAdapter(HostAdapter):
             target_version=self.source_version,
             drift=state == "drifted",
             ownership=bool(manifest),
+            discovery_fingerprint=_canonical_digest(discovery),
         )
+
+    def target_fingerprint(self) -> dict[str, Any]:
+        root = self.marketplace_root
+        if not root.exists():
+            return {
+                "marketplace_exists": False,
+                "marketplace_is_link": False,
+                "marketplace_hash": None,
+            }
+        if _is_link(root) or not root.is_dir():
+            return {
+                "marketplace_exists": True,
+                "marketplace_is_link": True,
+                "marketplace_hash": None,
+            }
+        skills = root / "plugin" / "skills"
+        return {
+            "marketplace_exists": True,
+            "marketplace_is_link": False,
+            "marketplace_hash": tree_digest(skills) if skills.is_dir() else "invalid",
+        }
+
+    @staticmethod
+    def _is_installed(entries: Sequence[Any]) -> bool:
+        selector = f"{PLUGIN_ID}@{MARKETPLACE_ID}"
+        return any(
+            (
+                item.get("id") == selector
+                or (
+                    item.get("id") is None
+                    and item.get("name") in {PLUGIN_ID, selector}
+                )
+            )
+            for item in entries
+            if isinstance(item, dict)
+        )
+
+    def _discover_installed(self) -> bool:
+        result = self._command("plugin", "list", "--json")
+        if result.returncode != 0:
+            raise AdapterError("HOST_DISCOVERY_FAILED")
+        try:
+            payload = json.loads(result.stdout)
+            entries = payload if isinstance(payload, list) else payload.get("plugins", [])
+            if not isinstance(entries, list):
+                raise ValueError
+            return self._is_installed(entries)
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise AdapterError("HOST_DISCOVERY_INVALID") from exc
 
     def changes(self, operation: str, manifest: dict[str, Any] | None) -> list[dict[str, str]]:
         action = {
@@ -677,6 +802,74 @@ class ClaudeAdapter(HostAdapter):
                 shutil.rmtree(stage, ignore_errors=True)
         return root
 
+    def _activate_marketplace(self, projection: Path, operation_id: str) -> Path | None:
+        """Atomically replace the stable App-owned marketplace source."""
+        root = self.marketplace_root
+        if root.exists() and (_is_link(root) or not root.is_dir()):
+            raise AdapterError("UNSAFE_HOST_TARGET")
+        backup_root = self.store.backup_root(self.host_id, operation_id)
+        previous = backup_root / "marketplace-current"
+        stage = root.parent / f".marketplace-stage-{secrets.token_hex(6)}"
+        moved_previous = False
+        try:
+            root.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(projection, stage)
+            if tree_digest(stage / "plugin" / "skills") != tree_digest(
+                projection / "plugin" / "skills"
+            ):
+                raise AdapterError("PROJECTION_VERIFY_FAILED")
+            if root.exists():
+                backup_root.mkdir(parents=True, exist_ok=True)
+                if previous.exists():
+                    raise AdapterError("BACKUP_CONFLICT")
+                os.replace(root, previous)
+                moved_previous = True
+            os.replace(stage, root)
+        except AdapterError:
+            if moved_previous and previous.exists() and not root.exists():
+                os.replace(previous, root)
+            raise
+        except OSError as exc:
+            if moved_previous and previous.exists() and not root.exists():
+                try:
+                    os.replace(previous, root)
+                except OSError:
+                    pass
+            raise AdapterError("APPLY_FAILED") from exc
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage, ignore_errors=True)
+        return previous if moved_previous else None
+
+    def _restore_marketplace(self, previous: Path | None) -> None:
+        if previous is None:
+            if self.marketplace_root.exists():
+                shutil.rmtree(self.marketplace_root)
+            return
+        if not previous.is_dir() or _is_link(previous):
+            raise AdapterError("ROLLBACK_POINT_UNAVAILABLE")
+        if self.marketplace_root.exists():
+            if _is_link(self.marketplace_root):
+                raise AdapterError("ROLLBACK_CONFLICT")
+            shutil.rmtree(self.marketplace_root)
+        os.replace(previous, self.marketplace_root)
+
+    def _refresh_plugin(self, *, failure_code: str) -> None:
+        selector = f"{PLUGIN_ID}@{MARKETPLACE_ID}"
+        marketplace = self._command(
+            "plugin", "marketplace", "update", MARKETPLACE_ID
+        )
+        if marketplace.returncode != 0:
+            raise AdapterError(failure_code)
+        plugin = self._command("plugin", "update", selector, "--scope", "user")
+        if plugin.returncode != 0:
+            raise AdapterError(failure_code)
+
+    def _restore_after_failed_refresh(self, previous: Path | None) -> None:
+        self._restore_marketplace(previous)
+        if previous is not None:
+            self._refresh_plugin(failure_code="ROLLBACK_FAILED")
+
     def apply_operation(self, operation: str, operation_id: str) -> dict[str, Any]:
         selector = f"{PLUGIN_ID}@{MARKETPLACE_ID}"
         if operation == "uninstall":
@@ -684,23 +877,50 @@ class ClaudeAdapter(HostAdapter):
             result = self._command(*command)
         else:
             projection = self._build_projection()
-            if operation == "update":
-                self._command("plugin", "marketplace", "remove", MARKETPLACE_ID)
-            marketplace = self._command(
-                "plugin", "marketplace", "add", str(projection)
-            )
-            if marketplace.returncode != 0 and "already" not in (
-                marketplace.stdout + marketplace.stderr
-            ).lower():
-                raise AdapterError("APPLY_FAILED")
-            if operation == "update":
-                self._command("plugin", "marketplace", "update", MARKETPLACE_ID)
-                result = self._command("plugin", "update", selector, "--scope", "user")
-            else:
+            previous = self._activate_marketplace(projection, operation_id)
+            if operation == "install":
+                marketplace = self._command(
+                    "plugin", "marketplace", "add", str(self.marketplace_root)
+                )
+                if marketplace.returncode != 0 and "already" not in (
+                    marketplace.stdout + marketplace.stderr
+                ).lower():
+                    self._restore_marketplace(previous)
+                    raise AdapterError("APPLY_FAILED")
                 result = self._command("plugin", "install", selector, "--scope", "user")
+            else:
+                try:
+                    self._refresh_plugin(failure_code="APPLY_FAILED")
+                except AdapterError as exc:
+                    self._restore_after_failed_refresh(previous)
+                    raise exc
+                result = CommandResult(0)
         if result.returncode != 0:
+            if operation != "uninstall":
+                if operation == "install":
+                    if self._discover_installed():
+                        cleanup = self._command(
+                            "plugin",
+                            "uninstall",
+                            selector,
+                            "--scope",
+                            "user",
+                            "--keep-data",
+                        )
+                        if cleanup.returncode != 0:
+                            raise AdapterError("ROLLBACK_FAILED")
+                    if previous is not None:
+                        self._restore_after_failed_refresh(previous)
+                    # With no previous source, retain the successfully registered
+                    # stable marketplace so its configuration never dangles.
+                else:
+                    self._restore_after_failed_refresh(previous)
             raise AdapterError("APPLY_FAILED")
-        return {"state": "applied", "operation_id": operation_id}
+        return {
+            "state": "applied",
+            "operation_id": operation_id,
+            "backup_ref": operation_id if operation != "uninstall" and previous else None,
+        }
 
     def rollback_operation(
         self,
@@ -714,19 +934,30 @@ class ClaudeAdapter(HostAdapter):
                 "plugin", "uninstall", selector, "--scope", "user", "--keep-data"
             )
         else:
-            previous = (
-                self.store.root
-                / self.host_id
-                / "projection"
-                / prior_manifest["source_version"]
+            projection = self.projection_root(
+                prior_manifest["source_version"],
+                prior_manifest["content_hash"],
             )
-            if not previous.is_dir():
+            if not projection.is_dir():
                 raise AdapterError("ROLLBACK_POINT_UNAVAILABLE")
-            self._command("plugin", "marketplace", "remove", MARKETPLACE_ID)
-            added = self._command("plugin", "marketplace", "add", str(previous))
-            if added.returncode != 0:
-                raise AdapterError("ROLLBACK_FAILED")
-            result = self._command("plugin", "install", selector, "--scope", "user")
+            rollback_operation_id = f"{operation_id}-restore"
+            current = self._activate_marketplace(projection, rollback_operation_id)
+            try:
+                if operation == "uninstall":
+                    result = self._command(
+                        "plugin", "install", selector, "--scope", "user"
+                    )
+                    if result.returncode != 0:
+                        raise AdapterError("ROLLBACK_FAILED")
+                else:
+                    self._refresh_plugin(failure_code="ROLLBACK_FAILED")
+            except AdapterError:
+                if operation == "uninstall":
+                    self._restore_marketplace(current)
+                else:
+                    self._restore_after_failed_refresh(current)
+                raise
+            result = CommandResult(0)
         if result.returncode != 0:
             raise AdapterError("ROLLBACK_FAILED")
         return {"state": "rolled_back"}
@@ -738,11 +969,7 @@ class ClaudeAdapter(HostAdapter):
         try:
             payload = json.loads(result.stdout)
             entries = payload if isinstance(payload, list) else payload.get("plugins", [])
-            installed = any(
-                str(item.get("id") or item.get("name", "")).startswith(PLUGIN_ID)
-                for item in entries
-                if isinstance(item, dict)
-            )
+            installed = self._is_installed(entries)
         except (ValueError, AttributeError):
             return {"state": "failed", "reason": "HOST_DISCOVERY_INVALID"}
         return {
@@ -815,7 +1042,33 @@ class KimiAdapter(HostAdapter):
             drift=drift,
             ownership=bool(manifest),
             plugin_management="blocked_no_public_noninteractive_cli",
+            discovery_fingerprint=_canonical_digest(
+                {
+                    "doctor_returncode": doctor.returncode,
+                    "doctor_stdout_hash": _sha256_bytes(doctor.stdout.encode("utf-8")),
+                    "doctor_stderr_hash": _sha256_bytes(doctor.stderr.encode("utf-8")),
+                }
+            ),
         )
+
+    def target_fingerprint(self) -> dict[str, Any]:
+        targets: list[dict[str, Any]] = []
+        for name in self.skill_names:
+            target = self._target(name)
+            is_link = _is_link(target)
+            targets.append(
+                {
+                    "name": name,
+                    "exists": target.exists(),
+                    "is_link": is_link,
+                    "hash": (
+                        tree_digest(target)
+                        if target.is_dir() and not is_link
+                        else None
+                    ),
+                }
+            )
+        return {"skills_root": targets}
 
     def changes(self, operation: str, manifest: dict[str, Any] | None) -> list[dict[str, str]]:
         action = {
@@ -933,10 +1186,18 @@ class KimiAdapter(HostAdapter):
         # Kimi has no public non-interactive skill-list command.  A fresh prompt
         # is the public discovery mechanism; it may require the user's configured
         # model and therefore can be inconclusive without becoming a false PASS.
-        command = ["--output-format", "stream-json"]
-        for name in self.skill_names:
-            command.extend(["--skills-dir", str(self._target(name))])
-        command.extend(["--prompt", "List the explicitly available OPC skills by name only."])
+        expected = sorted(self.skill_names)
+        command = [
+            "--output-format",
+            "stream-json",
+            "--skills-dir",
+            str(self.host_home / "skills"),
+            "--prompt",
+            (
+                "Inspect the Skills available for this launch. Output one line only as "
+                "OPC_SKILLS_JSON followed by a JSON array of their exact canonical names."
+            ),
+        ]
         result = self._command(*command)
         if not expected_installed:
             absent = all(not self._target(name).exists() for name in self.skill_names)
@@ -950,10 +1211,39 @@ class KimiAdapter(HostAdapter):
                 "reason": "KIMI_FRESH_PROCESS_REQUIRES_CONFIGURED_MODEL",
                 "mechanism": "fresh kimi --skills-dir prompt",
             }
-        discovered = all(name in result.stdout for name in self.skill_names)
+        assistant_text: list[str] = []
+        try:
+            for line in result.stdout.splitlines():
+                payload = json.loads(line)
+                if not isinstance(payload, dict):
+                    continue
+                role = payload.get("role")
+                message = payload.get("message")
+                if isinstance(message, dict):
+                    role = message.get("role", role)
+                    content = message.get("content")
+                else:
+                    content = payload.get("content")
+                if role not in {None, "assistant"}:
+                    continue
+                if isinstance(content, str):
+                    assistant_text.append(content)
+                elif isinstance(content, list):
+                    assistant_text.extend(
+                        str(item.get("text"))
+                        for item in content
+                        if isinstance(item, dict) and isinstance(item.get("text"), str)
+                    )
+            marker = re.search(
+                r"OPC_SKILLS_JSON\s*(\[[^\r\n]*\])",
+                "\n".join(assistant_text),
+            )
+            discovered = json.loads(marker.group(1)) if marker else None
+        except (ValueError, AttributeError, TypeError):
+            discovered = None
         return {
-            "state": "verified" if discovered else "failed",
-            "mechanism": "fresh kimi --skills-dir prompt",
+            "state": "verified" if discovered == expected else "failed",
+            "mechanism": "fresh kimi --skills-dir common-root prompt with exact identities",
         }
 
     def rollback_operation(
@@ -1011,11 +1301,17 @@ class AdapterManager:
         runner: CommandRunner = _run_command,
         environments: Mapping[str, Mapping[str, str]] | None = None,
         executables: Mapping[str, str] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        plan_ttl_seconds: float = DEFAULT_PLAN_TTL_SECONDS,
     ):
+        if plan_ttl_seconds <= 0:
+            raise ValueError("plan_ttl_seconds must be positive")
         self.source_root = Path(source_root).resolve()
         self.store = OwnershipStore(app_state_root)
         self._lock = threading.RLock()
         self._plans: dict[str, dict[str, Any]] = {}
+        self._clock = clock
+        self._plan_ttl_seconds = float(plan_ttl_seconds)
         if adapters is not None:
             self.adapters = dict(adapters)
         else:
@@ -1055,18 +1351,27 @@ class AdapterManager:
         adapter = self.adapters.get(host_id)
         if adapter is None:
             raise AdapterError("UNKNOWN_HOST")
-        payload = adapter.plan(operation)
+        captured_state = adapter.capture_plan_state()
+        payload = adapter.plan(operation, captured_state)
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         plan_id = f"plan-{secrets.token_hex(12)}"
         confirmation = secrets.token_urlsafe(24)
+        issued_at = self._clock()
         record = {
             "payload": payload,
             "digest": _sha256_bytes(serialized),
             "confirmation": confirmation,
+            "state_digest": _canonical_digest(captured_state),
+            "expires_at": issued_at + self._plan_ttl_seconds,
         }
         with self._lock:
             self._plans[plan_id] = record
-        return {**payload, "plan_id": plan_id, "confirmation_token": confirmation}
+        return {
+            **payload,
+            "plan_id": plan_id,
+            "confirmation_token": confirmation,
+            "expires_in_seconds": self._plan_ttl_seconds,
+        }
 
     def apply(
         self,
@@ -1080,6 +1385,8 @@ class AdapterManager:
             raise AdapterError("PLAN_NOT_FOUND_OR_USED")
         if not secrets.compare_digest(record["confirmation"], confirmation_token):
             raise AdapterError("CONFIRMATION_REQUIRED")
+        if self._clock() >= record["expires_at"]:
+            raise AdapterError("PLAN_EXPIRED")
         payload = record["payload"]
         current_digest = _sha256_bytes(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -1087,9 +1394,9 @@ class AdapterManager:
         if not secrets.compare_digest(record["digest"], current_digest):
             raise AdapterError("PLAN_CHANGED")
         adapter = self.adapters[payload["host_id"]]
-        current_probe = adapter.probe()
-        if current_probe["state"] not in {"available", "installed", "drifted"}:
-            raise AdapterError("HOST_CHANGED_OR_BLOCKED")
+        current_state_digest = _canonical_digest(adapter.capture_plan_state())
+        if not secrets.compare_digest(record["state_digest"], current_state_digest):
+            raise AdapterError("PLAN_STATE_CHANGED")
         prior_manifest = self.store.read(adapter.host_id)
         operation_id = f"op-{secrets.token_hex(10)}"
         try:

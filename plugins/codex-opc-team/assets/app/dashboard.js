@@ -767,6 +767,8 @@
       UNKNOWN_TARGET_CONFLICT: "目标位置已有未知内容；已保留且未覆盖。",
       CONFIRMATION_REQUIRED: "必须重新核对计划并明确确认。",
       PLAN_NOT_FOUND_OR_USED: "计划已过期或已经执行，请重新生成。",
+      PLAN_EXPIRED: "计划已超过有效期且已作废，请重新探测并生成。",
+      PLAN_STATE_CHANGED: "来源、宿主、发现结果、所有权或目标状态已变化；未执行任何写入。",
       VERIFY_FAILED_ROLLED_BACK: "宿主回读验证失败，已尝试恢复操作前状态。",
       APPLY_FAILED: "宿主写入失败；其他 Adapter 和私人知识未被修改。",
     }[String(code || "")] || "操作未完成；请刷新后查看结构化状态。";
@@ -783,6 +785,10 @@
       setText("adapter-plan-version", plan.source_version);
       setText("adapter-plan-ref", plan.source_ref);
       setText("adapter-plan-hash", String(plan.content_hash || "").slice(0, 16));
+      setText(
+        "adapter-plan-expiry",
+        `${Number(plan.expires_in_seconds || 0)} 秒（单次使用）`
+      );
       setText("adapter-plan-rollback", plan.rollback);
       const diff = byId("adapter-plan-diff");
       diff.replaceChildren();

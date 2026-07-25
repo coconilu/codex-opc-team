@@ -26,9 +26,13 @@
     {
       "host_id": "claude",
       "verified_range": ">=2.1.212,<3.0.0",
-      "verified_local_version": "2.1.204",
+      "verified_local_version": "2.1.212",
       "managed_unit": "marketplace_plugin",
-      "local_status": "blocked_known_uninstall_safety_bug",
+      "local_status": "verified_with_pinned_official_npm_package_in_disposable_home",
+      "verification_source": {
+        "package": "@anthropic-ai/claude-code@2.1.212",
+        "sha256": "2162841dd793d21671eccb7fe76fe9c3da6816adf447ba3890a4871b7e5f4e69"
+      },
       "lifecycle": {
         "probe": "supported",
         "install": "supported_when_compatible",
@@ -54,7 +58,7 @@
         "install": "supported",
         "update": "supported",
         "uninstall": "supported",
-        "verify": "fresh_process_prompt_requires_configured_model",
+        "verify": "fresh_process_common_skills_root_exact_identity_prompt_requires_configured_model",
         "plugin_apply": "blocked_no_public_noninteractive_cli"
       },
       "components": {

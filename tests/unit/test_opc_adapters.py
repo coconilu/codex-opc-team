@@ -41,6 +41,11 @@ class FakeHosts:
         self.invalid_config = invalid_config or set()
         self.fail_apply = fail_apply or set()
         self.fail_verify = fail_verify or set()
+        self.discovery_nonce = {host: "initial" for host in opc_adapters.HOST_IDS}
+        self.fail_next_claude_step: str | None = None
+        self.partial_claude_failure = False
+        self.claude_marketplaces = {"unrelated-marketplace"}
+        self.claude_plugin_data = {"sentinel": "preserved"}
         self.calls: list[list[str]] = []
 
     def __call__(self, command, environment=None):
@@ -71,7 +76,8 @@ class FakeHosts:
             return opc_adapters.CommandResult(0, self.versions[host])
         if host == "kimi" and "doctor" in values:
             return opc_adapters.CommandResult(
-                1 if host in self.invalid_config else 0
+                1 if host in self.invalid_config else 0,
+                self.discovery_nonce[host],
             )
         if host == "codex" and values[-3:] == ["plugin", "list", "--json"]:
             if host in self.invalid_discovery:
@@ -81,7 +87,15 @@ class FakeHosts:
                 if self.installed["codex"] and host not in self.fail_verify
                 else []
             )
-            return opc_adapters.CommandResult(0, json.dumps({"installed": installed}))
+            return opc_adapters.CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "installed": installed,
+                        "discoveryNonce": self.discovery_nonce[host],
+                    }
+                ),
+            )
         if host == "claude" and "plugin" in values and "list" in values:
             if host in self.invalid_discovery:
                 return opc_adapters.CommandResult(0, "{broken")
@@ -90,13 +104,39 @@ class FakeHosts:
                 if self.installed["claude"] and host not in self.fail_verify
                 else []
             )
-            return opc_adapters.CommandResult(0, json.dumps(plugins))
+            return opc_adapters.CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "plugins": plugins,
+                        "discoveryNonce": self.discovery_nonce[host],
+                    }
+                ),
+            )
         if host == "claude" and "plugin" in values:
+            step = None
+            if values[1:4] == ["plugin", "marketplace", "add"]:
+                step = "marketplace_add"
+            elif values[1:4] == ["plugin", "marketplace", "update"]:
+                step = "marketplace_update"
+            elif values[1:3] == ["plugin", "install"]:
+                step = "plugin_install"
+            elif values[1:3] == ["plugin", "update"]:
+                step = "plugin_update"
+            elif values[1:3] == ["plugin", "uninstall"]:
+                step = "plugin_uninstall"
+            if step == self.fail_next_claude_step:
+                self.fail_next_claude_step = None
+                if self.partial_claude_failure and step == "plugin_install":
+                    self.installed["claude"] = True
+                return opc_adapters.CommandResult(1, "", f"injected {step} failure")
             if ("install" in values or "update" in values) and host in self.fail_apply:
                 return opc_adapters.CommandResult(1, "", "injected apply failure")
-            if "uninstall" in values:
+            if step == "marketplace_add":
+                self.claude_marketplaces.add("opc")
+            if step == "plugin_uninstall":
                 self.installed["claude"] = False
-            elif "install" in values or "update" in values:
+            elif step in {"plugin_install", "plugin_update"}:
                 self.installed["claude"] = True
             return opc_adapters.CommandResult(0)
         if host == "kimi" and "--prompt" in values:
@@ -109,17 +149,30 @@ class FakeHosts:
                 for path in (ROOT / "plugins" / "codex-opc-team" / "skills").iterdir()
                 if path.is_dir()
             ]
-            return opc_adapters.CommandResult(0, " ".join(skills))
+            return opc_adapters.CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "content": f"OPC_SKILLS_JSON {json.dumps(sorted(skills))}",
+                    }
+                ),
+            )
         return opc_adapters.CommandResult(0)
 
 
 class AdapterTests(unittest.TestCase):
-    def manager(self, base: Path, fake: FakeHosts) -> opc_adapters.AdapterManager:
+    def manager(
+        self,
+        base: Path,
+        fake: FakeHosts,
+        **manager_options,
+    ) -> opc_adapters.AdapterManager:
         homes = {}
         executables = {}
         for host in opc_adapters.HOST_IDS:
             home = base / f"{host}-home"
-            home.mkdir()
+            home.mkdir(exist_ok=True)
             homes[host] = {
                 "HOME": str(home),
                 "USERPROFILE": str(home),
@@ -132,6 +185,7 @@ class AdapterTests(unittest.TestCase):
             runner=fake,
             environments=homes,
             executables=executables,
+            **manager_options,
         )
 
     @staticmethod
@@ -265,6 +319,152 @@ class AdapterTests(unittest.TestCase):
                     confirmation_token=plan["confirmation_token"],
                 )
 
+    def test_plans_expire_are_one_time_and_do_not_survive_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            fake = FakeHosts()
+            now = [100.0]
+            manager = self.manager(
+                base,
+                fake,
+                clock=lambda: now[0],
+                plan_ttl_seconds=5,
+            )
+            expired = manager.create_plan("codex", "install")
+            now[0] = 106.0
+            with self.assertRaisesRegex(opc_adapters.AdapterError, "PLAN_EXPIRED"):
+                manager.apply(
+                    plan_id=expired["plan_id"],
+                    confirmation_token=expired["confirmation_token"],
+                )
+            with self.assertRaisesRegex(
+                opc_adapters.AdapterError, "PLAN_NOT_FOUND_OR_USED"
+            ):
+                manager.apply(
+                    plan_id=expired["plan_id"],
+                    confirmation_token=expired["confirmation_token"],
+                )
+
+            restart_plan = manager.create_plan("claude", "install")
+            restarted = self.manager(base, fake)
+            with self.assertRaisesRegex(
+                opc_adapters.AdapterError, "PLAN_NOT_FOUND_OR_USED"
+            ):
+                restarted.apply(
+                    plan_id=restart_plan["plan_id"],
+                    confirmation_token=restart_plan["confirmation_token"],
+                )
+            self.assertFalse((base / "app-state").exists())
+
+    def test_every_host_rejects_host_version_and_discovery_drift_before_write(self):
+        for host in opc_adapters.HOST_IDS:
+            with self.subTest(host=f"{host}-version"), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                fake = FakeHosts()
+                manager = self.manager(base, fake)
+                plan = manager.create_plan(host, "install")
+                fake.versions[host] = {
+                    "codex": "codex-cli 0.144.2",
+                    "claude": "2.1.213 (Claude Code)",
+                    "kimi": "0.29.2",
+                }[host]
+                with self.assertRaisesRegex(
+                    opc_adapters.AdapterError, "PLAN_STATE_CHANGED"
+                ):
+                    manager.apply(
+                        plan_id=plan["plan_id"],
+                        confirmation_token=plan["confirmation_token"],
+                    )
+                self.assertFalse((base / "app-state").exists())
+
+            with self.subTest(host=f"{host}-discovery"), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                fake = FakeHosts()
+                manager = self.manager(base, fake)
+                plan = manager.create_plan(host, "install")
+                fake.discovery_nonce[host] = "changed"
+                with self.assertRaisesRegex(
+                    opc_adapters.AdapterError, "PLAN_STATE_CHANGED"
+                ):
+                    manager.apply(
+                        plan_id=plan["plan_id"],
+                        confirmation_token=plan["confirmation_token"],
+                    )
+                self.assertFalse((base / "app-state").exists())
+
+    def test_every_host_rejects_manifest_source_or_target_drift_before_write(self):
+        for host in opc_adapters.HOST_IDS:
+            with self.subTest(host=f"{host}-manifest"), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                fake = FakeHosts()
+                manager = self.manager(base, fake)
+                plan = manager.create_plan(host, "install")
+                manifest_path = manager.store.manifest_path(host)
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                opc_adapters._atomic_json(
+                    manifest_path,
+                    {
+                        "schema_version": opc_adapters.OWNERSHIP_SCHEMA,
+                        "host_id": host,
+                        "adapter_version": opc_adapters.ADAPTER_VERSION,
+                        "source_version": "0.0.0",
+                        "source_ref": "release/0.0.0",
+                        "content_hash": "0" * 64,
+                        "managed_targets": [],
+                        "backup_refs": [],
+                    },
+                )
+                with self.assertRaisesRegex(
+                    opc_adapters.AdapterError, "PLAN_STATE_CHANGED"
+                ):
+                    manager.apply(
+                        plan_id=plan["plan_id"],
+                        confirmation_token=plan["confirmation_token"],
+                    )
+                self.assertFalse(fake.installed.get(host, False))
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            fake = FakeHosts()
+            manager = self.manager(base, fake)
+            plan = manager.create_plan("kimi", "install")
+            target = manager.adapters["kimi"]._target(
+                manager.adapters["kimi"].skill_names[0]
+            )
+            target.mkdir(parents=True)
+            (target / "user-sentinel").write_text("keep", encoding="utf-8")
+            with self.assertRaisesRegex(
+                opc_adapters.AdapterError, "PLAN_STATE_CHANGED"
+            ):
+                manager.apply(
+                    plan_id=plan["plan_id"],
+                    confirmation_token=plan["confirmation_token"],
+                )
+            self.assertEqual((target / "user-sentinel").read_text(), "keep")
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            fake = FakeHosts()
+            manager = self.manager(base, fake)
+            adapter = manager.adapters["claude"]
+            plan = manager.create_plan("claude", "install")
+            original_hash = type(adapter).content_hash
+            with mock.patch.object(
+                type(adapter),
+                "content_hash",
+                new_callable=mock.PropertyMock,
+                return_value="f" * 64,
+            ):
+                with self.assertRaisesRegex(
+                    opc_adapters.AdapterError, "PLAN_STATE_CHANGED"
+                ):
+                    manager.apply(
+                        plan_id=plan["plan_id"],
+                        confirmation_token=plan["confirmation_token"],
+                    )
+            self.assertIsNotNone(original_hash)
+            self.assertFalse(fake.installed["claude"])
+
     def test_kimi_clean_idempotent_uninstall_reinstall_and_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -350,6 +550,28 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(result["state"], "verification_required")
             self.assertEqual(result["verification"]["state"], "verification_required")
 
+    def test_kimi_verification_uses_one_common_root_and_exact_skill_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            fake = FakeHosts()
+            manager = self.manager(base, fake)
+            self.apply(manager, "kimi", "install")
+            prompt_call = next(
+                call
+                for call in fake.calls
+                if "kimi.fake" in call[0] and "--prompt" in call
+            )
+            self.assertEqual(prompt_call.count("--skills-dir"), 1)
+            index = prompt_call.index("--skills-dir")
+            self.assertEqual(
+                Path(prompt_call[index + 1]),
+                base / "kimi-home" / "kimi-state" / "skills",
+            )
+
+            fake.fail_verify.add("kimi")
+            verification = manager.adapters["kimi"].verify(True)
+            self.assertEqual(verification["state"], "failed")
+
     def test_codex_reuses_plugin_admin_and_preserves_knowledge_initialization(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -382,6 +604,197 @@ class AdapterTests(unittest.TestCase):
                 manager.store.manifest_path("kimi").read_bytes(),
                 sentinel_manifest,
             )
+
+    def test_claude_install_failure_steps_preserve_data_and_unrelated_marketplace(self):
+        for step in ("marketplace_add", "plugin_install"):
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                fake = FakeHosts()
+                manager = self.manager(base, fake)
+                fake.fail_next_claude_step = step
+                fake.partial_claude_failure = step == "plugin_install"
+                data_before = dict(fake.claude_plugin_data)
+                plan = manager.create_plan("claude", "install")
+                with self.assertRaisesRegex(opc_adapters.AdapterError, "APPLY_FAILED"):
+                    manager.apply(
+                        plan_id=plan["plan_id"],
+                        confirmation_token=plan["confirmation_token"],
+                    )
+                self.assertIsNone(manager.store.read("claude"))
+                self.assertEqual(
+                    manager.adapters["claude"].marketplace_root.exists(),
+                    step == "plugin_install",
+                )
+                self.assertFalse(fake.installed["claude"])
+                self.assertEqual(fake.claude_plugin_data, data_before)
+                self.assertIn("unrelated-marketplace", fake.claude_marketplaces)
+                self.assertFalse(
+                    any(
+                        call[1:4] == ["plugin", "marketplace", "remove"]
+                        for call in fake.calls
+                    )
+                )
+
+    def test_claude_partial_install_cleanup_failure_is_explicit_and_recoverable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            fake = FakeHosts()
+            manager = self.manager(base, fake)
+            fake.partial_claude_failure = True
+            fake.fail_next_claude_step = "plugin_install"
+            original_call = fake.__call__
+            cleanup_failed = False
+
+            def fail_cleanup(command, environment=None):
+                nonlocal cleanup_failed
+                values = [str(item) for item in command]
+                if (
+                    fake.installed["claude"]
+                    and values[1:3] == ["plugin", "uninstall"]
+                    and not cleanup_failed
+                ):
+                    cleanup_failed = True
+                    fake.calls.append(values)
+                    return opc_adapters.CommandResult(1, "", "injected cleanup failure")
+                return original_call(command, environment)
+
+            manager.adapters["claude"].runner = fail_cleanup
+            plan = manager.create_plan("claude", "install")
+            with self.assertRaisesRegex(opc_adapters.AdapterError, "ROLLBACK_FAILED"):
+                manager.apply(
+                    plan_id=plan["plan_id"],
+                    confirmation_token=plan["confirmation_token"],
+                )
+            self.assertIsNone(manager.store.read("claude"))
+            self.assertTrue(manager.adapters["claude"].marketplace_root.is_dir())
+            self.assertTrue(fake.installed["claude"])
+            self.assertEqual(fake.claude_plugin_data["sentinel"], "preserved")
+            self.assertIn("unrelated-marketplace", fake.claude_marketplaces)
+            self.assertTrue(cleanup_failed)
+
+    def test_claude_uninstall_rollback_install_failure_preserves_absent_prestate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            fake = FakeHosts()
+            manager = self.manager(base, fake)
+            self.apply(manager, "claude", "install")
+            removed = self.apply(manager, "claude", "uninstall")
+            source_before = opc_adapters.tree_digest(
+                manager.adapters["claude"].marketplace_root
+            )
+            fake.fail_next_claude_step = "plugin_install"
+            with self.assertRaisesRegex(
+                opc_adapters.AdapterError, "ROLLBACK_FAILED"
+            ):
+                manager.rollback("claude", removed["rollback_id"])
+            self.assertFalse(fake.installed["claude"])
+            self.assertIsNone(manager.store.read("claude"))
+            self.assertEqual(
+                opc_adapters.tree_digest(manager.adapters["claude"].marketplace_root),
+                source_before,
+            )
+            self.assertEqual(fake.claude_plugin_data["sentinel"], "preserved")
+
+    def test_claude_update_failure_steps_restore_old_working_source_and_manifest(self):
+        for step in ("marketplace_update", "plugin_update"):
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                fake = FakeHosts()
+                manager = self.manager(base, fake)
+                self.apply(manager, "claude", "install")
+                adapter = manager.adapters["claude"]
+                manifest_before = manager.store.manifest_path("claude").read_bytes()
+                source_before = opc_adapters.tree_digest(adapter.marketplace_root)
+                data_before = dict(fake.claude_plugin_data)
+                fake.fail_next_claude_step = step
+                with (
+                    mock.patch.object(
+                        opc_adapters.HostAdapter,
+                        "source_version",
+                        new_callable=mock.PropertyMock,
+                        return_value="9.9.9",
+                    ),
+                    mock.patch.object(
+                        opc_adapters.HostAdapter,
+                        "content_hash",
+                        new_callable=mock.PropertyMock,
+                        return_value="f" * 64,
+                    ),
+                ):
+                    plan = manager.create_plan("claude", "update")
+                    with self.assertRaisesRegex(
+                        opc_adapters.AdapterError, "APPLY_FAILED"
+                    ):
+                        manager.apply(
+                            plan_id=plan["plan_id"],
+                            confirmation_token=plan["confirmation_token"],
+                        )
+                self.assertTrue(fake.installed["claude"])
+                self.assertEqual(
+                    opc_adapters.tree_digest(adapter.marketplace_root),
+                    source_before,
+                )
+                self.assertEqual(
+                    manager.store.manifest_path("claude").read_bytes(),
+                    manifest_before,
+                )
+                self.assertEqual(fake.claude_plugin_data, data_before)
+                self.assertIn("unrelated-marketplace", fake.claude_marketplaces)
+                self.assertFalse(
+                    any(
+                        call[1:4] == ["plugin", "marketplace", "remove"]
+                        for call in fake.calls
+                    )
+                )
+
+    def test_claude_rollback_failure_steps_restore_current_working_source(self):
+        for step in ("marketplace_update", "plugin_update"):
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                fake = FakeHosts()
+                manager = self.manager(base, fake)
+                self.apply(manager, "claude", "install")
+                with (
+                    mock.patch.object(
+                        opc_adapters.HostAdapter,
+                        "source_version",
+                        new_callable=mock.PropertyMock,
+                        return_value="9.9.9",
+                    ),
+                    mock.patch.object(
+                        opc_adapters.HostAdapter,
+                        "content_hash",
+                        new_callable=mock.PropertyMock,
+                        return_value="f" * 64,
+                    ),
+                ):
+                    updated = self.apply(manager, "claude", "update")
+                current_manifest = manager.store.manifest_path("claude").read_bytes()
+                current_source = opc_adapters.tree_digest(
+                    manager.adapters["claude"].marketplace_root
+                )
+                fake.fail_next_claude_step = step
+                with self.assertRaisesRegex(
+                    opc_adapters.AdapterError, "ROLLBACK_FAILED"
+                ):
+                    manager.rollback("claude", updated["rollback_id"])
+                self.assertEqual(
+                    opc_adapters.tree_digest(manager.adapters["claude"].marketplace_root),
+                    current_source,
+                )
+                self.assertEqual(
+                    manager.store.manifest_path("claude").read_bytes(),
+                    current_manifest,
+                )
+                self.assertTrue(fake.installed["claude"])
+                self.assertEqual(fake.claude_plugin_data["sentinel"], "preserved")
+                self.assertIn("unrelated-marketplace", fake.claude_marketplaces)
+                self.assertFalse(
+                    any(
+                        call[1:4] == ["plugin", "marketplace", "remove"]
+                        for call in fake.calls
+                    )
+                )
 
     def test_permission_failure_restores_preexisting_kimi_tree(self):
         with tempfile.TemporaryDirectory() as directory:

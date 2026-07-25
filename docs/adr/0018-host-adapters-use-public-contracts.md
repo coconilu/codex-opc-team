@@ -20,9 +20,17 @@ separate:
 - Codex delegates to the existing Marketplace/Plugin lifecycle and
   `plugin_admin.py`.
 - Claude uses its documented non-interactive Marketplace Plugin CLI and
-  preserves plugin data during uninstall.
-- Kimi manages documented user Skill directories. Plugin automation remains
-  blocked while the public Plugin manager is interactive-only.
+  preserves plugin data during uninstall. One stable App-owned marketplace
+  path is registered once; update and rollback atomically change that source
+  and use public marketplace/plugin update commands. Marketplace removal is
+  not an update or rollback primitive.
+- Kimi manages documented user Skill directories and passes their common scan
+  root once to `--skills-dir`. Plugin automation remains blocked while the
+  public Plugin manager is interactive-only.
+
+Preview plans are short-lived, one-time, and process-local. Apply re-captures
+and compares the source, host/version, official discovery, capability contract,
+ownership manifest, and resolved target state before the first write.
 
 File/Git remains authoritative. Adapter manifests and backups are operational,
 rebuildable App state, not organizational memory. A host target may be changed
@@ -33,5 +41,5 @@ still matches. Unknown host versions and unsupported mechanisms fail closed.
 
 The three hosts can expose different support levels without false parity.
 Plans are auditable and writes require explicit confirmation. Real installed
-state still needs independent host-specific QA because clean-room fake CLIs
-cannot prove logged-in discovery or interactive Skill invocation.
+state still needs independent host-specific QA; Developer-run disposable-host
+acceptance is implementation evidence, not release approval.
