@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -10,10 +11,16 @@ import time
 import unittest
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
 ADMIN = ROOT / "scripts" / "opc_app_admin.py"
+ADMIN_SPEC = importlib.util.spec_from_file_location("opc_app_admin_under_test", ADMIN)
+assert ADMIN_SPEC is not None and ADMIN_SPEC.loader is not None
+opc_app_admin = importlib.util.module_from_spec(ADMIN_SPEC)
+ADMIN_SPEC.loader.exec_module(opc_app_admin)
 
 
 def clean_environment(home: Path, state_root: Path) -> dict[str, str]:
@@ -44,6 +51,38 @@ def run_admin(
         text=True,
         timeout=90,
     )
+
+
+def run_admin_raw(
+    *arguments: str,
+    environment: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(ADMIN), *arguments],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+
+
+def make_source(base: Path, version: str) -> Path:
+    source = base / f"source-{version}"
+    plugin_target = source / "plugins" / "codex-opc-team"
+    shutil.copytree(
+        ROOT / "plugins" / "codex-opc-team",
+        plugin_target,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+    manifest_path = plugin_target / ".codex-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["version"] = version
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return source
 
 
 class OPCAppLifecycleTests(unittest.TestCase):
@@ -227,6 +266,29 @@ class OPCAppLifecycleTests(unittest.TestCase):
             self.assertNotEqual(first["current"], second["current"])
             self.assertEqual(second["previous"], first["current"])
 
+            previous_manifest = (
+                install_root
+                / "releases"
+                / first["current"]
+                / "release-manifest.json"
+            )
+            previous_manifest_bytes = previous_manifest.read_bytes()
+            previous_manifest.unlink()
+            rejected = run_admin_raw(
+                "rollback",
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            self.assertEqual(rejected.returncode, 1)
+            self.assertIn("manifest is missing", rejected.stderr)
+            self.assertEqual(
+                json.loads((install_root / "current.json").read_text(encoding="utf-8")),
+                second,
+            )
+            previous_manifest.write_bytes(previous_manifest_bytes)
+
             preview = run_admin(
                 "rollback",
                 "--install-root",
@@ -247,6 +309,254 @@ class OPCAppLifecycleTests(unittest.TestCase):
             rolled_back = json.loads((install_root / "current.json").read_text(encoding="utf-8"))
             self.assertEqual(rolled_back["current"], first["current"])
             self.assertEqual(state_marker.read_text(encoding="utf-8"), '{"private":"preserve"}')
+
+    def test_corruption_missing_manifest_conflict_and_link_fail_closed_then_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            home.mkdir()
+            state_root = base / "app-state"
+            install_root = base / "runtime"
+            environment = clean_environment(home, state_root)
+            source = make_source(base, "9.1.0-integrity")
+
+            run_admin(
+                "install",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            pointer = json.loads((install_root / "current.json").read_text(encoding="utf-8"))
+            release_root = install_root / "releases" / pointer["current"]
+            target = release_root / "plugin" / "assets" / "app" / "dashboard.js"
+            original = target.read_bytes()
+
+            target.write_bytes(original + b"\n// tampered")
+            status = run_admin_raw(
+                "status",
+                "--install-root",
+                str(install_root),
+                environment=environment,
+            )
+            self.assertEqual(status.returncode, 1)
+            self.assertIn("content digest mismatch", status.stderr)
+            launcher = subprocess.run(
+                [
+                    sys.executable,
+                    str(install_root / "bin" / "opc-app.py"),
+                    "--demo",
+                    "--no-open",
+                ],
+                cwd=base,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(launcher.returncode, 1)
+            self.assertIn("integrity validation", launcher.stderr)
+
+            repair = run_admin(
+                "update",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            self.assertIn('"action": "repair"', repair.stdout)
+            verified = run_admin(
+                "status",
+                "--install-root",
+                str(install_root),
+                environment=environment,
+            )
+            self.assertIn('"integrity": "verified"', verified.stdout)
+
+            extra = release_root / "plugin" / "unexpected.bin"
+            extra.write_bytes(b"conflict")
+            conflict = run_admin_raw(
+                "status",
+                "--install-root",
+                str(install_root),
+                environment=environment,
+            )
+            self.assertEqual(conflict.returncode, 1)
+            self.assertIn("file inventory mismatch", conflict.stderr)
+            run_admin(
+                "update",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+
+            manifest_path = release_root / "release-manifest.json"
+            manifest_path.unlink()
+            missing = run_admin_raw(
+                "status",
+                "--install-root",
+                str(install_root),
+                environment=environment,
+            )
+            self.assertEqual(missing.returncode, 1)
+            self.assertIn("manifest is missing", missing.stderr)
+            run_admin(
+                "update",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+
+            outside = base / "outside.js"
+            outside.write_bytes(original)
+            target = release_root / "plugin" / "assets" / "app" / "dashboard.js"
+            target.unlink()
+            try:
+                os.symlink(outside, target)
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlink creation is not permitted")
+            linked = run_admin_raw(
+                "status",
+                "--install-root",
+                str(install_root),
+                environment=environment,
+            )
+            self.assertEqual(linked.returncode, 1)
+            self.assertIn("linked content", linked.stderr)
+
+    def test_permission_and_pointer_activation_failures_preserve_current_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            home.mkdir()
+            state_root = base / "app-state"
+            install_root = base / "runtime"
+            environment = clean_environment(home, state_root)
+            first_source = make_source(base, "9.2.0-first")
+            second_source = make_source(base, "9.2.1-second")
+
+            run_admin(
+                "install",
+                "--source",
+                str(first_source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            pointer_path = install_root / "current.json"
+            before = json.loads(pointer_path.read_text(encoding="utf-8"))
+            arguments = SimpleNamespace(
+                source=str(second_source),
+                install_root=str(install_root),
+                apply=True,
+                dry_run=False,
+            )
+
+            with (
+                mock.patch.object(
+                    opc_app_admin.shutil,
+                    "copytree",
+                    side_effect=PermissionError("denied"),
+                ),
+                self.assertRaises(opc_app_admin.AppInstallError),
+            ):
+                opc_app_admin.install_or_update(arguments)
+            self.assertEqual(
+                json.loads(pointer_path.read_text(encoding="utf-8")),
+                before,
+            )
+            self.assertEqual(list(install_root.glob(".stage-*")), [])
+
+            original_atomic = opc_app_admin._atomic_json
+
+            def fail_pointer(path, payload):
+                if Path(path).name == "current.json":
+                    raise opc_app_admin.AppInstallError("injected pointer failure")
+                return original_atomic(path, payload)
+
+            with (
+                mock.patch.object(
+                    opc_app_admin,
+                    "_atomic_json",
+                    side_effect=fail_pointer,
+                ),
+                self.assertRaises(opc_app_admin.AppInstallError),
+            ):
+                opc_app_admin.install_or_update(arguments)
+            self.assertEqual(
+                json.loads(pointer_path.read_text(encoding="utf-8")),
+                before,
+            )
+            opc_app_admin._validate_release(
+                install_root / "releases" / before["current"],
+                expected_release=before["current"],
+            )
+
+            second_plugin = opc_app_admin._plugin_source(second_source)
+            second_manifest = opc_app_admin._manifest(second_plugin)
+            second_release = opc_app_admin._release_id(
+                second_plugin,
+                second_manifest["version"],
+            )
+            second_root = install_root / "releases" / second_release
+            target = second_root / "plugin" / "assets" / "app" / "dashboard.js"
+            target.write_bytes(target.read_bytes() + b"\n// corrupt")
+            original_replace = opc_app_admin.os.replace
+
+            def fail_replacement_and_restore(source_path, destination_path):
+                source_path = Path(source_path)
+                destination_path = Path(destination_path)
+                if (
+                    destination_path == second_root
+                    and (
+                        source_path.name.startswith(".stage-")
+                        or source_path.name.startswith(".corrupt-")
+                    )
+                ):
+                    raise PermissionError("injected replacement failure")
+                return original_replace(source_path, destination_path)
+
+            with (
+                mock.patch.object(
+                    opc_app_admin.os,
+                    "replace",
+                    side_effect=fail_replacement_and_restore,
+                ),
+                self.assertRaises(opc_app_admin.AppInstallError),
+            ):
+                opc_app_admin._install_validated_release(
+                    root=install_root,
+                    plugin=second_plugin,
+                    version=second_manifest["version"],
+                    release=second_release,
+                )
+            quarantined = list(install_root.glob(f".corrupt-{second_release}-*"))
+            self.assertEqual(len(quarantined), 1)
+            self.assertFalse(second_root.exists())
+            self.assertTrue(
+                (
+                    quarantined[0]
+                    / "plugin"
+                    / "assets"
+                    / "app"
+                    / "dashboard.js"
+                ).is_file()
+            )
+            self.assertEqual(
+                json.loads(pointer_path.read_text(encoding="utf-8")),
+                before,
+            )
 
 
 if __name__ == "__main__":

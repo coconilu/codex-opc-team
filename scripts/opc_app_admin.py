@@ -12,6 +12,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import secrets
 import shutil
 import stat
 import sys
@@ -24,6 +26,10 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_MANIFEST_BYTES = 64 * 1024
 POINTER_SCHEMA = "opc-app.install.v1"
 OWNER_SCHEMA = "opc-app.runtime-owner.v1"
+RELEASE_MANIFEST_SCHEMA = "opc-app.release-manifest.v1"
+RELEASE_ID = re.compile(r"^v[A-Za-z0-9.-]{1,64}-[0-9a-f]{12}$")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+MAX_RELEASE_FILES = 4096
 
 
 class AppInstallError(RuntimeError):
@@ -147,11 +153,139 @@ def _release_id(plugin: Path, version: str) -> str:
     return f"v{safe_version}-{digest.hexdigest()[:12]}"
 
 
+def _release_manifest(plugin: Path, version: str, release: str) -> dict[str, Any]:
+    files = []
+    for path in _source_files(plugin):
+        payload = path.read_bytes()
+        files.append(
+            {
+                "path": path.relative_to(plugin).as_posix(),
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    return {
+        "schema_version": RELEASE_MANIFEST_SCHEMA,
+        "release": release,
+        "version": version,
+        "files": files,
+    }
+
+
+def _release_tree_files(plugin: Path) -> list[Path]:
+    files: list[Path] = []
+    try:
+        entries = list(plugin.rglob("*"))
+    except OSError as exc:
+        raise AppInstallError("installed release tree is unreadable") from exc
+    for path in entries:
+        if _is_link(path):
+            raise AppInstallError("installed release contains linked content")
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise AppInstallError("installed release tree is unreadable") from exc
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise AppInstallError("installed release contains unsafe content")
+        files.append(path)
+    return sorted(files, key=lambda item: item.relative_to(plugin).as_posix())
+
+
+def _validate_release(
+    release_root: Path,
+    *,
+    expected_release: str | None = None,
+) -> dict[str, Any]:
+    manifest_path = release_root / "release-manifest.json"
+    plugin = release_root / "plugin"
+    if _is_link(release_root) or _is_link(manifest_path) or _is_link(plugin):
+        raise AppInstallError("installed release contains linked content")
+    try:
+        manifest_metadata = manifest_path.lstat()
+    except OSError as exc:
+        raise AppInstallError("installed release manifest is missing") from exc
+    if (
+        not stat.S_ISREG(manifest_metadata.st_mode)
+        or manifest_metadata.st_nlink != 1
+        or manifest_metadata.st_size <= 0
+        or manifest_metadata.st_size > MAX_MANIFEST_BYTES * 8
+    ):
+        raise AppInstallError("installed release manifest is unsafe")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise AppInstallError("installed release manifest is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "release", "version", "files"}
+        or payload.get("schema_version") != RELEASE_MANIFEST_SCHEMA
+        or not isinstance(payload.get("release"), str)
+        or RELEASE_ID.fullmatch(payload["release"]) is None
+        or not isinstance(payload.get("version"), str)
+        or not payload["version"]
+        or len(payload["version"]) > 64
+        or not isinstance(payload.get("files"), list)
+        or not payload["files"]
+        or len(payload["files"]) > MAX_RELEASE_FILES
+    ):
+        raise AppInstallError("installed release manifest is invalid")
+    if expected_release is not None and payload["release"] != expected_release:
+        raise AppInstallError("installed release identity mismatch")
+
+    expected_files: dict[str, tuple[int, str]] = {}
+    for item in payload["files"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "size", "sha256"}
+            or not isinstance(item.get("path"), str)
+            or not item["path"]
+            or len(item["path"]) > 240
+            or "\\" in item["path"]
+            or item["path"].startswith("/")
+            or any(part in {"", ".", ".."} for part in item["path"].split("/"))
+            or not isinstance(item.get("size"), int)
+            or isinstance(item["size"], bool)
+            or item["size"] < 0
+            or not isinstance(item.get("sha256"), str)
+            or HEX64.fullmatch(item["sha256"]) is None
+            or item["path"] in expected_files
+        ):
+            raise AppInstallError("installed release manifest is invalid")
+        expected_files[item["path"]] = (item["size"], item["sha256"])
+
+    actual_files = _release_tree_files(plugin)
+    actual_names = [path.relative_to(plugin).as_posix() for path in actual_files]
+    if set(actual_names) != set(expected_files):
+        raise AppInstallError("installed release file inventory mismatch")
+    for path, name in zip(actual_files, actual_names):
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise AppInstallError("installed release file is unreadable") from exc
+        size, digest = expected_files[name]
+        if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
+            raise AppInstallError("installed release content digest mismatch")
+    calculated = _release_id(plugin, payload["version"])
+    if calculated != payload["release"]:
+        raise AppInstallError("installed release content identity mismatch")
+    return payload
+
+
 def _read_pointer(root: Path) -> dict[str, Any]:
     path = root / "current.json"
     if not path.is_file() or _is_link(path):
         return {"schema_version": POINTER_SCHEMA, "current": None, "previous": None}
     try:
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size <= 0
+            or metadata.st_size > MAX_MANIFEST_BYTES
+        ):
+            raise AppInstallError("installed release pointer is unsafe")
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise AppInstallError("installed release pointer is invalid") from exc
@@ -159,12 +293,33 @@ def _read_pointer(root: Path) -> dict[str, Any]:
         payload.get("schema_version") != POINTER_SCHEMA
         or set(payload) != {"schema_version", "current", "previous"}
         or any(
-            value is not None and (not isinstance(value, str) or len(value) > 128)
+            value is not None
+            and (
+                not isinstance(value, str)
+                or RELEASE_ID.fullmatch(value) is None
+            )
             for value in (payload.get("current"), payload.get("previous"))
         )
     ):
         raise AppInstallError("installed release pointer is invalid")
     return payload
+
+
+def _validate_pointer_releases(
+    root: Path,
+    pointer: dict[str, Any],
+    *,
+    include_previous: bool = True,
+) -> None:
+    names = [pointer.get("current")]
+    if include_previous:
+        names.append(pointer.get("previous"))
+    for release in names:
+        if release is not None:
+            _validate_release(
+                root / "releases" / release,
+                expected_release=release,
+            )
 
 
 def _owned_root(root: Path) -> bool:
@@ -196,7 +351,7 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
     except OSError as exc:
-        raise AppInstallError("failed to update installed release pointer") from exc
+        raise AppInstallError("failed to atomically update OPC App metadata") from exc
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -204,19 +359,107 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
 LAUNCHER = """#!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import runpy
+import stat
 import sys
 from pathlib import Path
 
-root = Path(__file__).resolve().parents[1]
-pointer = json.loads((root / "current.json").read_text(encoding="utf-8"))
-release = pointer.get("current")
-if not isinstance(release, str) or not release:
-    raise SystemExit("OPC_APP_LAUNCH_FAILED: no active release")
-script = root / "releases" / release / "plugin" / "scripts" / "opc_app.py"
-if not script.is_file():
-    raise SystemExit("OPC_APP_LAUNCH_FAILED: active release is incomplete")
+def linked(path: Path) -> bool:
+    metadata = path.lstat()
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(reparse and attributes & reparse)
+
+try:
+    root = Path(__file__).resolve().parents[1]
+    pointer_path = root / "current.json"
+    pointer_metadata = pointer_path.lstat()
+    if linked(pointer_path) or not stat.S_ISREG(pointer_metadata.st_mode) or pointer_metadata.st_nlink != 1:
+        raise ValueError
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    release = pointer.get("current")
+    if not isinstance(release, str) or not release or "/" in release or "\\\\" in release or ".." in release:
+        raise ValueError
+    release_root = root / "releases" / release
+    plugin = release_root / "plugin"
+    manifest_path = release_root / "release-manifest.json"
+    manifest_metadata = manifest_path.lstat()
+    if (
+        linked(release_root)
+        or linked(plugin)
+        or linked(manifest_path)
+        or not stat.S_ISREG(manifest_metadata.st_mode)
+        or manifest_metadata.st_nlink != 1
+    ):
+        raise ValueError
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        set(manifest) != {"schema_version", "release", "version", "files"}
+        or manifest.get("schema_version") != "opc-app.release-manifest.v1"
+        or manifest.get("release") != release
+        or not isinstance(manifest.get("files"), list)
+        or not manifest["files"]
+    ):
+        raise ValueError
+    expected = {}
+    for item in manifest["files"]:
+        name = item.get("path")
+        digest = item.get("sha256")
+        size = item.get("size")
+        if (
+            set(item) != {"path", "size", "sha256"}
+            or not isinstance(name, str)
+            or not name
+            or "\\\\" in name
+            or name.startswith("/")
+            or any(part in {"", ".", ".."} for part in name.split("/"))
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or name in expected
+        ):
+            raise ValueError
+        expected[name] = (size, digest)
+    actual = {}
+    raw_files = {}
+    for path in plugin.rglob("*"):
+        metadata = path.lstat()
+        if linked(path):
+            raise ValueError
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError
+        name = path.relative_to(plugin).as_posix()
+        raw = path.read_bytes()
+        actual[name] = (len(raw), hashlib.sha256(raw).hexdigest())
+        raw_files[name] = raw
+    if actual != expected:
+        raise ValueError
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError
+    identity = hashlib.sha256()
+    for name in sorted(raw_files):
+        encoded_name = name.encode("utf-8")
+        raw = raw_files[name]
+        identity.update(len(encoded_name).to_bytes(4, "big"))
+        identity.update(encoded_name)
+        identity.update(len(raw).to_bytes(8, "big"))
+        identity.update(raw)
+    safe_version = "".join(char if char.isalnum() or char in ".-" else "-" for char in version)
+    if f"v{safe_version}-{identity.hexdigest()[:12]}" != release:
+        raise ValueError
+except Exception:
+    raise SystemExit("OPC_APP_LAUNCH_FAILED: active release failed integrity validation")
+
+script = plugin / "scripts" / "opc_app.py"
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(script.parent))
 sys.argv = [str(script), *sys.argv[1:]]
 runpy.run_path(str(script), run_name="__main__")
@@ -244,6 +487,65 @@ def _write_launchers(root: Path) -> None:
         pass
 
 
+def _install_validated_release(
+    *,
+    root: Path,
+    plugin: Path,
+    version: str,
+    release: str,
+) -> None:
+    releases = root / "releases"
+    releases.mkdir(exist_ok=True)
+    release_root = releases / release
+    stage = root / f".stage-{release}-{secrets.token_hex(6)}"
+    quarantine: Path | None = None
+    replacement_installed = False
+    try:
+        stage.mkdir()
+        shutil.copytree(
+            plugin,
+            stage / "plugin",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
+        _atomic_json(
+            stage / "release-manifest.json",
+            _release_manifest(stage / "plugin", version, release),
+        )
+        _validate_release(stage, expected_release=release)
+
+        if release_root.exists():
+            quarantine = root / f".corrupt-{release}-{secrets.token_hex(6)}"
+            os.replace(release_root, quarantine)
+        try:
+            os.replace(stage, release_root)
+            replacement_installed = True
+        except OSError:
+            if quarantine is not None and quarantine.exists() and not release_root.exists():
+                os.replace(quarantine, release_root)
+                quarantine = None
+            raise
+        _validate_release(release_root, expected_release=release)
+        if quarantine is not None:
+            shutil.rmtree(quarantine)
+            quarantine = None
+    except (OSError, AppInstallError) as exc:
+        if replacement_installed and release_root.exists():
+            shutil.rmtree(release_root, ignore_errors=True)
+            replacement_installed = False
+        if quarantine is not None and quarantine.exists() and not release_root.exists():
+            try:
+                os.replace(quarantine, release_root)
+                quarantine = None
+            except OSError:
+                pass
+        if isinstance(exc, AppInstallError):
+            raise
+        raise AppInstallError("failed to install a verified OPC App release") from exc
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+
+
 def install_or_update(args: argparse.Namespace) -> int:
     source = Path(os.path.abspath(Path(args.source).expanduser())) if args.source else ROOT
     plugin = _plugin_source(source)
@@ -257,7 +559,26 @@ def install_or_update(args: argparse.Namespace) -> int:
         "current": None,
         "previous": None,
     }
-    action = "keep" if pointer["current"] == release else "install"
+    release_root = root / "releases" / release
+    target_valid = False
+    if release_root.exists():
+        try:
+            _validate_release(release_root, expected_release=release)
+            target_valid = True
+        except AppInstallError:
+            target_valid = False
+    for referenced in (pointer.get("current"), pointer.get("previous")):
+        if referenced is not None and referenced != release:
+            _validate_release(
+                root / "releases" / referenced,
+                expected_release=referenced,
+            )
+    if pointer["current"] == release and target_valid:
+        action = "keep"
+    elif release_root.exists() and not target_valid:
+        action = "repair"
+    else:
+        action = "install"
     plan = {
         "dry_run": not args.apply,
         "action": action,
@@ -282,24 +603,15 @@ def install_or_update(args: argparse.Namespace) -> int:
             "owner": "coconilu/codex-opc-team:opc-app",
         },
     )
-    releases = root / "releases"
-    releases.mkdir(exist_ok=True)
-    release_root = releases / release
-    if not release_root.exists():
-        stage = root / f".stage-{release}"
-        if stage.exists():
-            shutil.rmtree(stage)
-        stage.mkdir()
-        try:
-            shutil.copytree(
-                plugin,
-                stage / "plugin",
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
-            )
-            os.replace(stage, release_root)
-        except OSError as exc:
-            shutil.rmtree(stage, ignore_errors=True)
-            raise AppInstallError("failed to install OPC App release") from exc
+    if not target_valid:
+        _install_validated_release(
+            root=root,
+            plugin=plugin,
+            version=manifest["version"],
+            release=release,
+        )
+    _validate_release(release_root, expected_release=release)
+    _write_launchers(root)
     if pointer["current"] != release:
         pointer = {
             "schema_version": POINTER_SCHEMA,
@@ -307,7 +619,6 @@ def install_or_update(args: argparse.Namespace) -> int:
             "previous": pointer["current"],
         }
         _atomic_json(root / "current.json", pointer)
-    _write_launchers(root)
     print(f"OPC App ready: {plan['launcher']}")
     print(f"App state remains separate: {plan['app_state_root']}")
     return 0
@@ -318,8 +629,9 @@ def rollback(args: argparse.Namespace) -> int:
     if not root.exists() or not _owned_root(root):
         raise AppInstallError("install root is not owned by OPC App")
     pointer = _read_pointer(root)
+    _validate_pointer_releases(root, pointer)
     previous = pointer.get("previous")
-    if not previous or not (root / "releases" / previous / "plugin").is_dir():
+    if not previous:
         raise AppInstallError("no complete previous release is available")
     plan = {
         "dry_run": not args.apply,
@@ -333,6 +645,7 @@ def rollback(args: argparse.Namespace) -> int:
     if not args.apply:
         print("Dry run only. Re-run with --apply after reviewing this plan.")
         return 0
+    _validate_pointer_releases(root, pointer)
     _atomic_json(
         root / "current.json",
         {
@@ -374,11 +687,15 @@ def uninstall(args: argparse.Namespace) -> int:
 
 def status(args: argparse.Namespace) -> int:
     root = _safe_install_root(args.install_root or default_install_root())
+    if root.exists() and not _owned_root(root):
+        raise AppInstallError("install root is not owned by OPC App")
     pointer = _read_pointer(root) if root.exists() else {
         "schema_version": POINTER_SCHEMA,
         "current": None,
         "previous": None,
     }
+    if pointer["current"] is not None:
+        _validate_pointer_releases(root, pointer)
     print(
         json.dumps(
             {
@@ -386,6 +703,7 @@ def status(args: argparse.Namespace) -> int:
                 "installed": bool(pointer["current"]),
                 "current_release": pointer["current"],
                 "previous_release": pointer["previous"],
+                "integrity": "verified" if pointer["current"] else "not-installed",
                 "launcher": str(root / "bin" / ("opc-app.cmd" if os.name == "nt" else "opc-app")),
                 "app_state_root": str(default_state_root()),
             },

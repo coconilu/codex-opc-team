@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
-from opc_dashboard import (
+from opc_snapshot_service import (
     DashboardError,
     DashboardHTTPServer,
     DashboardRequestHandler,
@@ -32,13 +32,11 @@ from opc_dashboard import (
     _authority,
     _read_json,
     _safe_text,
-    aggregate_snapshot,
-    load_demo_snapshot,
     utc_now,
     validate_bind_host,
+    SnapshotService,
 )
 from opc_memory import resolve_data_root, resolve_knowledge_root
-from opc_snapshot_service import SnapshotService
 
 
 APP_CONTEXT_SCHEMA = "opc-app.context.v1"
@@ -46,7 +44,9 @@ APP_SETTINGS_SCHEMA = "opc-app.settings.v1"
 MAX_SETTINGS_BYTES = 256 * 1024
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_PROJECTS = 64
-APP_ASSET_ROOT = Path(__file__).resolve().parents[1] / "assets" / "app"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_CONTAINER_ROOT = Path(__file__).resolve().parents[3]
+APP_ASSET_ROOT = PLUGIN_ROOT / "assets" / "app"
 
 
 class AppSettingsError(RuntimeError):
@@ -78,16 +78,87 @@ def _is_link(metadata: os.stat_result) -> bool:
     return bool(reparse and attributes & reparse)
 
 
-def _safe_state_root(path: Path) -> Path:
-    root = Path(os.path.abspath(path))
-    plugin_root = Path(__file__).resolve().parents[1]
+def _normalized_path(path: Path | str, *, canonical: bool) -> Path:
+    value = os.path.abspath(Path(path).expanduser())
+    if canonical:
+        value = os.path.realpath(value)
+    return Path(os.path.normcase(value))
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
     try:
-        root.relative_to(plugin_root)
+        left.relative_to(right)
+        return True
     except ValueError:
         pass
-    else:
-        raise AppSettingsError("STATE_INSIDE_PLUGIN")
-    root.mkdir(parents=True, exist_ok=True)
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
+
+
+def _runtime_root() -> Path | None:
+    for parent in (PLUGIN_ROOT, *PLUGIN_ROOT.parents):
+        if (parent / ".opc-app-owned.json").is_file():
+            return parent
+    return None
+
+
+def _assert_unlinked_ancestors(path: Path) -> None:
+    current = Path(os.path.abspath(path))
+    while True:
+        if os.path.lexists(current):
+            try:
+                metadata = current.lstat()
+            except OSError as exc:
+                raise AppSettingsError("STATE_UNAVAILABLE") from exc
+            if _is_link(metadata):
+                raise AppSettingsError("UNSAFE_STATE_ROOT")
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
+
+
+def _assert_no_root_overlap(
+    state_root: Path,
+    forbidden_roots: Sequence[Path | str],
+) -> None:
+    state_variants = (
+        _normalized_path(state_root, canonical=False),
+        _normalized_path(state_root, canonical=True),
+    )
+    for forbidden in forbidden_roots:
+        forbidden_variants = (
+            _normalized_path(forbidden, canonical=False),
+            _normalized_path(forbidden, canonical=True),
+        )
+        if any(
+            _paths_overlap(state_variant, forbidden_variant)
+            for state_variant in state_variants
+            for forbidden_variant in forbidden_variants
+        ):
+            raise AppSettingsError("STATE_ROOT_OVERLAP")
+
+
+def _safe_state_root(
+    path: Path,
+    *,
+    forbidden_roots: Sequence[Path | str] = (),
+    create: bool = False,
+) -> Path:
+    root = Path(os.path.abspath(path))
+    _assert_unlinked_ancestors(root)
+    built_in_roots: list[Path | str] = [PLUGIN_ROOT, SOURCE_CONTAINER_ROOT]
+    runtime_root = _runtime_root()
+    if runtime_root is not None:
+        built_in_roots.append(runtime_root)
+    _assert_no_root_overlap(root, (*built_in_roots, *forbidden_roots))
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    if not os.path.lexists(root):
+        return root
     try:
         metadata = root.lstat()
     except OSError as exc:
@@ -108,10 +179,28 @@ def _default_settings() -> dict[str, Any]:
 class AppSettingsStore:
     """Atomic App-owned registry; project paths never leave this process."""
 
-    def __init__(self, state_root: Path | str):
-        self.root = _safe_state_root(Path(state_root))
+    def __init__(
+        self,
+        state_root: Path | str,
+        *,
+        forbidden_roots: Sequence[Path | str] = (),
+    ):
+        self._configured_forbidden_roots = tuple(Path(item) for item in forbidden_roots)
+        self.root = _safe_state_root(
+            Path(state_root),
+            forbidden_roots=self._configured_forbidden_roots,
+        )
         self.path = self.root / "settings.json"
         self._lock = threading.RLock()
+
+    def _assert_state_isolated(
+        self,
+        project_roots: Sequence[Path | str] = (),
+    ) -> None:
+        _assert_no_root_overlap(
+            self.root,
+            (*self._configured_forbidden_roots, *project_roots),
+        )
 
     def _load_strict(self) -> dict[str, Any]:
         if not os.path.lexists(self.path):
@@ -156,10 +245,26 @@ class AppSettingsStore:
         selected = payload.get("selected_project_id")
         if selected is not None and selected not in seen_ids:
             raise AppSettingsError("INVALID_SETTINGS")
+        self._assert_state_isolated(
+            [Path(item["path"]) for item in payload["projects"]]
+        )
         return payload
 
     def _write(self, payload: Mapping[str, Any]) -> None:
-        root = _safe_state_root(self.root)
+        project_roots = [
+            Path(item["path"])
+            for item in payload.get("projects", [])
+            if isinstance(item, Mapping) and isinstance(item.get("path"), str)
+        ]
+        self._assert_state_isolated(project_roots)
+        root = _safe_state_root(
+            self.root,
+            forbidden_roots=(
+                *self._configured_forbidden_roots,
+                *project_roots,
+            ),
+            create=True,
+        )
         if os.path.lexists(self.path):
             metadata = self.path.lstat()
             if (
@@ -294,6 +399,7 @@ class AppSettingsStore:
         with self._lock:
             payload = self._load_strict()
             root = self._normalize_project_root(value)
+            self._assert_state_isolated([root])
             normalized = os.path.normcase(str(root))
             if any(
                 os.path.normcase(os.path.abspath(item["path"])) == normalized
@@ -591,20 +697,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             settings_store: AppSettingsStore | DemoSettingsStore = DemoSettingsStore()
             service = SnapshotService(
                 project_roots_provider=settings_store.project_roots,
-                snapshot_builder=aggregate_snapshot,
-                demo_loader=load_demo_snapshot,
-                snapshot_validator=_assert_redacted,
                 demo=True,
             )
         else:
-            settings_store = AppSettingsStore(resolve_app_state_root(args.state_root))
+            knowledge_root = resolve_knowledge_root(args.knowledge_root)
+            data_root = resolve_data_root(args.data_root)
+            settings_store = AppSettingsStore(
+                resolve_app_state_root(args.state_root),
+                forbidden_roots=(knowledge_root, data_root),
+            )
             service = SnapshotService(
                 project_roots_provider=settings_store.project_roots,
-                snapshot_builder=aggregate_snapshot,
-                demo_loader=load_demo_snapshot,
-                snapshot_validator=_assert_redacted,
-                knowledge_root=resolve_knowledge_root(args.knowledge_root),
-                data_root=resolve_data_root(args.data_root),
+                knowledge_root=knowledge_root,
+                data_root=data_root,
                 allow_empty=True,
             )
         server = create_app_server(

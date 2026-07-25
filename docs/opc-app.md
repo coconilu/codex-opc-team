@@ -78,6 +78,10 @@ App runtime 默认位于平台用户数据目录；App 状态与 runtime 分开�
 可用 `OPC_APP_HOME` 显式覆盖状态根。状态根保存项目接入清单和当前项目选择，
 可以删除重建，但不是 OPC 业务事实来源。
 
+状态根不能与源码 checkout、插件/runtime、任何显式项目或 `.opc`、知识根、数据
+根存在父子重叠，也不能经过 symlink/junction parent。检查同时比较 lexical path
+和 canonical realpath，并且发生在目录创建与 settings 写入之前。
+
 卸载只删除 App runtime：
 
 ```powershell
@@ -87,6 +91,11 @@ python scripts/opc_app_admin.py uninstall --apply
 
 App 状态、项目 `.opc`、File/Git knowledge、Git 历史、用户配置和 Mem0 数据均
 保留。安装器不安装 Codex、Claude、Kimi，也不编辑任何 Agent 全局配置。
+
+每个 runtime release 都携带完整文件 manifest、文件大小和 SHA-256。安装 staging、
+激活、`status`、launcher 和 rollback 都会复验清单；缺失、篡改、额外文件、内部
+链接或不可读内容会 fail closed。对同一可信源码再次执行 `update --apply` 可修复
+损坏 release，current pointer 只在复验成功后原子切换。
 
 ## 4. 项目接入与隐私
 

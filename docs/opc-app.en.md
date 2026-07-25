@@ -79,6 +79,12 @@ The runtime and App state are separate. The default state root is
 overrides it. This registry and current-project preference are rebuildable App
 settings, not OPC facts.
 
+The state root must not overlap the source checkout, plugin/runtime, any
+explicit project or `.opc`, the knowledge root, or the rebuildable data root
+in either direction. Lexical and canonical real paths are checked before
+directory creation or settings writes, and symlink/junction parents are
+rejected.
+
 Uninstall removes only the runtime:
 
 ```text
@@ -89,6 +95,12 @@ python scripts/opc_app_admin.py uninstall --apply
 App state, project `.opc`, File/Git knowledge, Git history, existing user
 configuration, and Mem0 data are preserved. This installer does not install
 Codex, Claude, or Kimi and does not edit Agent global configuration.
+
+Every runtime release carries a complete file manifest with sizes and SHA-256
+digests. Staging, activation, `status`, the launcher, and rollback all verify
+it. Missing, modified, extra, linked, or unreadable content fails closed. A
+trusted `update --apply` can repair the same damaged release, and the current
+pointer changes only after successful verification.
 
 ## 4. Project and privacy boundary
 

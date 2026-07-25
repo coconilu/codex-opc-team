@@ -22,13 +22,16 @@ loopback-only 浏览器视图可以安全降低经理理解 OPC 状态的成本�
 1. **独立的是控制平面生命周期，不是执行 Harness。** App 只负责可视化、
    显式项目接入和 App 自有偏好；Agent 继续负责模型与工具执行。
 2. **一个 Snapshot 语义来源。** `opc_snapshot_service.py` 是旧 Dashboard 和
-   新 App 共用的应用服务边界，实际聚合、状态判断、固定 DTO 与脱敏仍只由
-   `opc_dashboard.py` 的既有实现提供。App 不复制治理规则。
+   新 App 共用的 core/service，实际聚合、状态判断、固定 DTO、脱敏、demo
+   校验与稳定读取均位于该模块。`opc_dashboard.py` 和 `opc_app.py` 只是入口
+   adapter，不互相 import，也不复制治理规则。
 3. **File/Git authoritative。** App 不持久化 OPC 业务事实。Mem0 仍是可选、
    可删除重建的 Provider；缺失或故障时准确降级。
 4. **App 状态与业务状态隔离。** 项目接入清单和当前项目选择位于
    `OPC_APP_HOME` 或平台文档化的用户状态目录，不在 checkout、插件安装目录、
-   项目 `.opc` 或知识根内。清单可删除重建。
+   runtime、项目/`.opc`、知识根或可重建数据根内。服务在创建目录或写入前，
+   对 lexical path 与 canonical realpath 执行双向 overlap 检查，并拒绝
+   symlink/junction ancestor；已有恶意清单也不能绕过。清单可删除重建。
 5. **显式接入，不扫描。** 用户提交一个绝对项目目录；服务端只验证该目录的
    `.opc/project.json`。响应仅返回 `显式目录 N`、安全项目名和 portable ID，
    不回传绝对路径。
@@ -40,9 +43,10 @@ loopback-only 浏览器视图可以安全降低经理理解 OPC 状态的成本�
 8. **无大型构建链。** 延续 Python 标准库服务和无构建步骤的 HTML/CSS/JS。
    当前交互规模没有足够证据引入 Electron、Tauri、React 或 Node 供应链。
 9. **独立可回滚分发。** App 安装器把公开插件快照复制到用户级 runtime，
-   用内容哈希 release 与原子 current pointer 支持安装、升级和回滚。卸载只删除
-   runtime；App 状态、项目、File/Git knowledge、Git 历史、用户配置和 Mem0
-   数据全部保留。
+   为每个 release 持久化完整文件清单、大小与 SHA-256，用内容哈希 release
+   与原子 current pointer 支持安装、升级和回滚。staging、激活、启动、状态检查
+   和回滚前都会复验完整性；损坏 release 不会被激活。卸载只删除 runtime；
+   App 状态、项目、File/Git knowledge、Git 历史、用户配置和 Mem0 数据全部保留。
 10. **旧入口兼容。** 不安装或不启动 App 时，Codex Plugin、Skills、Hook、
     脚本和 `opc_dashboard.py` 的行为与生命周期 Gate 不变。
 

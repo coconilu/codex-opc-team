@@ -162,7 +162,10 @@ python scripts/opc_app_admin.py status
 
 安装结果会打印 Windows 和 Linux 可用的本地 launcher。更新、回滚和卸载也分别
 使用 `update`、`rollback`、`uninstall` 子命令并坚持 preview → `--apply`。
-runtime release 使用内容哈希与原子 pointer；App 状态位于独立用户状态目录。
+runtime release 使用完整文件 manifest、逐文件 SHA-256、内容哈希 ID 与原子
+pointer；staging、激活、status、launcher 和 rollback 均复验完整性。App 状态
+位于独立用户状态目录，并拒绝与 checkout、plugin/runtime、项目/`.opc`、
+knowledge/data root 的 lexical 或 canonical 双向重叠。
 
 App 卸载不删除 App 接入清单、项目 `.opc`、File/Git knowledge、Git 历史、
 用户配置或 Mem0 数据。它不安装或管理 Codex、Claude、Kimi 本体，也不写这些

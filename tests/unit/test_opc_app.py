@@ -19,6 +19,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import opc_app  # noqa: E402
 import opc_dashboard  # noqa: E402
+import opc_snapshot_service  # noqa: E402
 from opc_snapshot_service import SnapshotService  # noqa: E402
 
 
@@ -106,6 +107,92 @@ def request(
 
 
 class SettingsStoreTests(unittest.TestCase):
+    def test_state_root_rejects_checkout_before_directory_creation(self):
+        candidate = ROOT / f".opc-app-state-test-{os.getpid()}"
+        self.assertFalse(candidate.exists())
+        with self.assertRaises(opc_app.AppSettingsError) as caught:
+            opc_app.AppSettingsStore(candidate)
+        self.assertEqual(caught.exception.code, "STATE_ROOT_OVERLAP")
+        self.assertFalse(candidate.exists())
+
+    def test_state_root_rejects_project_and_dot_opc_before_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = project_fixture(Path(directory) / "project")
+            for candidate in (project / "app-state", project / ".opc" / "app-state"):
+                store = opc_app.AppSettingsStore(candidate)
+                with self.assertRaises(opc_app.AppSettingsError) as caught:
+                    store.add_project(str(project))
+                self.assertEqual(caught.exception.code, "STATE_ROOT_OVERLAP")
+                self.assertFalse(candidate.exists())
+
+    def test_state_root_rejects_knowledge_data_and_parent_overlap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            knowledge = base / "knowledge"
+            data = base / "data"
+            knowledge.mkdir()
+            data.mkdir()
+            cases = (
+                knowledge / "state",
+                data / "state",
+                base,
+            )
+            for candidate in cases:
+                with self.subTest(candidate=candidate):
+                    with self.assertRaises(opc_app.AppSettingsError) as caught:
+                        opc_app.AppSettingsStore(
+                            candidate,
+                            forbidden_roots=(knowledge, data),
+                        )
+                    self.assertEqual(caught.exception.code, "STATE_ROOT_OVERLAP")
+                    if candidate != base:
+                        self.assertFalse(candidate.exists())
+
+    def test_linked_parent_is_rejected_before_target_creation(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlink is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            target = base / "target"
+            target.mkdir()
+            alias = base / "state-alias"
+            try:
+                os.symlink(target, alias, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlink creation is not permitted")
+            candidate = alias / "nested"
+            with self.assertRaises(opc_app.AppSettingsError) as caught:
+                opc_app.AppSettingsStore(candidate)
+            self.assertEqual(caught.exception.code, "UNSAFE_STATE_ROOT")
+            self.assertFalse((target / "nested").exists())
+
+    def test_existing_registry_cannot_hide_state_project_overlap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = project_fixture(Path(directory) / "project")
+            state = project / ".opc" / "app-state"
+            state.mkdir()
+            settings = {
+                "schema_version": opc_app.APP_SETTINGS_SCHEMA,
+                "projects": [
+                    {
+                        "id": "project-malicious",
+                        "path": str(project),
+                        "added_at": "2026-07-25T00:00:00Z",
+                    }
+                ],
+                "selected_project_id": "project-malicious",
+            }
+            settings_path = state / "settings.json"
+            original = json.dumps(settings)
+            settings_path.write_text(original, encoding="utf-8")
+            store = opc_app.AppSettingsStore(state)
+
+            self.assertEqual(store.context()["settings_state"], "invalid")
+            with self.assertRaises(opc_app.AppSettingsError) as caught:
+                store.add_project(str(project))
+            self.assertEqual(caught.exception.code, "STATE_ROOT_OVERLAP")
+            self.assertEqual(settings_path.read_text(encoding="utf-8"), original)
+
     def test_registry_is_app_owned_redacted_and_removal_preserves_project(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -200,9 +287,6 @@ class SnapshotServiceTests(unittest.TestCase):
         expected = opc_dashboard.load_demo_snapshot()
         service = SnapshotService(
             project_roots_provider=tuple,
-            snapshot_builder=opc_dashboard.aggregate_snapshot,
-            demo_loader=opc_dashboard.load_demo_snapshot,
-            snapshot_validator=opc_dashboard._assert_redacted,
             demo=True,
         )
         self.assertEqual(service.snapshot(), expected)
@@ -324,9 +408,12 @@ class AssetContractTests(unittest.TestCase):
         )
         self.assertEqual(parser.remote_resources, [])
         javascript = (asset_root / "dashboard.js").read_text(encoding="utf-8")
+        stylesheet = (asset_root / "dashboard.css").read_text(encoding="utf-8")
         self.assertIn('fetchJSON("/api/app-context")', javascript)
         self.assertIn('fetchJSON("/api/snapshot")', javascript)
         self.assertNotIn("innerHTML", javascript)
+        self.assertIn(".filterable[hidden]", stylesheet)
+        self.assertIn("display: none !important", stylesheet)
 
 
 if __name__ == "__main__":
