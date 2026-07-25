@@ -55,6 +55,11 @@ loopback-only 浏览器视图可以安全降低经理理解 OPC 状态的成本�
    App 状态、项目、File/Git knowledge、Git 历史、用户配置和 Mem0 数据全部保留。
 10. **旧入口兼容。** 不安装或不启动 App 时，Codex Plugin、Skills、Hook、
     脚本和 `opc_dashboard.py` 的行为与生命周期 Gate 不变。
+11. **单写实例是当前支持边界。** `settings.json` 的更新使用进程内锁和原子
+    replace，能避免单实例内并发损坏，但不提供跨进程事务或丢失更新保护。同一
+    `OPC_APP_HOME` 同时只支持一个可写 App 实例；第二实例属于不受支持的运维
+    配置。未来若需要多实例，必须先引入有明确所有权、锁超时和崩溃恢复契约的
+    跨进程协调，不能把文件原子写误称为多实例安全。
 
 ## API 与状态
 

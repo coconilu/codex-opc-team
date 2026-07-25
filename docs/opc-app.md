@@ -75,8 +75,9 @@ App runtime 默认位于平台用户数据目录；App 状态与 runtime 分开�
 | Windows | `%LOCALAPPDATA%\OPC\App` |
 | Linux | `${XDG_STATE_HOME:-$HOME/.local/state}/opc-app` |
 
-可用 `OPC_APP_HOME` 显式覆盖状态根。状态根保存项目接入清单和当前项目选择，
-可以删除重建，但不是 OPC 业务事实来源。
+可用绝对路径形式的 `OPC_APP_HOME` 显式覆盖状态根；相对路径会被拒绝，避免同一
+App 从不同工作目录启动时解析到不同接入清单。状态根保存项目接入清单和当前项目
+选择，可以删除重建，但不是 OPC 业务事实来源。
 
 状态根不能与源码 checkout、插件/runtime、任何显式项目或 `.opc`、知识根、数据
 根存在父子重叠，也不能经过 symlink/junction parent。检查同时比较 lexical path
