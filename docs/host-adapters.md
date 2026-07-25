@@ -112,7 +112,8 @@ $qaRoot = Join-Path ([IO.Path]::GetTempPath()) (
   'opc-adapter-review-' + [guid]::NewGuid().ToString('N')
 )
 $roots = @(
-  'home', 'codex', 'claude', 'kimi', 'app-state', 'knowledge', 'data'
+  'home', 'appdata', 'localappdata', 'codex', 'claude', 'kimi',
+  'app-state', 'knowledge', 'data'
 )
 foreach ($name in $roots) {
   New-Item -ItemType Directory -Force -Path (Join-Path $qaRoot $name) | Out-Null
@@ -120,6 +121,8 @@ foreach ($name in $roots) {
 
 $env:HOME = Join-Path $qaRoot 'home'
 $env:USERPROFILE = $env:HOME
+$env:APPDATA = Join-Path $qaRoot 'appdata'
+$env:LOCALAPPDATA = Join-Path $qaRoot 'localappdata'
 $env:CODEX_HOME = Join-Path $qaRoot 'codex'
 $env:CLAUDE_CONFIG_DIR = Join-Path $qaRoot 'claude'
 $env:KIMI_CODE_HOME = Join-Path $qaRoot 'kimi'
@@ -139,6 +142,13 @@ foreach ($path in $sentinels) {
 
 $appJob = Start-Job -ScriptBlock {
   param($repo, $qaRoot)
+  $env:HOME = Join-Path $qaRoot 'home'
+  $env:USERPROFILE = $env:HOME
+  $env:APPDATA = Join-Path $qaRoot 'appdata'
+  $env:LOCALAPPDATA = Join-Path $qaRoot 'localappdata'
+  $env:CODEX_HOME = Join-Path $qaRoot 'codex'
+  $env:CLAUDE_CONFIG_DIR = Join-Path $qaRoot 'claude'
+  $env:KIMI_CODE_HOME = Join-Path $qaRoot 'kimi'
   Set-Location $repo
   python plugins/codex-opc-team/scripts/opc_app.py `
     --state-root (Join-Path $qaRoot 'app-state') `
