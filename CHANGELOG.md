@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added preview-first host Adapters for Codex, Claude Code, and Kimi Code CLI, with pinned public contracts, App-owned ownership manifests, exact logical Diff, explicit confirmation, host discovery verification, drift protection, and rollback without changing File/Git knowledge authority.
 - Added an explicitly started, loopback-only, read-only OPC Dashboard for project status, acceptance, knowledge governance, manager queue, lineage evidence, and provider health.
 - Added fixed-field privacy projection, safe optional-provider degradation, synthetic demo data, and local server security gates without introducing Node, a database, or remote assets.
 - Added evidence-gated capability evolution for versioned repository roles, Skills, and organization policies, with exact Git provenance, paired bounded pilots, manager and independent-QA approvals, one-path unstaged promotion/rollback, explicit commit confirmation, v0.1 compatibility, and private auditable history.

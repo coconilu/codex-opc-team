@@ -88,6 +88,13 @@ preserve project `.opc`, File/Git knowledge, Git history, user configuration,
 and Mem0 data. See [OPC App](docs/opc-app.en.md) for the product, installation,
 privacy, and recovery contract.
 
+The App also exposes a preview-first Adapters page for already installed Codex,
+Claude Code, and Kimi Code CLI hosts. Codex reuses the existing Marketplace
+lifecycle, Claude uses its public plugin CLI when the pinned version is safe,
+and Kimi manages only its documented user Skill projection while non-interactive
+Plugin management remains blocked. See [Host Adapters](docs/host-adapters.md)
+for the capability matrix, limits, ownership rules, and independent QA steps.
+
 ### Compatible local Dashboard
 
 The `main` branch includes an explicitly started, loopback-only, read-only Dashboard for manager visibility. It is not part of stable `v0.1.0`, does not scan for projects, and has no approval or promotion actions:
@@ -193,6 +200,7 @@ Capability evolution is an evidence-gated private lifecycle for versioned roles,
 | [Capability evolution](docs/capability-evolution.md) | Versioned role/Skill/policy pilots, evidence gates, one-path Git handoff, observation, and rollback |
 | [OPC Dashboard](docs/opc-dashboard.md) | Explicitly started local read-only manager view, data semantics, security boundaries, and limitations |
 | [OPC App](docs/opc-app.en.md) | Independent local control plane, App-owned settings, install lifecycle, privacy, and Dashboard compatibility |
+| [Host Adapters](docs/host-adapters.md) | Codex, Claude, and Kimi capability matrix, preview/apply lifecycle, limits, and recovery |
 | [v0.2 release readiness](docs/release-readiness-v0.2.0.md) | Public synthetic evidence, private 3–5 task pilot protocol, exact-commit gates, blockers, and non-claims |
 | [Roadmap](docs/roadmap.md) | Planned delivery stages |
 

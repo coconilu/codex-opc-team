@@ -145,6 +145,7 @@ sequenceDiagram
 | Mem0 索引 | 用户私有数据目录 | 可删除、可重建，不是权威源 |
 | Dashboard 展示状态 | 进程内即时只读投影，不持久化 | 关闭本地进程即消失，不成为事实来源 |
 | OPC App 接入清单与偏好 | `OPC_APP_HOME` 或平台用户状态目录 | 独立于 runtime、checkout、项目和知识；可删除重建 |
+| Host Adapter manifest、投影与备份 | `OPC_APP_HOME/adapters` | 仅记录 OPC 所有权、版本、Ref、哈希和恢复引用；不是组织知识 |
 | OPC App runtime releases | 平台用户数据目录 | 内容哈希版本可升级/回滚；卸载不触碰 App 状态或业务数据 |
 | 原始运行日志 | 默认最小化并设置保留策略 | 不进入公共仓库和知识层 |
 
@@ -189,6 +190,7 @@ v0.1 以 `plugins/codex-opc-team/scripts/opc_memory.py` 为真实可调用契约
 | 健康与运行状态 | `MemoryService.status()` / `doctor()` |
 | 本地只读经理视图 | `opc_dashboard.py` 的固定字段 `/api/snapshot`；loopback-only，不提供治理写操作 |
 | 共享本地投影服务 | `opc_snapshot_service.py`；旧 Dashboard 与 OPC App 使用同一 snapshot builder、DTO 和脱敏器 |
+| Host Adapter 核心 | `opc_adapters.py`；UI 只调用 probe/plan/apply/verify/rollback 契约，不实现宿主安装逻辑 |
 | 独立本地控制平面 | `opc_app.py`；治理 API 只读，唯一写状态为显式项目清单与当前选择，不承担 Agent Harness |
 | 候选只读回放与 control/treatment 证据 | `opc_shadow.py preview` / `evaluate` / `report`；不属于 `MemoryService` 状态迁移 |
 | 角色/Skill/组织策略版本生命周期 | `opc_evolution.py` 的 private proposal/pilot/evaluate/transition/confirm；只产生一个 unstaged allowlisted diff，不修改全局 Codex 配置 |

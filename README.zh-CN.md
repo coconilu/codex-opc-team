@@ -97,6 +97,12 @@ App 的更新、回滚与卸载不会删除项目 `.opc`、File/Git knowledge、
 用户配置或 Mem0 数据。产品边界、安装、隐私与恢复契约见
 [OPC App](docs/opc-app.md)。
 
+App 还提供默认只预览的 Adapters 页面，用来管理用户已安装的 Codex、Claude
+Code 与 Kimi Code CLI 中的 OPC 集成。Codex 复用现有 Marketplace 生命周期；
+Claude 仅在钉住的安全版本范围内调用公开 Plugin CLI；Kimi 只管理官方公开的
+用户 Skill 投影，非交互 Plugin 安装仍明确阻止。能力矩阵、所有权规则、限制与
+独立验收步骤见 [Host Adapters](docs/host-adapters.md)。
+
 ### 兼容的本地 Dashboard
 
 `main` 提供一个显式启动、仅本机访问、只读的经理 Dashboard。它不属于稳定版 `v0.1.0`，不会扫描磁盘发现项目，也没有批准或晋升操作：
@@ -208,6 +214,7 @@ Hook/运行事件只进入私有 `PLUGIN_DATA` 或项目 `.opc` 回退，绝不�
 | [受控能力进化](docs/capability-evolution.md) | 角色/Skill/策略版本、证据门禁、单路径 Git 交接、观察与回滚 |
 | [OPC Dashboard](docs/opc-dashboard.md) | 显式启动的本地只读经理视图、数据语义、安全边界与已知限制 |
 | [OPC App](docs/opc-app.md) | 独立本地控制平面、App 自有设置、安装生命周期、隐私与 Dashboard 兼容性 |
+| [Host Adapters](docs/host-adapters.md) | Codex、Claude、Kimi 能力矩阵、预览/执行生命周期、限制与恢复 |
 | [v0.2 发布就绪度](docs/release-readiness-v0.2.0.md) | 公开 synthetic 证据、私有 3–5 task 协议、exact-commit Gate、阻断项与非主张 |
 | [路线图](docs/roadmap.md) | 分阶段交付计划 |
 

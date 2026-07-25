@@ -9,6 +9,7 @@
     knowledge: "知识",
     lineage: "证据链",
     health: "系统健康",
+    adapters: "Adapters",
     settings: "设置",
   };
 
@@ -17,6 +18,8 @@
     context: null,
     csrf: "",
     queue: new Map(),
+    adapters: null,
+    adapterPlan: null,
     refreshTimer: null,
   };
 
@@ -505,6 +508,109 @@
     setText("knowledge-published", `${finiteNumber(knowledge.published)} 条可验证知识`);
   }
 
+  function adapterStateLabel(value) {
+    return {
+      available: "可安装",
+      installed: "已安装",
+      drifted: "检测到漂移",
+      blocked: "已阻止",
+      unavailable: "宿主不可用",
+    }[String(value || "")] || "未知";
+  }
+
+  function adapterReason(value) {
+    return {
+      HOST_NOT_FOUND: "未在 PATH 中发现宿主 CLI",
+      HOST_VERSION_INCOMPATIBLE: "宿主版本不在已验证范围",
+      HOST_VERSION_INCOMPATIBLE_UNINSTALL_SAFETY: "当前版本存在官方已知卸载安全缺陷",
+      HOST_DISCOVERY_FAILED: "官方发现命令执行失败",
+      HOST_DISCOVERY_INVALID: "官方发现结果无法验证",
+      HOST_CONFIG_INVALID: "宿主配置损坏或无法通过官方诊断",
+      DEMO_OR_ADAPTER_SERVICE_UNAVAILABLE: "演示模式不探测或修改真实宿主",
+    }[String(value || "")] || String(value || "");
+  }
+
+  function adapterAction(host, operation, label, style = "secondary-button") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = style;
+    button.textContent = label;
+    button.dataset.adapterHost = host.host_id;
+    button.dataset.adapterOperation = operation;
+    button.disabled = !["available", "installed", "drifted"].includes(host.state);
+    return button;
+  }
+
+  function renderAdapters() {
+    const target = byId("adapter-list");
+    target.replaceChildren();
+    const hosts = asArray(asObject(state.adapters).hosts);
+    if (!hosts.length) {
+      target.append(emptyState("尚无 Adapter 状态", "刷新后重新执行本地只读探测。"));
+      return;
+    }
+    hosts.forEach((host) => {
+      const card = document.createElement("article");
+      card.className = `adapter-card filterable is-${tone(host.state)}`;
+      const header = document.createElement("header");
+      const identity = document.createElement("div");
+      const mark = document.createElement("span");
+      mark.className = "adapter-mark";
+      mark.textContent = String(host.display_name || host.host_id).slice(0, 1);
+      const title = document.createElement("span");
+      const strong = document.createElement("strong");
+      strong.textContent = host.display_name || host.host_id;
+      const unit = document.createElement("small");
+      unit.textContent = host.integration_unit || "能力未发现";
+      title.append(strong, unit);
+      identity.append(mark, title);
+      const badge = document.createElement("em");
+      badge.className = `status-chip is-${tone(host.state)}`;
+      badge.textContent = adapterStateLabel(host.state);
+      header.append(identity, badge);
+
+      const facts = document.createElement("dl");
+      [
+        ["宿主版本", host.host_version || "未发现"],
+        ["已安装", host.installed_version || "—"],
+        ["目标版本", host.target_version || "—"],
+        ["验证契约", host.verified_contract || "未钉住"],
+      ].forEach(([label, value]) => {
+        const row = document.createElement("div");
+        const dt = document.createElement("dt");
+        const dd = document.createElement("dd");
+        dt.textContent = label;
+        dd.textContent = value;
+        row.append(dt, dd);
+        facts.append(row);
+      });
+      card.append(header, facts);
+
+      if (host.reason || host.plugin_management) {
+        const warning = document.createElement("p");
+        warning.className = "adapter-warning";
+        warning.textContent = host.reason
+          ? adapterReason(host.reason)
+          : "Kimi Plugin 后台安装不受支持；当前仅管理官方 Skill 投影。";
+        card.append(warning);
+      }
+      const actions = document.createElement("div");
+      actions.className = "adapter-actions";
+      if (host.state === "available") {
+        actions.append(adapterAction(host, "install", "预览安装", "primary-button"));
+      } else if (host.state === "installed" || (host.state === "drifted" && host.ownership)) {
+        actions.append(adapterAction(host, "update", host.state === "drifted" ? "查看修复计划" : "检查更新", "primary-button"));
+        actions.append(adapterAction(host, "uninstall", "预览卸载"));
+      } else {
+        const unavailable = adapterAction(host, "inspect", "当前不可执行");
+        unavailable.disabled = true;
+        actions.append(unavailable);
+      }
+      card.append(actions);
+      target.append(card);
+    });
+  }
+
   function renderLineage() {
     const project = selectedSnapshotProject();
     const stages = [...document.querySelectorAll("#lineage-timeline li")];
@@ -578,6 +684,7 @@
     renderKnowledge();
     renderLineage();
     renderHealth();
+    renderAdapters();
     renderWarnings();
     applySearch();
     setText("live-status", "OPC App 本地状态已刷新");
@@ -605,12 +712,14 @@
   async function refresh() {
     byId("refresh-button").disabled = true;
     try {
-      const [context, snapshot] = await Promise.all([
+      const [context, snapshot, adapters] = await Promise.all([
         fetchJSON("/api/app-context"),
         fetchJSON("/api/snapshot"),
+        fetchJSON("/api/adapters"),
       ]);
       state.context = context;
       state.snapshot = snapshot;
+      state.adapters = adapters;
       state.csrf = String(context.csrf_token || "");
       renderAll();
     } catch (error) {
@@ -637,6 +746,92 @@
     state.context = context;
     state.csrf = String(context.csrf_token || state.csrf);
     await refresh();
+  }
+
+  async function adapterRequest(path, body) {
+    return fetchJSON(path, {
+      method: "POST",
+      headers: {
+        "X-OPC-CSRF": state.csrf,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function adapterErrorMessage(code) {
+    return {
+      HOST_BLOCKED: "宿主缺失、版本不兼容或官方发现不可用；未执行任何写入。",
+      NOT_OPC_OWNED: "没有可证明的 OPC 所有权记录，已拒绝修改。",
+      USER_MODIFIED_CONFLICT: "受管内容已被用户修改；已保留现场并转为人工处理。",
+      UNKNOWN_TARGET_CONFLICT: "目标位置已有未知内容；已保留且未覆盖。",
+      CONFIRMATION_REQUIRED: "必须重新核对计划并明确确认。",
+      PLAN_NOT_FOUND_OR_USED: "计划已过期或已经执行，请重新生成。",
+      VERIFY_FAILED_ROLLED_BACK: "宿主回读验证失败，已尝试恢复操作前状态。",
+      APPLY_FAILED: "宿主写入失败；其他 Adapter 和私人知识未被修改。",
+    }[String(code || "")] || "操作未完成；请刷新后查看结构化状态。";
+  }
+
+  async function openAdapterPlan(hostId, operation) {
+    try {
+      const plan = await adapterRequest("/api/adapters/plan", {
+        host_id: hostId,
+        operation,
+      });
+      state.adapterPlan = plan;
+      setText("adapter-dialog-host", `${hostId} · ${operation}`);
+      setText("adapter-plan-version", plan.source_version);
+      setText("adapter-plan-ref", plan.source_ref);
+      setText("adapter-plan-hash", String(plan.content_hash || "").slice(0, 16));
+      setText("adapter-plan-rollback", plan.rollback);
+      const diff = byId("adapter-plan-diff");
+      diff.replaceChildren();
+      asArray(plan.changes).forEach((change) => {
+        const row = document.createElement("div");
+        const action = document.createElement("strong");
+        action.className = `diff-${change.action}`;
+        action.textContent = String(change.action || "").toUpperCase();
+        const target = document.createElement("code");
+        target.textContent = change.target || "";
+        row.append(action, target);
+        diff.append(row);
+      });
+      setText("adapter-plan-preserves", `明确保留：${asArray(plan.preserves).join("、")}`);
+      byId("adapter-confirm").checked = false;
+      byId("apply-adapter-plan").disabled = true;
+      byId("adapter-plan-error").hidden = true;
+      byId("adapter-dialog").showModal();
+    } catch (error) {
+      showBanner(adapterErrorMessage(error.code));
+    }
+  }
+
+  async function applyAdapterPlan() {
+    const plan = asObject(state.adapterPlan);
+    if (!byId("adapter-confirm").checked || !plan.plan_id) return;
+    const button = byId("apply-adapter-plan");
+    const errorNode = byId("adapter-plan-error");
+    button.disabled = true;
+    errorNode.hidden = true;
+    try {
+      const result = await adapterRequest("/api/adapters/apply", {
+        plan_id: plan.plan_id,
+        confirmation_token: plan.confirmation_token,
+      });
+      byId("adapter-dialog").close();
+      state.adapterPlan = null;
+      await refresh();
+      showBanner(
+        result.state === "verification_required"
+          ? "宿主写入已完成，但 Kimi 新进程发现仍需在已配置模型的环境中人工验收。"
+          : "Adapter 已执行并通过宿主官方发现机制回读。"
+      );
+    } catch (error) {
+      errorNode.textContent = adapterErrorMessage(error.code);
+      errorNode.hidden = false;
+    } finally {
+      button.disabled = !byId("adapter-confirm").checked;
+    }
   }
 
   function errorMessage(code) {
@@ -817,6 +1012,17 @@
         setText("live-status", "浏览器未允许复制；请手动选择文本");
       }
     });
+    byId("adapter-list").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-adapter-host]");
+      if (!button) return;
+      openAdapterPlan(button.dataset.adapterHost, button.dataset.adapterOperation);
+    });
+    byId("close-adapter-dialog").addEventListener("click", () => byId("adapter-dialog").close());
+    byId("cancel-adapter-plan").addEventListener("click", () => byId("adapter-dialog").close());
+    byId("adapter-confirm").addEventListener("change", (event) => {
+      byId("apply-adapter-plan").disabled = !event.target.checked;
+    });
+    byId("apply-adapter-plan").addEventListener("click", applyAdapterPlan);
   }
 
   function scheduleRefresh() {

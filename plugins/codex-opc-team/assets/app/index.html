@@ -29,6 +29,7 @@
     <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
     <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
     <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></symbol>
+    <symbol id="icon-adapter" viewBox="0 0 24 24"><path d="M8 3v5M16 3v5M5 8h14v4a7 7 0 0 1-7 7 7 7 0 0 1-7-7z"/><path d="M12 19v3"/></symbol>
   </svg>
 
   <div class="app-shell">
@@ -41,6 +42,7 @@
         <a class="nav-item" href="#knowledge" data-nav="knowledge"><svg class="icon" aria-hidden="true"><use href="#icon-knowledge"></use></svg><span>知识</span></a>
         <a class="nav-item" href="#lineage" data-nav="lineage"><svg class="icon" aria-hidden="true"><use href="#icon-lineage"></use></svg><span>证据链</span></a>
         <a class="nav-item" href="#health" data-nav="health"><svg class="icon" aria-hidden="true"><use href="#icon-health"></use></svg><span>系统健康</span></a>
+        <a class="nav-item" href="#adapters" data-nav="adapters"><svg class="icon" aria-hidden="true"><use href="#icon-adapter"></use></svg><span>Adapters</span></a>
       </nav>
       <a class="nav-item utility-nav" href="#settings" data-nav="settings"><svg class="icon" aria-hidden="true"><use href="#icon-settings"></use></svg><span>设置</span></a>
       <div class="privacy-note">
@@ -164,6 +166,20 @@
         </section>
       </section>
 
+      <section class="app-view" id="adapters" data-view="adapters" aria-labelledby="view-title" hidden>
+        <section class="surface full-surface adapter-surface">
+          <header class="surface-heading">
+            <div><h2>本地宿主集成</h2><p>先探测、再预览 Diff；只有明确确认后才写入宿主。</p></div>
+            <span class="adapter-contract">File/Git authoritative</span>
+          </header>
+          <div class="adapter-boundary">
+            <svg class="icon" aria-hidden="true"><use href="#icon-health"></use></svg>
+            <span>这里管理 OPC 集成物，不安装宿主 App，不读取账号、模型、凭据或私人知识正文。</span>
+          </div>
+          <div class="adapter-grid" id="adapter-list" aria-live="polite"></div>
+        </section>
+      </section>
+
       <section class="app-view" id="settings" data-view="settings" aria-labelledby="view-title" hidden>
         <section class="surface settings-surface">
           <header class="surface-heading"><div><h2>App 设置</h2><p>这里只管理 OPC App 自有、可删除重建的本地状态</p></div></header>
@@ -208,6 +224,24 @@
     <p id="queue-dialog-description"></p>
     <div class="next-step-box"><strong>受控下一步</strong><code id="queue-dialog-next-step"></code></div>
     <button class="secondary-button" id="copy-next-step" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>复制下一步建议</button>
+  </dialog>
+
+  <dialog class="detail-dialog adapter-dialog" id="adapter-dialog" aria-labelledby="adapter-dialog-title">
+    <div class="dialog-header">
+      <div><span id="adapter-dialog-host">Adapter</span><h2 id="adapter-dialog-title">变更预览</h2></div>
+      <button class="icon-button" id="close-adapter-dialog" type="button" aria-label="关闭 Adapter 计划"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button>
+    </div>
+    <dl class="adapter-plan-meta">
+      <div><dt>来源版本</dt><dd id="adapter-plan-version">—</dd></div>
+      <div><dt>来源 Ref</dt><dd id="adapter-plan-ref">—</dd></div>
+      <div><dt>内容哈希</dt><dd><code id="adapter-plan-hash">—</code></dd></div>
+      <div><dt>回滚点</dt><dd id="adapter-plan-rollback">—</dd></div>
+    </dl>
+    <div class="adapter-diff" id="adapter-plan-diff"></div>
+    <p class="surface-note" id="adapter-plan-preserves"></p>
+    <label class="adapter-confirm"><input id="adapter-confirm" type="checkbox">我已核对目标、Diff、保留范围和回滚点，确认执行本次宿主写入。</label>
+    <p class="field-error" id="adapter-plan-error" role="alert" hidden></p>
+    <div class="drawer-actions"><button class="secondary-button" id="cancel-adapter-plan" type="button">取消</button><button class="primary-button" id="apply-adapter-plan" type="button" disabled>确认并执行</button></div>
   </dialog>
 
   <script src="/dashboard.js" defer></script>
