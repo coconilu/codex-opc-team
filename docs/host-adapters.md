@@ -159,6 +159,11 @@ foreach ($attempt in 1..50) {
   }
 }
 if (-not $ready) { throw 'OPC App did not become ready' }
+$context = Invoke-RestMethod "$base/api/app-context"
+$mutationHeaders = @{
+  Origin = $base
+  'X-OPC-CSRF' = $context.csrf_token
+}
 ```
 
 The second block exercises preview/apply, fresh-process verification, uninstall,
@@ -171,6 +176,7 @@ function Invoke-AdapterMutation([string]$hostId, [string]$operation) {
     ConvertTo-Json -Compress
   $plan = Invoke-RestMethod -Method Post `
     -Uri "$base/api/adapters/plan" -ContentType 'application/json' `
+    -Headers $mutationHeaders `
     -Body $planBody
   $applyBody = @{
     plan_id = $plan.plan_id
@@ -178,6 +184,7 @@ function Invoke-AdapterMutation([string]$hostId, [string]$operation) {
   } | ConvertTo-Json -Compress
   $result = Invoke-RestMethod -Method Post `
     -Uri "$base/api/adapters/apply" -ContentType 'application/json' `
+    -Headers $mutationHeaders `
     -Body $applyBody
   [pscustomobject]@{
     host = $hostId
@@ -209,6 +216,7 @@ try {
     } | ConvertTo-Json -Compress
     $rollback = Invoke-RestMethod -Method Post `
       -Uri "$base/api/adapters/rollback" -ContentType 'application/json' `
+      -Headers $mutationHeaders `
       -Body $rollbackBody
     $safeResults += [pscustomobject]@{
       host = $hostId
