@@ -28,6 +28,22 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def disable_disposable_repo_background_maintenance(repo: Path) -> None:
+    """Keep detached Git maintenance from racing TemporaryDirectory cleanup."""
+    settings = {
+        "maintenance.auto": "false",
+        "maintenance.autoDetach": "false",
+        "gc.auto": "0",
+        "gc.autoDetach": "false",
+    }
+    for key, value in settings.items():
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "--local", key, value],
+            check=True,
+            capture_output=True,
+        )
+
+
 @unittest.skipUnless(shutil.which("git"), "Git is required")
 class CapabilityEvolutionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -47,6 +63,7 @@ class CapabilityEvolutionTests(unittest.TestCase):
         self.target.write_text("---\nname: demo\n---\n\nCurrent behavior.\n", encoding="utf-8")
         self.user_similar.write_text("user-owned similar filename\n", encoding="utf-8")
         subprocess.run(["git", "init", "-b", "main", str(self.repo)], check=True, capture_output=True)
+        disable_disposable_repo_background_maintenance(self.repo)
         subprocess.run(["git", "-C", str(self.repo), "add", "--", "skills/demo/.SKILL.md.opc-backup-user"], check=True, capture_output=True)
         self.base = self._commit("base")
         subprocess.run(["git", "-C", str(self.repo), "switch", "-c", "candidate"], check=True, capture_output=True)
@@ -84,6 +101,23 @@ class CapabilityEvolutionTests(unittest.TestCase):
         self._write_evidence("evaluation/source.json", "evaluation", "beneficial", "safe")
         self._write_evidence("lineage/source.json", "lineage", "verified", "not_applicable")
         self.proposal = self._proposal()
+
+    def test_disposable_repository_disables_detached_git_maintenance(self) -> None:
+        expected = {
+            "maintenance.auto": "false",
+            "maintenance.autoDetach": "false",
+            "gc.auto": "0",
+            "gc.autoDetach": "false",
+        }
+        for key, value in expected.items():
+            with self.subTest(key=key):
+                actual = subprocess.run(
+                    ["git", "-C", str(self.repo), "config", "--local", "--get", key],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+                self.assertEqual(actual, value)
 
     def _artifact(self, relative: str, value: dict) -> dict:
         path = self.project / ".opc" / relative

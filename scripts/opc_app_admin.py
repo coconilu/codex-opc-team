@@ -148,6 +148,7 @@ def _plugin_source(source: Path) -> Path:
     required = (
         plugin / ".codex-plugin" / "plugin.json",
         plugin / "scripts" / "opc_app.py",
+        plugin / "scripts" / "opc_adapters.py",
         plugin / "scripts" / "opc_dashboard.py",
         plugin / "scripts" / "opc_snapshot_service.py",
         plugin / "assets" / "app" / "index.html",
@@ -188,13 +189,28 @@ def _source_files(plugin: Path) -> list[Path]:
     return sorted(files, key=lambda item: item.relative_to(plugin).as_posix())
 
 
+def _packaged_payloads(plugin: Path) -> list[tuple[str, bytes]]:
+    payloads = [
+        (path.relative_to(plugin).as_posix(), path.read_bytes())
+        for path in _source_files(plugin)
+    ]
+    packaged_admin = plugin / "scripts" / "plugin_admin.py"
+    if not packaged_admin.is_file():
+        payloads.append(
+            (
+                "scripts/plugin_admin.py",
+                (ROOT / "scripts" / "plugin_admin.py").read_bytes(),
+            )
+        )
+    return sorted(payloads, key=lambda item: item[0])
+
+
 def _release_id(plugin: Path, version: str) -> str:
     digest = hashlib.sha256()
-    for path in _source_files(plugin):
-        relative = path.relative_to(plugin).as_posix().encode("utf-8")
+    for relative_text, payload in _packaged_payloads(plugin):
+        relative = relative_text.encode("utf-8")
         digest.update(len(relative).to_bytes(4, "big"))
         digest.update(relative)
-        payload = path.read_bytes()
         digest.update(len(payload).to_bytes(8, "big"))
         digest.update(payload)
     safe_version = "".join(char if char.isalnum() or char in ".-" else "-" for char in version)
@@ -203,11 +219,10 @@ def _release_id(plugin: Path, version: str) -> str:
 
 def _release_manifest(plugin: Path, version: str, release: str) -> dict[str, Any]:
     files = []
-    for path in _source_files(plugin):
-        payload = path.read_bytes()
+    for relative, payload in _packaged_payloads(plugin):
         files.append(
             {
-                "path": path.relative_to(plugin).as_posix(),
+                "path": relative,
                 "size": len(payload),
                 "sha256": hashlib.sha256(payload).hexdigest(),
             }
@@ -816,6 +831,13 @@ def _install_validated_release(
             plugin,
             stage / "plugin",
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
+        # Ship the existing Codex Marketplace lifecycle implementation with the
+        # App release.  The Adapter invokes this exact script; it does not grow a
+        # second Codex installer inside the UI or adapter core.
+        shutil.copy2(
+            ROOT / "scripts" / "plugin_admin.py",
+            stage / "plugin" / "scripts" / "plugin_admin.py",
         )
         _atomic_json(
             stage / "release-manifest.json",

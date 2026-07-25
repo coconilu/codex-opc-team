@@ -66,12 +66,13 @@ def project_fixture(root: Path, project_id: str = "sample-project") -> Path:
 
 
 @contextlib.contextmanager
-def running_server(*, store, demo=False, provider=None):
+def running_server(*, store, demo=False, provider=None, adapter_manager=None):
     server = opc_app.create_app_server(
         host="127.0.0.1",
         port=0,
         snapshot_provider=provider or opc_dashboard.load_demo_snapshot,
         settings_store=store,
+        adapter_manager=adapter_manager,
         demo=demo,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -313,6 +314,130 @@ class SnapshotServiceTests(unittest.TestCase):
 
 
 class HTTPTests(unittest.TestCase):
+    def test_adapter_routes_keep_preview_and_apply_separate(self):
+        class FakeManager:
+            def __init__(self):
+                self.applied = False
+                self.fail_with_recovery = False
+                self.rolled_back = False
+
+            def inventory(self):
+                return {
+                    "schema_version": "opc-adapters.api.v1",
+                    "hosts": [{"host_id": "codex", "state": "available"}],
+                }
+
+            def create_plan(self, host_id, operation):
+                return {
+                    "schema_version": "opc-adapters.plan.v1",
+                    "host_id": host_id,
+                    "operation": operation,
+                    "plan_id": "plan-safe",
+                    "confirmation_token": "confirm-safe",
+                    "changes": [{"action": "add", "target": "codex:plugin/opc"}],
+                }
+
+            def apply(self, *, plan_id, confirmation_token):
+                if confirmation_token != "confirm-safe":
+                    raise opc_app.AdapterError("CONFIRMATION_REQUIRED")
+                if self.fail_with_recovery:
+                    raise opc_app.AdapterError(
+                        "ROLLBACK_FAILED",
+                        rollback_id="op-recover-safe",
+                    )
+                self.applied = True
+                return {
+                    "schema_version": "opc-adapters.api.v1",
+                    "host_id": "codex",
+                    "state": "completed",
+                    "rollback_id": "op-complete-safe",
+                }
+
+            def rollback(self, host_id, rollback_id):
+                self.rolled_back = True
+                return {
+                    "schema_version": "opc-adapters.api.v1",
+                    "host_id": host_id,
+                    "state": "rolled_back",
+                    "rollback_id": rollback_id,
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = opc_app.AppSettingsStore(Path(directory) / "state")
+            adapters = FakeManager()
+            with running_server(store=store, adapter_manager=adapters) as server:
+                authority = f"http://127.0.0.1:{server.server_address[1]}"
+                _, context, _, _ = request(server, "GET", "/api/app-context")
+                headers = {"Origin": authority, "X-OPC-CSRF": context["csrf_token"]}
+                status, inventory, _, raw = request(server, "GET", "/api/adapters")
+                self.assertEqual(status, 200)
+                self.assertEqual(inventory["hosts"][0]["state"], "available")
+                self.assertNotRegex(raw.decode(), r"[A-Za-z]:[\\/]")
+
+                status, plan, _, _ = request(
+                    server,
+                    "POST",
+                    "/api/adapters/plan",
+                    headers=headers,
+                    payload={"host_id": "codex", "operation": "install"},
+                )
+                self.assertEqual(status, 200)
+                self.assertFalse(adapters.applied)
+                status, error, _, _ = request(
+                    server,
+                    "POST",
+                    "/api/adapters/apply",
+                    headers=headers,
+                    payload={
+                        "plan_id": plan["plan_id"],
+                        "confirmation_token": "wrong",
+                    },
+                )
+                self.assertEqual(status, 409)
+                self.assertEqual(error["error"], "CONFIRMATION_REQUIRED")
+                self.assertFalse(adapters.applied)
+                adapters.fail_with_recovery = True
+                status, error, _, _ = request(
+                    server,
+                    "POST",
+                    "/api/adapters/apply",
+                    headers=headers,
+                    payload={
+                        "plan_id": plan["plan_id"],
+                        "confirmation_token": plan["confirmation_token"],
+                    },
+                )
+                self.assertEqual(status, 409)
+                self.assertEqual(error["error"], "ROLLBACK_FAILED")
+                self.assertEqual(error["rollback_id"], "op-recover-safe")
+
+                adapters.fail_with_recovery = False
+                status, result, _, _ = request(
+                    server,
+                    "POST",
+                    "/api/adapters/apply",
+                    headers=headers,
+                    payload={
+                        "plan_id": plan["plan_id"],
+                        "confirmation_token": plan["confirmation_token"],
+                    },
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(result["rollback_id"], "op-complete-safe")
+                status, result, _, _ = request(
+                    server,
+                    "POST",
+                    "/api/adapters/rollback",
+                    headers=headers,
+                    payload={
+                        "host_id": "codex",
+                        "rollback_id": result["rollback_id"],
+                    },
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(result["state"], "rolled_back")
+                self.assertTrue(adapters.rolled_back)
+
     def test_context_is_redacted_and_security_boundaries_are_enforced(self):
         store = opc_app.DemoSettingsStore()
         with running_server(store=store, demo=True) as server:
@@ -420,18 +545,25 @@ class AssetContractTests(unittest.TestCase):
         parser.feed((asset_root / "index.html").read_text(encoding="utf-8"))
         self.assertEqual(
             [item["data-nav"] for item in parser.navigation],
-            ["overview", "projects", "runs", "knowledge", "lineage", "health", "settings"],
+            ["overview", "projects", "runs", "knowledge", "lineage", "health", "adapters", "settings"],
         )
         self.assertEqual(
             [item["data-view"] for item in parser.views],
-            ["overview", "projects", "runs", "knowledge", "lineage", "health", "settings"],
+            ["overview", "projects", "runs", "knowledge", "lineage", "health", "adapters", "settings"],
         )
         self.assertEqual(parser.remote_resources, [])
         javascript = (asset_root / "dashboard.js").read_text(encoding="utf-8")
         stylesheet = (asset_root / "dashboard.css").read_text(encoding="utf-8")
         self.assertIn('fetchJSON("/api/app-context")', javascript)
         self.assertIn('fetchJSON("/api/snapshot")', javascript)
+        self.assertIn('fetchJSON("/api/adapters")', javascript)
+        self.assertIn('"/api/adapters/rollback"', javascript)
+        self.assertIn("adapter-rollback-confirm", javascript)
+        self.assertIn("dataset.adapterRollbackId", javascript)
         self.assertNotIn("innerHTML", javascript)
+        markup = (asset_root / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="adapter-rollback-dialog"', markup)
+        self.assertIn('id="confirm-adapter-rollback"', markup)
         self.assertIn(".filterable[hidden]", stylesheet)
         self.assertIn("display: none !important", stylesheet)
 

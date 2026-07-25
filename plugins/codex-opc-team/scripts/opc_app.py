@@ -37,6 +37,11 @@ from opc_snapshot_service import (
     SnapshotService,
 )
 from opc_memory import resolve_data_root, resolve_knowledge_root
+from opc_adapters import (
+    ADAPTER_API_SCHEMA,
+    AdapterError,
+    AdapterManager,
+)
 
 
 APP_CONTEXT_SCHEMA = "opc-app.context.v1"
@@ -486,10 +491,12 @@ class OPCAppHTTPServer(DashboardHTTPServer):
         snapshot_provider: Any,
         asset_root: Path,
         settings_store: AppSettingsStore | DemoSettingsStore,
+        adapter_manager: AdapterManager | None,
         demo: bool,
     ) -> None:
         self.settings_store = settings_store
         self.demo = demo
+        self.adapter_manager = adapter_manager
         self.csrf_token = secrets.token_urlsafe(32)
         super().__init__(
             address,
@@ -538,7 +545,7 @@ class OPCAppRequestHandler(DashboardRequestHandler):
 
     def _handle_read(self, *, head_only: bool) -> None:
         parsed = urlsplit(self.path)
-        if parsed.path != "/api/app-context":
+        if parsed.path not in {"/api/app-context", "/api/adapters"}:
             super()._handle_read(head_only=head_only)
             return
         if not self._valid_host():
@@ -550,7 +557,28 @@ class OPCAppRequestHandler(DashboardRequestHandler):
         if parsed.query or parsed.fragment:
             self._json_error(404, "NOT_FOUND", head_only=head_only)
             return
-        self._send_json(200, self._context_payload(), head_only=head_only)
+        if parsed.path == "/api/app-context":
+            payload = self._context_payload()
+        elif self.app_server.adapter_manager is None:
+            payload = {
+                "schema_version": ADAPTER_API_SCHEMA,
+                "hosts": [
+                    {
+                        "host_id": host_id,
+                        "display_name": display_name,
+                        "state": "unavailable",
+                        "reason": "DEMO_OR_ADAPTER_SERVICE_UNAVAILABLE",
+                    }
+                    for host_id, display_name in (
+                        ("codex", "Codex"),
+                        ("claude", "Claude Code"),
+                        ("kimi", "Kimi Code CLI"),
+                    )
+                ],
+            }
+        else:
+            payload = self.app_server.adapter_manager.inventory()
+        self._send_json(200, payload, head_only=head_only)
 
     def _valid_csrf(self) -> bool:
         values = self.headers.get_all("X-OPC-CSRF", [])
@@ -615,12 +643,54 @@ class OPCAppRequestHandler(DashboardRequestHandler):
             elif parsed.path == "/api/selection" and set(payload) == {"project_id"}:
                 store.select_project(payload["project_id"])
                 status = 200
+            elif (
+                parsed.path == "/api/adapters/plan"
+                and set(payload) == {"host_id", "operation"}
+                and self.app_server.adapter_manager is not None
+            ):
+                result = self.app_server.adapter_manager.create_plan(
+                    payload["host_id"], payload["operation"]
+                )
+                self._send_json(200, result)
+                return
+            elif (
+                parsed.path == "/api/adapters/apply"
+                and set(payload) == {"plan_id", "confirmation_token"}
+                and self.app_server.adapter_manager is not None
+            ):
+                result = self.app_server.adapter_manager.apply(
+                    plan_id=payload["plan_id"],
+                    confirmation_token=payload["confirmation_token"],
+                )
+                self._send_json(200, result)
+                return
+            elif (
+                parsed.path == "/api/adapters/rollback"
+                and set(payload) == {"host_id", "rollback_id"}
+                and self.app_server.adapter_manager is not None
+            ):
+                result = self.app_server.adapter_manager.rollback(
+                    payload["host_id"], payload["rollback_id"]
+                )
+                self._send_json(200, result)
+                return
             else:
                 self._json_error(404, "NOT_FOUND")
                 return
             self._send_json(status, self._context_payload())
         except AppSettingsError as exc:
             self._json_error(400, exc.code)
+        except AdapterError as exc:
+            if exc.rollback_id is None:
+                self._json_error(409, exc.code)
+            else:
+                self._send_json(
+                    409,
+                    {
+                        "error": exc.code,
+                        "rollback_id": exc.rollback_id,
+                    },
+                )
 
     def do_DELETE(self) -> None:
         if not self._prepare_mutation():
@@ -656,6 +726,7 @@ def create_app_server(
     port: int,
     snapshot_provider: Any,
     settings_store: AppSettingsStore | DemoSettingsStore,
+    adapter_manager: AdapterManager | None = None,
     demo: bool = False,
     asset_root: Path | str | None = None,
 ) -> OPCAppHTTPServer:
@@ -671,6 +742,7 @@ def create_app_server(
             snapshot_provider=snapshot_provider,
             asset_root=root,
             settings_store=settings_store,
+            adapter_manager=adapter_manager,
             demo=demo,
         )
     except OSError as exc:
@@ -715,11 +787,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 data_root=data_root,
                 allow_empty=True,
             )
+        adapter_manager = (
+            None
+            if args.demo
+            else AdapterManager(
+                source_root=SOURCE_CONTAINER_ROOT,
+                app_state_root=settings_store.root,
+            )
+        )
         server = create_app_server(
             host=args.host,
             port=args.port,
             snapshot_provider=service.snapshot,
             settings_store=settings_store,
+            adapter_manager=adapter_manager,
             demo=args.demo,
         )
     except (DashboardError, AppSettingsError) as exc:

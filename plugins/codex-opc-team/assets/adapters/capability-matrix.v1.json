@@ -1,0 +1,74 @@
+{
+  "schema_version": "opc-adapters.capability-matrix.v1",
+  "verified_at": "2026-07-25",
+  "adapter_version": "1.0.0",
+  "hosts": [
+    {
+      "host_id": "codex",
+      "verified_range": ">=0.144.1,<0.145.0",
+      "verified_local_version": "0.144.1",
+      "managed_unit": "marketplace_plugin",
+      "lifecycle": {
+        "probe": "supported",
+        "install": "supported",
+        "update": "supported",
+        "uninstall": "supported",
+        "verify": "fresh_process_json"
+      },
+      "components": {
+        "skills": "supported",
+        "agents": "not_projected",
+        "hooks": "supported_by_canonical_plugin",
+        "mcp": "not_managed",
+        "apps": "supported_by_canonical_plugin"
+      }
+    },
+    {
+      "host_id": "claude",
+      "verified_range": ">=2.1.212,<3.0.0",
+      "verified_local_version": "2.1.212",
+      "managed_unit": "marketplace_plugin",
+      "local_status": "verified_with_pinned_official_npm_package_in_disposable_home",
+      "verification_source": {
+        "package": "@anthropic-ai/claude-code@2.1.212",
+        "sha256": "2162841dd793d21671eccb7fe76fe9c3da6816adf447ba3890a4871b7e5f4e69"
+      },
+      "lifecycle": {
+        "probe": "supported",
+        "install": "supported_when_compatible",
+        "update": "supported_when_compatible",
+        "uninstall": "supported_with_keep_data_when_compatible",
+        "verify": "fresh_process_json"
+      },
+      "components": {
+        "skills": "supported",
+        "agents": "not_projected",
+        "hooks": "host_specific_not_projected",
+        "mcp": "host_specific_not_projected",
+        "apps": "unsupported"
+      }
+    },
+    {
+      "host_id": "kimi",
+      "verified_range": ">=0.29.1,<0.30.0",
+      "verified_local_version": "0.29.1",
+      "managed_unit": "user_skill_projection",
+      "lifecycle": {
+        "probe": "supported",
+        "install": "supported",
+        "update": "supported",
+        "uninstall": "supported",
+        "verify": "fresh_process_common_skills_root_exact_identity_prompt_requires_configured_model",
+        "plugin_apply": "blocked_no_public_noninteractive_cli"
+      },
+      "components": {
+        "skills": "supported",
+        "plugins": "interactive_only",
+        "agents": "not_projected",
+        "hooks": "plugin_only_not_managed",
+        "mcp": "plugin_only_not_managed",
+        "apps": "unsupported"
+      }
+    }
+  ]
+}

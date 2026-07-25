@@ -1,0 +1,321 @@
+# OPC host adapters
+
+## Product boundary
+
+Adapters manage an OPC integration unit inside an already installed host. They
+do not install the host application, manage accounts or models, run Agent
+sessions, or change File/Git knowledge authority.
+
+```text
+canonical OPC package
+        |
+        +-- Codex  -> existing marketplace + plugin_admin.py
+        +-- Claude -> generated local marketplace plugin
+        `-- Kimi   -> documented user Skill directory projection
+```
+
+Every mutation is `probe -> preview -> explicit confirmation -> re-probe ->
+apply -> fresh-process verification`. The preview is in memory, expires after
+120 seconds, is consumed on its first apply attempt, does not survive an App
+restart, and performs no write. Before any mutation, the App compares a
+constant-time digest over the source version/ref/content, host version and
+official discovery result, capability contract, ownership manifest, and
+resolved target state. Any drift fails with zero writes.
+The ownership manifest is App-private state and contains only adapter/source
+versions, source ref, hashes, logical managed targets, and backup references.
+It never contains knowledge text, credentials, host configuration, or telemetry.
+
+## Capability matrix
+
+The machine-readable source is
+`plugins/codex-opc-team/assets/adapters/capability-matrix.v1.json`.
+
+| Host | Verified contract | Actual managed unit | Important asymmetry |
+|---|---|---|---|
+| Codex | `>=0.144.1,<0.145.0` | Marketplace Plugin | Reuses `scripts/plugin_admin.py`; it does not copy the Codex cache or enable global roles/features. |
+| Claude Code | `>=2.1.212,<3.0.0` | Marketplace Plugin | Uninstall always uses `--keep-data`. Versions below 2.1.212 are blocked because Anthropic documents a same-name cross-marketplace uninstall bug fixed in 2.1.212. |
+| Kimi Code CLI | `>=0.29.1,<0.30.0` | User Skill projection | Kimi Plugins exist, but management is currently interactive `/plugins`; the App does not automate that surface. Fresh-process Skill discovery requires a configured model and can remain `verification_required`. |
+
+Unknown versions fail closed. A missing CLI is `unavailable`; an incompatible
+version or unusable official discovery result is `blocked`. Neither state
+writes an ownership manifest or host file.
+
+## Installation location resolution
+
+| Host | Resolution |
+|---|---|
+| Codex | The official Codex CLI resolves its own config and cache. The Adapter passes the canonical marketplace source to the existing lifecycle script. |
+| Claude | The official Claude CLI resolves user-scope plugin state. The Adapter registers one stable App-owned marketplace source and retains immutable version/hash projections for recovery. |
+| Kimi | `$KIMI_CODE_HOME/skills/<skill>` when set, otherwise `~/.kimi-code/skills/<skill>`. Verification passes the common `skills` root once to `--skills-dir` and compares exact canonical Skill identities. Tests always inject a disposable `KIMI_CODE_HOME`. |
+
+The browser API emits logical targets such as `kimi:skill/opc-manager`, not
+absolute user-home paths.
+
+Codex and Claude drift detection is intentionally limited to the official
+installed-state discovery result plus the App-owned immutable projection or
+marketplace source. Their public CLIs do not expose a supported installed-cache
+content digest, so the Adapter does not claim byte-level host-cache drift
+detection. Kimi is different: its public integration unit is the managed Skill
+directory itself, so every owned target is hash-verified.
+
+## Conflict and recovery rules
+
+- Install refuses an existing unknown target.
+- Update and uninstall require an ownership manifest and an unchanged current
+  hash. User edits and links are preserved as conflicts.
+- A Kimi update rejects a newly introduced canonical Skill when its target is
+  already user-owned, and removes a deleted canonical Skill only when the old
+  manifest and current hash still prove OPC ownership.
+- Kimi directory swaps use App-owned staging and backups. A partial swap
+  restores already moved targets in reverse order.
+- Claude update and rollback never remove its marketplace. The stable source
+  is swapped atomically, then refreshed with `plugin marketplace update` and
+  `plugin update`; every command is checked and a failed step restores the
+  previous source and plugin. Uninstall explicitly uses `--keep-data`.
+- Codex knowledge initialization is explicitly skipped by the Adapter because
+  knowledge lifecycle is independent.
+- Uninstall never touches `OPC_KNOWLEDGE_HOME`, project `.opc`, Git history,
+  manager preferences/rules/experience, optional Mem0 data, or other hosts.
+- Verification failure is not PASS. The operation attempts rollback and returns
+  a structured failure or recovery requirement.
+- Operation records are persisted before mutation. Successful and recoverable
+  failed operations expose a logical rollback ID in the App; no backup path is
+  returned. Rollback rechecks the exact post-operation target fingerprint and
+  refuses to remove user changes.
+- Apply and rollback are serialized per host across fingerprint verification,
+  mutation, manifest publication, and operation-record publication. Different
+  hosts remain independent.
+- `/api/adapters/rollback` is protected by the same Host, Origin, and CSRF
+  boundary as apply. The App additionally requires a dedicated visible
+  confirmation dialog before it sends the rollback request; rollback IDs alone
+  are not treated as authorization.
+
+## Installed-state QA
+
+Automated tests prove plan/apply separation, expiry/replay/restart behavior,
+write-time state fingerprints, fake-home isolation, exact logical Diff,
+ownership/hash conflict behavior, Claude intermediate-step recovery, Kimi
+common-root discovery, and host command construction.
+
+On 2026-07-25 the Developer also ran a disposable-home acceptance pass. This is
+implementation evidence, not independent QA:
+
+| Host | Disposable acceptance result |
+|---|---|
+| Codex 0.144.1 | Preview, install, fresh JSON discovery, update no-op, uninstall, reinstall, rollback, and unrelated sentinel preservation passed. |
+| Claude 2.1.212 | The pinned official npm package (`@anthropic-ai/claude-code@2.1.212`, package SHA-256 `2162841dd793d21671eccb7fe76fe9c3da6816adf447ba3890a4871b7e5f4e69`) passed local marketplace install, real update, fresh JSON discovery, uninstall, reinstall, rollback, and config/plugin-data sentinel preservation. The user's installed 2.1.204 was not upgraded or used. |
+| Kimi 0.29.1 | A disposable `KIMI_CODE_HOME` and loopback-only OpenAI-compatible stub passed install, exact seven-Skill request discovery, update no-op, uninstall, reinstall, rollback, and unrelated sentinel preservation. Raw prompts, requests, paths, and session identifiers were not retained. |
+
+Run release QA in disposable host homes:
+
+| Host | Independent acceptance |
+|---|---|
+| Codex | Install through the App, start a fresh `codex` process, run `codex plugin list --json`, and invoke one OPC Skill. Update, uninstall, rollback, and repeat discovery. |
+| Claude | Use Claude Code 2.1.212 or newer, install/update/uninstall, verify with a fresh `claude plugin list --json`, and confirm plugin data remains after uninstall. |
+| Kimi | Configure a disposable model/provider, install the Skill projection, start a fresh `kimi` process, invoke `/skill:opc-manager`, then repeat after update, uninstall, and rollback. |
+
+### Reproducible reviewer command recipe
+
+The repository does not claim a cross-host CI installed-state PASS: Codex,
+Claude, and Kimi have different distribution and model/account prerequisites.
+The following PowerShell recipe is the reproducible acceptance harness for an
+independent reviewer. Run it only inside a disposable OS/container account,
+from the repository root, with compatible `codex`, `claude`, and `kimi`
+executables already on `PATH`. Kimi must have a disposable provider/model
+configuration; `verification_required` is not PASS.
+
+The first block creates isolated homes and starts the real App in a background
+job. It does not print credentials, plans, paths, prompts, or host output:
+
+```powershell
+$repo = (Resolve-Path '.').Path
+$qaRoot = Join-Path ([IO.Path]::GetTempPath()) (
+  'opc-adapter-review-' + [guid]::NewGuid().ToString('N')
+)
+$roots = @(
+  'home', 'appdata', 'localappdata', 'codex', 'claude', 'kimi',
+  'app-state', 'knowledge', 'data'
+)
+foreach ($name in $roots) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $qaRoot $name) | Out-Null
+}
+
+$env:HOME = Join-Path $qaRoot 'home'
+$env:USERPROFILE = $env:HOME
+$env:APPDATA = Join-Path $qaRoot 'appdata'
+$env:LOCALAPPDATA = Join-Path $qaRoot 'localappdata'
+$env:PSModuleAnalysisCachePath = Join-Path $env:LOCALAPPDATA (
+  'Microsoft\Windows\PowerShell\ModuleAnalysisCache'
+)
+$env:CODEX_HOME = Join-Path $qaRoot 'codex'
+$env:CLAUDE_CONFIG_DIR = Join-Path $qaRoot 'claude'
+$env:KIMI_CODE_HOME = Join-Path $qaRoot 'kimi'
+
+$sentinels = @(
+  (Join-Path $env:CODEX_HOME 'reviewer-sentinel.txt'),
+  (Join-Path $env:CLAUDE_CONFIG_DIR 'reviewer-sentinel.txt'),
+  (Join-Path $env:KIMI_CODE_HOME 'reviewer-sentinel.txt')
+)
+foreach ($path in $sentinels) {
+  [IO.File]::WriteAllText($path, 'must survive adapter lifecycle')
+}
+$before = @{}
+foreach ($path in $sentinels) {
+  $before[$path] = (Get-FileHash -Algorithm SHA256 $path).Hash
+}
+
+$appJob = Start-Job -ScriptBlock {
+  param($repo, $qaRoot)
+  $env:HOME = Join-Path $qaRoot 'home'
+  $env:USERPROFILE = $env:HOME
+  $env:APPDATA = Join-Path $qaRoot 'appdata'
+  $env:LOCALAPPDATA = Join-Path $qaRoot 'localappdata'
+  $env:PSModuleAnalysisCachePath = Join-Path $env:LOCALAPPDATA (
+    'Microsoft\Windows\PowerShell\ModuleAnalysisCache'
+  )
+  $env:CODEX_HOME = Join-Path $qaRoot 'codex'
+  $env:CLAUDE_CONFIG_DIR = Join-Path $qaRoot 'claude'
+  $env:KIMI_CODE_HOME = Join-Path $qaRoot 'kimi'
+  Set-Location $repo
+  python plugins/codex-opc-team/scripts/opc_app.py `
+    --state-root (Join-Path $qaRoot 'app-state') `
+    --knowledge-root (Join-Path $qaRoot 'knowledge') `
+    --data-root (Join-Path $qaRoot 'data') `
+    --host 127.0.0.1 --port 8570 --no-open
+} -ArgumentList $repo, $qaRoot
+
+$base = 'http://127.0.0.1:8570'
+$ready = $false
+foreach ($attempt in 1..50) {
+  try {
+    $null = Invoke-RestMethod "$base/api/adapters"
+    $ready = $true
+    break
+  } catch {
+    Start-Sleep -Milliseconds 100
+  }
+}
+if (-not $ready) { throw 'OPC App did not become ready' }
+$context = Invoke-RestMethod "$base/api/app-context"
+$mutationHeaders = @{
+  Origin = $base
+  'X-OPC-CSRF' = $context.csrf_token
+}
+```
+
+The second block exercises preview/apply, fresh-process verification, uninstall,
+reinstall, and rollback for every host. It deliberately records only
+privacy-safe state labels:
+
+```powershell
+function Invoke-AdapterMutation([string]$hostId, [string]$operation) {
+  $planBody = @{ host_id = $hostId; operation = $operation } |
+    ConvertTo-Json -Compress
+  $plan = Invoke-RestMethod -Method Post `
+    -Uri "$base/api/adapters/plan" -ContentType 'application/json' `
+    -Headers $mutationHeaders `
+    -Body $planBody
+  $applyBody = @{
+    plan_id = $plan.plan_id
+    confirmation_token = $plan.confirmation_token
+  } | ConvertTo-Json -Compress
+  $result = Invoke-RestMethod -Method Post `
+    -Uri "$base/api/adapters/apply" -ContentType 'application/json' `
+    -Headers $mutationHeaders `
+    -Body $applyBody
+  [pscustomobject]@{
+    host = $hostId
+    operation = $operation
+    state = $result.state
+    verification = $result.verification.state
+    rollback_id = $result.rollback_id
+  }
+}
+
+$safeResults = @()
+try {
+  $inventory = Invoke-RestMethod "$base/api/adapters"
+  $inventory.hosts |
+    Select-Object host_id, host_version, state, reason
+  if ($inventory.hosts.Where({ $_.state -ne 'available' }).Count -ne 0) {
+    throw 'all hosts must be compatible, discoverable, and initially absent'
+  }
+
+  foreach ($hostId in @('codex', 'claude', 'kimi')) {
+    $safeResults += Invoke-AdapterMutation $hostId 'install'
+    $safeResults += Invoke-AdapterMutation $hostId 'update'
+    $safeResults += Invoke-AdapterMutation $hostId 'uninstall'
+    $reinstall = Invoke-AdapterMutation $hostId 'install'
+    $safeResults += $reinstall
+    $rollbackBody = @{
+      host_id = $hostId
+      rollback_id = $reinstall.rollback_id
+    } | ConvertTo-Json -Compress
+    $rollback = Invoke-RestMethod -Method Post `
+      -Uri "$base/api/adapters/rollback" -ContentType 'application/json' `
+      -Headers $mutationHeaders `
+      -Body $rollbackBody
+    $safeResults += [pscustomobject]@{
+      host = $hostId
+      operation = 'rollback'
+      state = $rollback.state
+      verification = $null
+      rollback_id = $null
+    }
+    $postRollback = (Invoke-RestMethod "$base/api/adapters").hosts |
+      Where-Object host_id -eq $hostId
+    $safeResults += [pscustomobject]@{
+      host = $hostId
+      operation = 'post_rollback_probe'
+      state = $postRollback.state
+      verification = $null
+      rollback_id = $null
+    }
+  }
+
+  $safeResults | Select-Object host, operation, state, verification
+  foreach ($path in $sentinels) {
+    if (-not (Test-Path -LiteralPath $path)) { throw 'sentinel was removed' }
+    if ((Get-FileHash -Algorithm SHA256 $path).Hash -ne $before[$path]) {
+      throw 'sentinel was modified'
+    }
+  }
+} finally {
+  Stop-Job $appJob -ErrorAction SilentlyContinue
+  Remove-Job $appJob -Force -ErrorAction SilentlyContinue
+}
+git status --short
+```
+
+PASS requires `completed`/`verified` for mutations that install or remove
+content, `no_change` with `verified` for an unchanged update, `rolled_back` for
+rollback, `available` after the post-rollback probe, unchanged sentinels, and no
+repository changes. Preserve only the
+redacted result table, exact host versions, package hashes, and commit SHA.
+Destroy the disposable OS/container after review. Do not publish the temporary
+root, App state, raw CLI/model traffic, plan tokens, credentials, or session
+identifiers.
+
+Independent release QA must repeat the relevant gates. Record only
+privacy-safe versions, hashes, results, and reviewer identity; keep disposable
+home paths and raw command/model traffic out of the public repository. Do not
+accept implementer self-report as independent QA evidence.
+
+## Primary sources
+
+- Codex plugins and marketplaces:
+  <https://developers.openai.com/plugins/build/plugins>
+- Codex CLI plugin commands:
+  <https://developers.openai.com/codex/developer-commands>
+- Claude plugin discovery:
+  <https://code.claude.com/docs/en/discover-plugins>
+- Claude plugin reference:
+  <https://code.claude.com/docs/en/plugins-reference>
+- Claude marketplaces and uninstall compatibility note:
+  <https://code.claude.com/docs/en/plugin-marketplaces>
+- Kimi Skills:
+  <https://moonshotai.github.io/kimi-code/en/customization/skills>
+- Kimi Plugins:
+  <https://moonshotai.github.io/kimi-code/en/customization/plugins.html>
+- Kimi command reference:
+  <https://moonshotai.github.io/kimi-code/en/reference/kimi-command.html>
