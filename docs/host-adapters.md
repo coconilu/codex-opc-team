@@ -93,6 +93,164 @@ Run release QA in disposable host homes:
 | Claude | Use Claude Code 2.1.212 or newer, install/update/uninstall, verify with a fresh `claude plugin list --json`, and confirm plugin data remains after uninstall. |
 | Kimi | Configure a disposable model/provider, install the Skill projection, start a fresh `kimi` process, invoke `/skill:opc-manager`, then repeat after update, uninstall, and rollback. |
 
+### Reproducible reviewer command recipe
+
+The repository does not claim a cross-host CI installed-state PASS: Codex,
+Claude, and Kimi have different distribution and model/account prerequisites.
+The following PowerShell recipe is the reproducible acceptance harness for an
+independent reviewer. Run it only inside a disposable OS/container account,
+from the repository root, with compatible `codex`, `claude`, and `kimi`
+executables already on `PATH`. Kimi must have a disposable provider/model
+configuration; `verification_required` is not PASS.
+
+The first block creates isolated homes and starts the real App in a background
+job. It does not print credentials, plans, paths, prompts, or host output:
+
+```powershell
+$repo = (Resolve-Path '.').Path
+$qaRoot = Join-Path ([IO.Path]::GetTempPath()) (
+  'opc-adapter-review-' + [guid]::NewGuid().ToString('N')
+)
+$roots = @(
+  'home', 'codex', 'claude', 'kimi', 'app-state', 'knowledge', 'data'
+)
+foreach ($name in $roots) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $qaRoot $name) | Out-Null
+}
+
+$env:HOME = Join-Path $qaRoot 'home'
+$env:USERPROFILE = $env:HOME
+$env:CODEX_HOME = Join-Path $qaRoot 'codex'
+$env:CLAUDE_CONFIG_DIR = Join-Path $qaRoot 'claude'
+$env:KIMI_CODE_HOME = Join-Path $qaRoot 'kimi'
+
+$sentinels = @(
+  (Join-Path $env:CODEX_HOME 'reviewer-sentinel.txt'),
+  (Join-Path $env:CLAUDE_CONFIG_DIR 'reviewer-sentinel.txt'),
+  (Join-Path $env:KIMI_CODE_HOME 'reviewer-sentinel.txt')
+)
+foreach ($path in $sentinels) {
+  [IO.File]::WriteAllText($path, 'must survive adapter lifecycle')
+}
+$before = @{}
+foreach ($path in $sentinels) {
+  $before[$path] = (Get-FileHash -Algorithm SHA256 $path).Hash
+}
+
+$appJob = Start-Job -ScriptBlock {
+  param($repo, $qaRoot)
+  Set-Location $repo
+  python plugins/codex-opc-team/scripts/opc_app.py `
+    --state-root (Join-Path $qaRoot 'app-state') `
+    --knowledge-root (Join-Path $qaRoot 'knowledge') `
+    --data-root (Join-Path $qaRoot 'data') `
+    --host 127.0.0.1 --port 8570 --no-open
+} -ArgumentList $repo, $qaRoot
+
+$base = 'http://127.0.0.1:8570'
+$ready = $false
+foreach ($attempt in 1..50) {
+  try {
+    $null = Invoke-RestMethod "$base/api/adapters"
+    $ready = $true
+    break
+  } catch {
+    Start-Sleep -Milliseconds 100
+  }
+}
+if (-not $ready) { throw 'OPC App did not become ready' }
+```
+
+The second block exercises preview/apply, fresh-process verification, uninstall,
+reinstall, and rollback for every host. It deliberately records only
+privacy-safe state labels:
+
+```powershell
+function Invoke-AdapterMutation([string]$hostId, [string]$operation) {
+  $planBody = @{ host_id = $hostId; operation = $operation } |
+    ConvertTo-Json -Compress
+  $plan = Invoke-RestMethod -Method Post `
+    -Uri "$base/api/adapters/plan" -ContentType 'application/json' `
+    -Body $planBody
+  $applyBody = @{
+    plan_id = $plan.plan_id
+    confirmation_token = $plan.confirmation_token
+  } | ConvertTo-Json -Compress
+  $result = Invoke-RestMethod -Method Post `
+    -Uri "$base/api/adapters/apply" -ContentType 'application/json' `
+    -Body $applyBody
+  [pscustomobject]@{
+    host = $hostId
+    operation = $operation
+    state = $result.state
+    verification = $result.verification.state
+    rollback_id = $result.rollback_id
+  }
+}
+
+$safeResults = @()
+try {
+  $inventory = Invoke-RestMethod "$base/api/adapters"
+  $inventory.hosts |
+    Select-Object host_id, host_version, state, reason
+  if ($inventory.hosts.Where({ $_.state -ne 'available' }).Count -ne 0) {
+    throw 'all hosts must be compatible, discoverable, and initially absent'
+  }
+
+  foreach ($hostId in @('codex', 'claude', 'kimi')) {
+    $safeResults += Invoke-AdapterMutation $hostId 'install'
+    $safeResults += Invoke-AdapterMutation $hostId 'update'
+    $safeResults += Invoke-AdapterMutation $hostId 'uninstall'
+    $reinstall = Invoke-AdapterMutation $hostId 'install'
+    $safeResults += $reinstall
+    $rollbackBody = @{
+      host_id = $hostId
+      rollback_id = $reinstall.rollback_id
+    } | ConvertTo-Json -Compress
+    $rollback = Invoke-RestMethod -Method Post `
+      -Uri "$base/api/adapters/rollback" -ContentType 'application/json' `
+      -Body $rollbackBody
+    $safeResults += [pscustomobject]@{
+      host = $hostId
+      operation = 'rollback'
+      state = $rollback.state
+      verification = $null
+      rollback_id = $null
+    }
+    $postRollback = (Invoke-RestMethod "$base/api/adapters").hosts |
+      Where-Object host_id -eq $hostId
+    $safeResults += [pscustomobject]@{
+      host = $hostId
+      operation = 'post_rollback_probe'
+      state = $postRollback.state
+      verification = $null
+      rollback_id = $null
+    }
+  }
+
+  $safeResults | Select-Object host, operation, state, verification
+  foreach ($path in $sentinels) {
+    if (-not (Test-Path -LiteralPath $path)) { throw 'sentinel was removed' }
+    if ((Get-FileHash -Algorithm SHA256 $path).Hash -ne $before[$path]) {
+      throw 'sentinel was modified'
+    }
+  }
+} finally {
+  Stop-Job $appJob -ErrorAction SilentlyContinue
+  Remove-Job $appJob -Force -ErrorAction SilentlyContinue
+}
+git status --short
+```
+
+PASS requires `completed`/`verified` for mutations that install or remove
+content, `no_change` with `verified` for an unchanged update, `rolled_back` for
+rollback, `available` after the post-rollback probe, unchanged sentinels, and no
+repository changes. Preserve only the
+redacted result table, exact host versions, package hashes, and commit SHA.
+Destroy the disposable OS/container after review. Do not publish the temporary
+root, App state, raw CLI/model traffic, plan tokens, credentials, or session
+identifiers.
+
 Independent release QA must repeat the relevant gates. Record only
 privacy-safe versions, hashes, results, and reviewer identity; keep disposable
 home paths and raw command/model traffic out of the public repository. Do not
