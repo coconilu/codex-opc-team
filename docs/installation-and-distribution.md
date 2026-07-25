@@ -149,6 +149,26 @@ python plugins/codex-opc-team/scripts/opc_dashboard.py --project-root .
 
 关闭进程即可停止。它不写入项目或私人知识；卸载插件前应先停止正在运行的 Dashboard 进程。完整边界见 [OPC Dashboard](opc-dashboard.md)。
 
+## 10.1 独立本地 OPC App
+
+`main` 同时提供与 Agent 会话生命周期分离的本地 OPC App。它不是 Agent
+Harness，也不替代 Marketplace 插件。App 管理器默认只预览：
+
+```powershell
+python scripts/opc_app_admin.py install
+python scripts/opc_app_admin.py install --apply
+python scripts/opc_app_admin.py status
+```
+
+安装结果会打印 Windows 和 Linux 可用的本地 launcher。更新、回滚和卸载也分别
+使用 `update`、`rollback`、`uninstall` 子命令并坚持 preview → `--apply`。
+runtime release 使用内容哈希与原子 pointer；App 状态位于独立用户状态目录。
+
+App 卸载不删除 App 接入清单、项目 `.opc`、File/Git knowledge、Git 历史、
+用户配置或 Mem0 数据。它不安装或管理 Codex、Claude、Kimi 本体，也不写这些
+宿主的全局配置；宿主 Adapters 属于 Issue #26。完整边界与恢复说明见
+[OPC App](opc-app.md)。
+
 ## 11. 卸载
 
 卸载分成三个明确范围：

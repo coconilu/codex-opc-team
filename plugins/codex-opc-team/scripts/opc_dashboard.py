@@ -30,6 +30,7 @@ from opc_memory import (
     resolve_data_root,
     resolve_knowledge_root,
 )
+from opc_snapshot_service import SnapshotService
 
 
 SCHEMA_VERSION = "opc-dashboard.snapshot.v1"
@@ -636,8 +637,9 @@ def aggregate_snapshot(
     knowledge_root: Path | str,
     data_root: Path | str,
     now: Callable[[], str] = utc_now,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
-    if not project_roots or len(project_roots) > MAX_PROJECTS:
+    if (not project_roots and not allow_empty) or len(project_roots) > MAX_PROJECTS:
         raise DashboardError("INVALID_PROJECT_ROOT_COUNT")
     knowledge_path = Path(knowledge_root)
     data_path = Path(data_root)
@@ -951,24 +953,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.demo:
             if args.project_root or args.knowledge_root or args.data_root:
                 parser.error("--demo 不能与真实数据根参数同时使用")
-            provider = load_demo_snapshot
+            service = SnapshotService(
+                project_roots_provider=tuple,
+                snapshot_builder=aggregate_snapshot,
+                demo_loader=load_demo_snapshot,
+                snapshot_validator=_assert_redacted,
+                demo=True,
+            )
         else:
             if not args.project_root:
                 parser.error("真实模式需要至少一个 --project-root")
             knowledge_root = resolve_knowledge_root(args.knowledge_root)
             data_root = resolve_data_root(args.data_root)
-
-            def provider() -> dict[str, Any]:
-                return aggregate_snapshot(
-                    args.project_root,
-                    knowledge_root=knowledge_root,
-                    data_root=data_root,
-                )
+            service = SnapshotService(
+                project_roots_provider=lambda: args.project_root,
+                snapshot_builder=aggregate_snapshot,
+                demo_loader=load_demo_snapshot,
+                snapshot_validator=_assert_redacted,
+                knowledge_root=knowledge_root,
+                data_root=data_root,
+            )
 
         server = create_server(
             host=args.host,
             port=args.port,
-            snapshot_provider=provider,
+            snapshot_provider=service.snapshot,
         )
     except DashboardError as exc:
         print(f"OPC_DASHBOARD_ERROR: {exc.code}", file=sys.stderr)
