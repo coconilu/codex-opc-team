@@ -678,7 +678,16 @@ class OPCAppRequestHandler(DashboardRequestHandler):
         except AppSettingsError as exc:
             self._json_error(400, exc.code)
         except AdapterError as exc:
-            self._json_error(409, exc.code)
+            if exc.rollback_id is None:
+                self._json_error(409, exc.code)
+            else:
+                self._send_json(
+                    409,
+                    {
+                        "error": exc.code,
+                        "rollback_id": exc.rollback_id,
+                    },
+                )
 
     def do_DELETE(self) -> None:
         if not self._prepare_mutation():

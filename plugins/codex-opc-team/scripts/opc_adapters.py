@@ -42,10 +42,17 @@ VERSION = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?")
 class AdapterError(RuntimeError):
     """A stable, UI-safe adapter failure."""
 
-    def __init__(self, code: str, *, detail: str | None = None):
+    def __init__(
+        self,
+        code: str,
+        *,
+        detail: str | None = None,
+        rollback_id: str | None = None,
+    ):
         super().__init__(code)
         self.code = code
         self.detail = detail
+        self.rollback_id = rollback_id
 
 
 @dataclass(frozen=True)
@@ -232,14 +239,24 @@ class OwnershipStore:
         *,
         operation: str,
         prior_manifest: dict[str, Any] | None,
+        status: str,
+        error_code: str | None,
+        pre_target_digest: str,
+        target_state_digest: str,
+        backup_ref: str | None,
     ) -> None:
         _atomic_json(
             self.operation_path(host_id, operation_id),
             {
-                "schema_version": "opc-adapters.operation.v1",
+                "schema_version": "opc-adapters.operation.v2",
                 "host_id": host_id,
                 "operation": operation,
                 "prior_manifest": prior_manifest,
+                "status": status,
+                "error_code": error_code,
+                "pre_target_digest": pre_target_digest,
+                "target_state_digest": target_state_digest,
+                "backup_ref": backup_ref,
             },
         )
 
@@ -248,17 +265,76 @@ class OwnershipStore:
         if not path.is_file() or _is_link(path):
             raise AdapterError("ROLLBACK_POINT_UNAVAILABLE")
         payload = _read_json(path)
+        if payload.get("schema_version") == "opc-adapters.operation.v1":
+            payload = {
+                **payload,
+                "status": "completed",
+                "error_code": None,
+                "pre_target_digest": None,
+                "target_state_digest": None,
+                "backup_ref": operation_id,
+            }
         if (
-            payload.get("schema_version") != "opc-adapters.operation.v1"
+            payload.get("schema_version") not in {
+                "opc-adapters.operation.v1",
+                "opc-adapters.operation.v2",
+            }
             or payload.get("host_id") != host_id
             or payload.get("operation") not in {"install", "update", "uninstall"}
+            or payload.get("status")
+            not in {"pending", "completed", "failed", "rolled_back"}
             or not (
                 payload.get("prior_manifest") is None
                 or isinstance(payload.get("prior_manifest"), dict)
             )
+            or not (
+                payload.get("error_code") is None
+                or isinstance(payload.get("error_code"), str)
+            )
+            or not (
+                payload.get("pre_target_digest") is None
+                or re.fullmatch(r"[0-9a-f]{64}", payload["pre_target_digest"])
+            )
+            or not (
+                payload.get("target_state_digest") is None
+                or re.fullmatch(r"[0-9a-f]{64}", payload["target_state_digest"])
+            )
+            or not (
+                payload.get("backup_ref") is None
+                or payload.get("backup_ref") == operation_id
+            )
         ):
             raise AdapterError("INVALID_ROLLBACK_POINT")
         return payload
+
+    def recoveries(self, host_id: str) -> list[dict[str, Any]]:
+        root = self.root / host_id / "operations"
+        if not root.is_dir() or _is_link(root):
+            return []
+        records: list[tuple[int, dict[str, Any]]] = []
+        for path in root.glob("*.json"):
+            operation_id = path.stem
+            if not PORTABLE_TOKEN.fullmatch(operation_id):
+                continue
+            try:
+                record = self.read_operation(host_id, operation_id)
+                modified = path.stat().st_mtime_ns
+            except (AdapterError, OSError):
+                continue
+            if record["status"] not in {"pending", "completed", "failed"}:
+                continue
+            records.append(
+                (
+                    modified,
+                    {
+                        "rollback_id": operation_id,
+                        "operation": record["operation"],
+                        "status": record["status"],
+                        "error_code": record["error_code"],
+                    },
+                )
+            )
+        return [record for _, record in sorted(records, reverse=True)]
 
 
 class HostAdapter:
@@ -350,6 +426,8 @@ class HostAdapter:
         operation: str,
         prior_manifest: dict[str, Any] | None,
         operation_id: str,
+        *,
+        operation_record: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         inverse = "uninstall" if prior_manifest is None else "install"
         return self.apply_operation(inverse, f"{operation_id}-rollback")
@@ -424,6 +502,17 @@ class CodexAdapter(HostAdapter):
         packaged_admin = self.plugin_root / "scripts" / "plugin_admin.py"
         self.admin = repository_admin if repository_admin.is_file() else packaged_admin
 
+    def projection_root(
+        self,
+        source_version: str | None = None,
+        content_hash: str | None = None,
+    ) -> Path:
+        version = source_version or self.source_version
+        digest = content_hash or self.content_hash
+        if not PORTABLE_TOKEN.fullmatch(version) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise AdapterError("INVALID_PROJECTION_REF")
+        return self.store.root / self.host_id / "projection" / f"{version}-{digest[:16]}"
+
     def probe(self) -> dict[str, Any]:
         result = self._command("--version")
         version = _version_tuple(result.stdout or result.stderr)
@@ -462,12 +551,7 @@ class CodexAdapter(HostAdapter):
         )
 
     def target_fingerprint(self) -> dict[str, Any]:
-        projection = (
-            self.store.root
-            / self.host_id
-            / "projection"
-            / f"{self.source_version}-{self.content_hash[:16]}"
-        )
+        projection = self.projection_root()
         return {
             "projection_exists": projection.is_dir(),
             "projection_is_link": _is_link(projection),
@@ -527,7 +611,7 @@ class CodexAdapter(HostAdapter):
         return self.runner(arguments, self.environment)
 
     def _codex_source(self) -> Path:
-        root = self.store.root / self.host_id / "projection" / self.source_version
+        root = self.projection_root()
         if root.exists():
             if tree_digest(root / "plugins" / "codex-opc-team" / "skills") != self.content_hash:
                 raise AdapterError("PROJECTION_CONFLICT")
@@ -579,10 +663,10 @@ class CodexAdapter(HostAdapter):
             result = self._run_admin("install")
             if result.returncode != 0:
                 previous = (
-                    self.store.root
-                    / self.host_id
-                    / "projection"
-                    / prior["source_version"]
+                    self.projection_root(
+                        prior["source_version"],
+                        prior["content_hash"],
+                    )
                 )
                 if previous.is_dir():
                     self._run_admin("install", source=previous)
@@ -598,15 +682,17 @@ class CodexAdapter(HostAdapter):
         operation: str,
         prior_manifest: dict[str, Any] | None,
         operation_id: str,
+        *,
+        operation_record: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if prior_manifest is None:
             result = self._run_admin("uninstall", remove_marketplace=True)
         else:
             previous = (
-                self.store.root
-                / self.host_id
-                / "projection"
-                / prior_manifest["source_version"]
+                self.projection_root(
+                    prior_manifest["source_version"],
+                    prior_manifest["content_hash"],
+                )
             )
             if not previous.is_dir():
                 raise AdapterError("ROLLBACK_POINT_UNAVAILABLE")
@@ -717,13 +803,7 @@ class ClaudeAdapter(HostAdapter):
     def _is_installed(entries: Sequence[Any]) -> bool:
         selector = f"{PLUGIN_ID}@{MARKETPLACE_ID}"
         return any(
-            (
-                item.get("id") == selector
-                or (
-                    item.get("id") is None
-                    and item.get("name") in {PLUGIN_ID, selector}
-                )
-            )
+            item.get("id") == selector
             for item in entries
             if isinstance(item, dict)
         )
@@ -927,6 +1007,8 @@ class ClaudeAdapter(HostAdapter):
         operation: str,
         prior_manifest: dict[str, Any] | None,
         operation_id: str,
+        *,
+        operation_record: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         selector = f"{PLUGIN_ID}@{MARKETPLACE_ID}"
         if prior_manifest is None:
@@ -1071,6 +1153,12 @@ class KimiAdapter(HostAdapter):
         return {"skills_root": targets}
 
     def changes(self, operation: str, manifest: dict[str, Any] | None) -> list[dict[str, str]]:
+        current_names = set(self.skill_names)
+        managed_names = {
+            item["name"]
+            for item in (manifest or {}).get("managed_targets", [])
+            if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+        }
         action = {
             "install": "add",
             "update": (
@@ -1080,10 +1168,16 @@ class KimiAdapter(HostAdapter):
             ),
             "uninstall": "remove",
         }[operation]
-        return [
+        changes = [
             {"action": action, "target": f"kimi:skill/{name}"}
-            for name in self.skill_names
+            for name in sorted(current_names)
         ]
+        if operation == "update":
+            changes.extend(
+                {"action": "remove", "target": f"kimi:skill/{name}"}
+                for name in sorted(managed_names - current_names)
+            )
+        return changes
 
     def _assert_owned_unchanged(self, manifest: dict[str, Any]) -> None:
         for item in manifest["managed_targets"]:
@@ -1131,19 +1225,37 @@ class KimiAdapter(HostAdapter):
         skill_root.mkdir(parents=True, exist_ok=True)
         backup = self.store.backup_root(self.host_id, operation_id)
         stage = self.store.root / self.host_id / f".stage-{operation_id}"
-        activated: list[tuple[Path, Path | None]] = []
+        managed = {
+            item["name"]: item
+            for item in (manifest or {}).get("managed_targets", [])
+            if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+        }
+        current_names = set(self.skill_names)
+        activated: list[tuple[Path, Path | None, str | None]] = []
         try:
             stage.mkdir(parents=True)
-            for name in self.skill_names:
+            for name in sorted(current_names):
                 source = self.plugin_root / "skills" / name
                 staged = stage / name
                 shutil.copytree(source, staged)
                 if tree_digest(staged) != tree_digest(source):
                     raise AdapterError("PROJECTION_VERIFY_FAILED")
-            for name in self.skill_names:
+            for name in sorted(current_names):
                 target = self._target(name)
-                if target.exists() and manifest is None:
+                if target.exists() and name not in managed:
                     raise AdapterError("UNKNOWN_TARGET_CONFLICT")
+            for name in sorted(set(managed) - current_names):
+                target = self._target(name)
+                if not target.exists():
+                    raise AdapterError("USER_MODIFIED_CONFLICT")
+                backup.mkdir(parents=True, exist_ok=True)
+                previous = backup / name
+                os.replace(target, previous)
+                activated.append((target, previous, None))
+            for name in sorted(current_names):
+                source = self.plugin_root / "skills" / name
+                expected_hash = tree_digest(source)
+                target = self._target(name)
                 previous: Path | None = None
                 if target.exists():
                     backup.mkdir(parents=True, exist_ok=True)
@@ -1155,12 +1267,18 @@ class KimiAdapter(HostAdapter):
                     if previous is not None and previous.exists() and not target.exists():
                         os.replace(previous, target)
                     raise
-                activated.append((target, previous))
-        except AdapterError:
-            self._restore_activated(activated)
+                activated.append((target, previous, expected_hash))
+        except AdapterError as exc:
+            try:
+                self._restore_activated(activated)
+            except AdapterError as restore_error:
+                raise restore_error from exc
             raise
         except OSError as exc:
-            self._restore_activated(activated)
+            try:
+                self._restore_activated(activated)
+            except AdapterError as restore_error:
+                raise restore_error from exc
             raise AdapterError("APPLY_FAILED") from exc
         finally:
             if stage.exists():
@@ -1172,15 +1290,27 @@ class KimiAdapter(HostAdapter):
         }
 
     @staticmethod
-    def _restore_activated(activated: list[tuple[Path, Path | None]]) -> None:
-        for target, previous in reversed(activated):
+    def _restore_activated(
+        activated: list[tuple[Path, Path | None, str | None]]
+    ) -> None:
+        for target, previous, expected_hash in reversed(activated):
             if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
+                if (
+                    expected_hash is None
+                    or _is_link(target)
+                    or not target.is_dir()
+                    or tree_digest(target) != expected_hash
+                ):
+                    raise AdapterError("ROLLBACK_FAILED")
+                try:
+                    shutil.rmtree(target)
+                except OSError as exc:
+                    raise AdapterError("ROLLBACK_FAILED") from exc
             if previous is not None and previous.exists():
                 try:
                     os.replace(previous, target)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    raise AdapterError("ROLLBACK_FAILED") from exc
 
     def verify(self, expected_installed: bool) -> dict[str, Any]:
         # Kimi has no public non-interactive skill-list command.  A fresh prompt
@@ -1251,19 +1381,30 @@ class KimiAdapter(HostAdapter):
         operation: str,
         prior_manifest: dict[str, Any] | None,
         operation_id: str,
+        *,
+        operation_record: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         backup = self.store.backup_root(self.host_id, operation_id)
         current = self.store.read(self.host_id)
+        current_targets = {
+            item["name"]: item
+            for item in (current or {}).get("managed_targets", [])
+            if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+        }
+        prior_targets = {
+            item["name"]: item
+            for item in (prior_manifest or {}).get("managed_targets", [])
+            if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+        }
         if operation == "install" and prior_manifest is None:
-            targets = (
-                current["managed_targets"]
-                if current
-                else [
-                    {"name": name, "hash": tree_digest(self.plugin_root / "skills" / name)}
-                    for name in self.skill_names
-                ]
-            )
-            for item in targets:
+            targets = current_targets or {
+                name: {
+                    "name": name,
+                    "hash": tree_digest(self.plugin_root / "skills" / name),
+                }
+                for name in self.skill_names
+            }
+            for item in targets.values():
                 target = self._target(item["name"])
                 if target.exists():
                     if _is_link(target) or tree_digest(target) != item["hash"]:
@@ -1272,14 +1413,35 @@ class KimiAdapter(HostAdapter):
             return {"state": "rolled_back"}
         if not backup.is_dir():
             raise AdapterError("ROLLBACK_POINT_UNAVAILABLE")
+        for name, item in current_targets.items():
+            if name in prior_targets:
+                continue
+            target = self._target(name)
+            if target.exists():
+                if _is_link(target) or tree_digest(target) != item["hash"]:
+                    raise AdapterError("ROLLBACK_CONFLICT")
+                shutil.rmtree(target)
         restored: list[str] = []
-        for name in self.skill_names:
+        for name, prior_item in prior_targets.items():
             source = backup / name
             target = self._target(name)
             if not source.is_dir():
-                continue
+                if (
+                    target.is_dir()
+                    and not _is_link(target)
+                    and tree_digest(target) == prior_item["hash"]
+                ):
+                    restored.append(name)
+                    continue
+                raise AdapterError("ROLLBACK_POINT_UNAVAILABLE")
             if target.exists():
-                if current is None:
+                current_item = current_targets.get(name)
+                if (
+                    current_item is None
+                    or _is_link(target)
+                    or not target.is_dir()
+                    or tree_digest(target) != current_item["hash"]
+                ):
                     raise AdapterError("ROLLBACK_CONFLICT")
                 shutil.rmtree(target)
             os.replace(source, target)
@@ -1335,24 +1497,33 @@ class AdapterManager:
                     environment=environments.get("kimi"),
                 ),
             }
+        self._host_locks = {
+            host_id: threading.RLock()
+            for host_id in self.adapters
+        }
 
     def inventory(self) -> dict[str, Any]:
         hosts: list[dict[str, Any]] = []
         for host_id in HOST_IDS:
-            try:
-                hosts.append(self.adapters[host_id].probe())
-            except AdapterError as exc:
-                hosts.append(
-                    self.adapters[host_id]._status("blocked", reason=exc.code)
-                )
+            adapter = self.adapters[host_id]
+            with self._host_locks[host_id]:
+                try:
+                    host = adapter.probe()
+                except AdapterError as exc:
+                    host = adapter._status("blocked", reason=exc.code)
+                recoveries = self.store.recoveries(host_id)
+                if recoveries:
+                    host["recovery"] = recoveries[0]
+                hosts.append(host)
         return {"schema_version": ADAPTER_API_SCHEMA, "hosts": hosts}
 
     def create_plan(self, host_id: str, operation: str) -> dict[str, Any]:
         adapter = self.adapters.get(host_id)
         if adapter is None:
             raise AdapterError("UNKNOWN_HOST")
-        captured_state = adapter.capture_plan_state()
-        payload = adapter.plan(operation, captured_state)
+        with self._host_locks[host_id]:
+            captured_state = adapter.capture_plan_state()
+            payload = adapter.plan(operation, captured_state)
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         plan_id = f"plan-{secrets.token_hex(12)}"
         confirmation = secrets.token_urlsafe(24)
@@ -1362,6 +1533,7 @@ class AdapterManager:
             "digest": _sha256_bytes(serialized),
             "confirmation": confirmation,
             "state_digest": _canonical_digest(captured_state),
+            "captured_state": captured_state,
             "expires_at": issued_at + self._plan_ttl_seconds,
         }
         with self._lock:
@@ -1394,11 +1566,18 @@ class AdapterManager:
         if not secrets.compare_digest(record["digest"], current_digest):
             raise AdapterError("PLAN_CHANGED")
         adapter = self.adapters[payload["host_id"]]
+        with self._host_locks[adapter.host_id]:
+            return self._apply_locked(adapter, record, payload)
+
+    def _apply_locked(
+        self,
+        adapter: HostAdapter,
+        record: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
         current_state_digest = _canonical_digest(adapter.capture_plan_state())
         if not secrets.compare_digest(record["state_digest"], current_state_digest):
             raise AdapterError("PLAN_STATE_CHANGED")
-        prior_manifest = self.store.read(adapter.host_id)
-        operation_id = f"op-{secrets.token_hex(10)}"
         try:
             if payload.get("no_change"):
                 verification = adapter.verify(True)
@@ -1412,11 +1591,51 @@ class AdapterManager:
                     "verification": verification,
                     "rollback_id": None,
                 }
+            prior_manifest = self.store.read(adapter.host_id)
+            operation_id = f"op-{secrets.token_hex(10)}"
+            pre_target_digest = _canonical_digest(record["captured_state"]["target"])
+            self.store.write_operation(
+                adapter.host_id,
+                operation_id,
+                operation=payload["operation"],
+                prior_manifest=prior_manifest,
+                status="pending",
+                error_code=None,
+                pre_target_digest=pre_target_digest,
+                target_state_digest=pre_target_digest,
+                backup_ref=None,
+            )
             applied = adapter.apply_operation(payload["operation"], operation_id)
             verification = adapter.verify(payload["operation"] != "uninstall")
             if verification["state"] == "failed":
                 adapter.rollback_operation(
-                    payload["operation"], prior_manifest, operation_id
+                    payload["operation"],
+                    prior_manifest,
+                    operation_id,
+                    operation_record={
+                        "status": "pending",
+                        "target_state_digest": _canonical_digest(
+                            adapter.target_fingerprint()
+                        ),
+                    },
+                )
+                restored_digest = _canonical_digest(adapter.target_fingerprint())
+                self.store.write_operation(
+                    adapter.host_id,
+                    operation_id,
+                    operation=payload["operation"],
+                    prior_manifest=prior_manifest,
+                    status="rolled_back",
+                    error_code="VERIFY_FAILED_ROLLED_BACK",
+                    pre_target_digest=pre_target_digest,
+                    target_state_digest=restored_digest,
+                    backup_ref=(
+                        operation_id
+                        if self.store.backup_root(
+                            adapter.host_id, operation_id
+                        ).is_dir()
+                        else None
+                    ),
                 )
                 raise AdapterError("VERIFY_FAILED_ROLLED_BACK")
             if payload["operation"] == "uninstall":
@@ -1455,6 +1674,15 @@ class AdapterManager:
                 operation_id,
                 operation=payload["operation"],
                 prior_manifest=prior_manifest,
+                status="completed",
+                error_code=None,
+                pre_target_digest=pre_target_digest,
+                target_state_digest=_canonical_digest(adapter.target_fingerprint()),
+                backup_ref=(
+                    operation_id
+                    if self.store.backup_root(adapter.host_id, operation_id).is_dir()
+                    else None
+                ),
             )
             return {
                 "schema_version": ADAPTER_API_SCHEMA,
@@ -1468,26 +1696,128 @@ class AdapterManager:
                 "verification": verification,
                 "rollback_id": operation_id,
             }
-        except AdapterError:
-            raise
+        except AdapterError as exc:
+            if "operation_id" not in locals():
+                raise
+            already_rolled_back = exc.code == "VERIFY_FAILED_ROLLED_BACK"
+            recoverable = self._record_failed_operation(
+                adapter=adapter,
+                operation_id=operation_id,
+                operation=payload["operation"],
+                prior_manifest=prior_manifest,
+                pre_target_digest=pre_target_digest,
+                error_code=exc.code,
+                already_rolled_back=already_rolled_back,
+            )
+            raise AdapterError(
+                exc.code,
+                detail=exc.detail,
+                rollback_id=operation_id if recoverable else None,
+            ) from exc
         except OSError as exc:
-            raise AdapterError("APPLY_FAILED") from exc
+            if "operation_id" not in locals():
+                raise AdapterError("APPLY_FAILED") from exc
+            recoverable = self._record_failed_operation(
+                adapter=adapter,
+                operation_id=operation_id,
+                operation=payload["operation"],
+                prior_manifest=prior_manifest,
+                pre_target_digest=pre_target_digest,
+                error_code="APPLY_FAILED",
+                already_rolled_back=False,
+            )
+            raise AdapterError(
+                "APPLY_FAILED",
+                rollback_id=operation_id if recoverable else None,
+            ) from exc
+
+    def _record_failed_operation(
+        self,
+        *,
+        adapter: HostAdapter,
+        operation_id: str,
+        operation: str,
+        prior_manifest: dict[str, Any] | None,
+        pre_target_digest: str,
+        error_code: str,
+        already_rolled_back: bool,
+    ) -> bool:
+        try:
+            target_state_digest = _canonical_digest(adapter.target_fingerprint())
+        except (AdapterError, OSError):
+            target_state_digest = _canonical_digest({"state": "unreadable"})
+        backup = self.store.backup_root(adapter.host_id, operation_id)
+        try:
+            backup_has_entries = backup.is_dir() and any(backup.rglob("*"))
+        except OSError:
+            backup_has_entries = True
+        recoverable = (
+            not already_rolled_back
+            and (
+                target_state_digest != pre_target_digest
+                or backup_has_entries
+                or error_code == "ROLLBACK_FAILED"
+            )
+        )
+        if not already_rolled_back:
+            try:
+                self.store.write_operation(
+                    adapter.host_id,
+                    operation_id,
+                    operation=operation,
+                    prior_manifest=prior_manifest,
+                    status="failed",
+                    error_code=error_code,
+                    pre_target_digest=pre_target_digest,
+                    target_state_digest=target_state_digest,
+                    backup_ref=operation_id if backup_has_entries else None,
+                )
+            except OSError:
+                # The pending record was published before host mutation. If the
+                # state volume is temporarily unwritable, preserve the original
+                # host failure and still surface the recovery identifier.
+                pass
+        return recoverable
 
     def rollback(self, host_id: str, rollback_id: str) -> dict[str, Any]:
         adapter = self.adapters.get(host_id)
         if adapter is None:
             raise AdapterError("UNKNOWN_HOST")
-        record = self.store.read_operation(host_id, rollback_id)
-        prior_manifest = record["prior_manifest"]
-        result = adapter.rollback_operation(
-            record["operation"], prior_manifest, rollback_id
-        )
-        if prior_manifest is None:
-            self.store.remove(host_id)
-        else:
-            self.store.write(host_id, prior_manifest)
-        return {
-            "schema_version": ADAPTER_API_SCHEMA,
-            "host_id": host_id,
-            **result,
-        }
+        with self._host_locks[host_id]:
+            record = self.store.read_operation(host_id, rollback_id)
+            if record["status"] == "rolled_back":
+                raise AdapterError("ROLLBACK_POINT_USED")
+            expected_digest = record.get("target_state_digest")
+            if expected_digest is not None:
+                actual_digest = _canonical_digest(adapter.target_fingerprint())
+                if not secrets.compare_digest(expected_digest, actual_digest):
+                    raise AdapterError("ROLLBACK_CONFLICT")
+            prior_manifest = record["prior_manifest"]
+            result = adapter.rollback_operation(
+                record["operation"],
+                prior_manifest,
+                rollback_id,
+                operation_record=record,
+            )
+            if prior_manifest is None:
+                self.store.remove(host_id)
+            else:
+                self.store.write(host_id, prior_manifest)
+            self.store.write_operation(
+                host_id,
+                rollback_id,
+                operation=record["operation"],
+                prior_manifest=prior_manifest,
+                status="rolled_back",
+                error_code=record.get("error_code"),
+                pre_target_digest=record.get("pre_target_digest")
+                or _canonical_digest({"state": "legacy"}),
+                target_state_digest=_canonical_digest(adapter.target_fingerprint()),
+                backup_ref=record.get("backup_ref"),
+            )
+            return {
+                "schema_version": ADAPTER_API_SCHEMA,
+                "host_id": host_id,
+                "rollback_id": rollback_id,
+                **result,
+            }

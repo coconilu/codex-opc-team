@@ -20,6 +20,7 @@
     queue: new Map(),
     adapters: null,
     adapterPlan: null,
+    adapterRollback: null,
     refreshTimer: null,
   };
 
@@ -594,6 +595,26 @@
           : "Kimi Plugin 后台安装不受支持；当前仅管理官方 Skill 投影。";
         card.append(warning);
       }
+      const recovery = asObject(host.recovery);
+      if (recovery.rollback_id) {
+        const recoveryNode = document.createElement("section");
+        recoveryNode.className = "adapter-recovery";
+        const recoveryTitle = document.createElement("strong");
+        recoveryTitle.textContent = recovery.status === "failed"
+          ? "上次操作需要恢复"
+          : "可回滚上次操作";
+        const recoveryId = document.createElement("code");
+        recoveryId.textContent = recovery.rollback_id;
+        const recoveryAction = document.createElement("button");
+        recoveryAction.type = "button";
+        recoveryAction.className = "secondary-button";
+        recoveryAction.textContent = "回滚本次操作";
+        recoveryAction.dataset.adapterRollbackHost = host.host_id;
+        recoveryAction.dataset.adapterRollbackId = recovery.rollback_id;
+        recoveryAction.dataset.adapterRollbackError = recovery.error_code || "";
+        recoveryNode.append(recoveryTitle, recoveryId, recoveryAction);
+        card.append(recoveryNode);
+      }
       const actions = document.createElement("div");
       actions.className = "adapter-actions";
       if (host.state === "available") {
@@ -704,6 +725,7 @@
     if (!response.ok) {
       const error = new Error(payload.error || `HTTP_${response.status}`);
       error.code = payload.error || `HTTP_${response.status}`;
+      error.rollbackId = payload.rollback_id || null;
       throw error;
     }
     return payload;
@@ -771,7 +793,23 @@
       PLAN_STATE_CHANGED: "来源、宿主、发现结果、所有权或目标状态已变化；未执行任何写入。",
       VERIFY_FAILED_ROLLED_BACK: "宿主回读验证失败，已尝试恢复操作前状态。",
       APPLY_FAILED: "宿主写入失败；其他 Adapter 和私人知识未被修改。",
+      ROLLBACK_FAILED: "自动恢复未完成；现场已保留，请使用恢复入口。",
+      ROLLBACK_CONFLICT: "回滚点之后的目标状态已变化；为保护用户修改，已拒绝回滚。",
+      ROLLBACK_POINT_USED: "此回滚点已经使用，不能重复执行。",
     }[String(code || "")] || "操作未完成；请刷新后查看结构化状态。";
+  }
+
+  function exposeAdapterRecovery(hostId, rollbackId, errorCode = null) {
+    const hosts = asArray(asObject(state.adapters).hosts);
+    const host = hosts.find((item) => item.host_id === hostId);
+    if (!host || !rollbackId) return;
+    host.recovery = {
+      rollback_id: rollbackId,
+      operation: asObject(state.adapterPlan).operation || "unknown",
+      status: errorCode ? "failed" : "completed",
+      error_code: errorCode,
+    };
+    renderAdapters();
   }
 
   async function openAdapterPlan(hostId, operation) {
@@ -825,8 +863,10 @@
         confirmation_token: plan.confirmation_token,
       });
       byId("adapter-dialog").close();
+      const hostId = plan.host_id;
       state.adapterPlan = null;
       await refresh();
+      exposeAdapterRecovery(hostId, result.rollback_id);
       showBanner(
         result.state === "verification_required"
           ? "宿主写入已完成，但 Kimi 新进程发现仍需在已配置模型的环境中人工验收。"
@@ -835,8 +875,54 @@
     } catch (error) {
       errorNode.textContent = adapterErrorMessage(error.code);
       errorNode.hidden = false;
+      if (error.rollbackId) {
+        exposeAdapterRecovery(plan.host_id, error.rollbackId, error.code);
+      }
     } finally {
       button.disabled = !byId("adapter-confirm").checked;
+    }
+  }
+
+  function openAdapterRollback(hostId, rollbackId, errorCode = "") {
+    state.adapterRollback = {
+      host_id: hostId,
+      rollback_id: rollbackId,
+    };
+    setText("adapter-rollback-host", hostId);
+    setText("adapter-rollback-id", rollbackId);
+    setText(
+      "adapter-rollback-reason",
+      errorCode
+        ? `上次操作返回 ${errorCode}；将恢复该操作记录绑定的 OPC-owned 前置状态。`
+        : "将恢复该操作记录绑定的 OPC-owned 前置状态。"
+    );
+    byId("adapter-rollback-confirm").checked = false;
+    byId("confirm-adapter-rollback").disabled = true;
+    byId("adapter-rollback-error").hidden = true;
+    byId("adapter-rollback-dialog").showModal();
+  }
+
+  async function rollbackAdapterOperation() {
+    const rollback = asObject(state.adapterRollback);
+    if (!byId("adapter-rollback-confirm").checked || !rollback.rollback_id) return;
+    const button = byId("confirm-adapter-rollback");
+    const errorNode = byId("adapter-rollback-error");
+    button.disabled = true;
+    errorNode.hidden = true;
+    try {
+      await adapterRequest("/api/adapters/rollback", {
+        host_id: rollback.host_id,
+        rollback_id: rollback.rollback_id,
+      });
+      byId("adapter-rollback-dialog").close();
+      state.adapterRollback = null;
+      await refresh();
+      showBanner("已通过记录的回滚点恢复操作前状态，并保留私人知识与无关宿主内容。");
+    } catch (error) {
+      errorNode.textContent = adapterErrorMessage(error.code);
+      errorNode.hidden = false;
+    } finally {
+      button.disabled = !byId("adapter-rollback-confirm").checked;
     }
   }
 
@@ -1019,6 +1105,15 @@
       }
     });
     byId("adapter-list").addEventListener("click", (event) => {
+      const rollbackButton = event.target.closest("button[data-adapter-rollback-id]");
+      if (rollbackButton) {
+        openAdapterRollback(
+          rollbackButton.dataset.adapterRollbackHost,
+          rollbackButton.dataset.adapterRollbackId,
+          rollbackButton.dataset.adapterRollbackError
+        );
+        return;
+      }
       const button = event.target.closest("button[data-adapter-host]");
       if (!button) return;
       openAdapterPlan(button.dataset.adapterHost, button.dataset.adapterOperation);
@@ -1029,6 +1124,12 @@
       byId("apply-adapter-plan").disabled = !event.target.checked;
     });
     byId("apply-adapter-plan").addEventListener("click", applyAdapterPlan);
+    byId("close-adapter-rollback").addEventListener("click", () => byId("adapter-rollback-dialog").close());
+    byId("cancel-adapter-rollback").addEventListener("click", () => byId("adapter-rollback-dialog").close());
+    byId("adapter-rollback-confirm").addEventListener("change", (event) => {
+      byId("confirm-adapter-rollback").disabled = !event.target.checked;
+    });
+    byId("confirm-adapter-rollback").addEventListener("click", rollbackAdapterOperation);
   }
 
   function scheduleRefresh() {

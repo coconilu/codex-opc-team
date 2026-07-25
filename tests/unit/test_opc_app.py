@@ -298,6 +298,8 @@ class HTTPTests(unittest.TestCase):
         class FakeManager:
             def __init__(self):
                 self.applied = False
+                self.fail_with_recovery = False
+                self.rolled_back = False
 
             def inventory(self):
                 return {
@@ -318,11 +320,26 @@ class HTTPTests(unittest.TestCase):
             def apply(self, *, plan_id, confirmation_token):
                 if confirmation_token != "confirm-safe":
                     raise opc_app.AdapterError("CONFIRMATION_REQUIRED")
+                if self.fail_with_recovery:
+                    raise opc_app.AdapterError(
+                        "ROLLBACK_FAILED",
+                        rollback_id="op-recover-safe",
+                    )
                 self.applied = True
                 return {
                     "schema_version": "opc-adapters.api.v1",
                     "host_id": "codex",
                     "state": "completed",
+                    "rollback_id": "op-complete-safe",
+                }
+
+            def rollback(self, host_id, rollback_id):
+                self.rolled_back = True
+                return {
+                    "schema_version": "opc-adapters.api.v1",
+                    "host_id": host_id,
+                    "state": "rolled_back",
+                    "rollback_id": rollback_id,
                 }
 
         with tempfile.TemporaryDirectory() as directory:
@@ -359,6 +376,47 @@ class HTTPTests(unittest.TestCase):
                 self.assertEqual(status, 409)
                 self.assertEqual(error["error"], "CONFIRMATION_REQUIRED")
                 self.assertFalse(adapters.applied)
+                adapters.fail_with_recovery = True
+                status, error, _, _ = request(
+                    server,
+                    "POST",
+                    "/api/adapters/apply",
+                    headers=headers,
+                    payload={
+                        "plan_id": plan["plan_id"],
+                        "confirmation_token": plan["confirmation_token"],
+                    },
+                )
+                self.assertEqual(status, 409)
+                self.assertEqual(error["error"], "ROLLBACK_FAILED")
+                self.assertEqual(error["rollback_id"], "op-recover-safe")
+
+                adapters.fail_with_recovery = False
+                status, result, _, _ = request(
+                    server,
+                    "POST",
+                    "/api/adapters/apply",
+                    headers=headers,
+                    payload={
+                        "plan_id": plan["plan_id"],
+                        "confirmation_token": plan["confirmation_token"],
+                    },
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(result["rollback_id"], "op-complete-safe")
+                status, result, _, _ = request(
+                    server,
+                    "POST",
+                    "/api/adapters/rollback",
+                    headers=headers,
+                    payload={
+                        "host_id": "codex",
+                        "rollback_id": result["rollback_id"],
+                    },
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(result["state"], "rolled_back")
+                self.assertTrue(adapters.rolled_back)
 
     def test_context_is_redacted_and_security_boundaries_are_enforced(self):
         store = opc_app.DemoSettingsStore()
@@ -479,7 +537,13 @@ class AssetContractTests(unittest.TestCase):
         self.assertIn('fetchJSON("/api/app-context")', javascript)
         self.assertIn('fetchJSON("/api/snapshot")', javascript)
         self.assertIn('fetchJSON("/api/adapters")', javascript)
+        self.assertIn('"/api/adapters/rollback"', javascript)
+        self.assertIn("adapter-rollback-confirm", javascript)
+        self.assertIn("dataset.adapterRollbackId", javascript)
         self.assertNotIn("innerHTML", javascript)
+        markup = (asset_root / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="adapter-rollback-dialog"', markup)
+        self.assertIn('id="confirm-adapter-rollback"', markup)
         self.assertIn(".filterable[hidden]", stylesheet)
         self.assertIn("display: none !important", stylesheet)
 

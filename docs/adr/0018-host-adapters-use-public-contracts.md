@@ -37,6 +37,17 @@ rebuildable App state, not organizational memory. A host target may be changed
 or removed only when the manifest proves OPC ownership and the current hash
 still matches. Unknown host versions and unsupported mechanisms fail closed.
 
+Each host has one mutation lock spanning final state verification, host writes,
+fresh-process verification, manifest publication, and operation-record
+publication. An operation record is written before mutation and retains only
+logical rollback identity, prior manifest, hashes, status, and a stable error
+code. Completed or recoverable failed operations appear in the App as recovery
+entries. Rollback is a separate Host/Origin/CSRF-protected request and the UI
+requires its own confirmation dialog; it rechecks the recorded post-operation
+fingerprint before changing anything. Codex and Claude cannot claim byte-level
+host-cache drift because their public discovery contracts do not expose a
+supported cache digest; Kimi can hash its managed public Skill directories.
+
 ## Consequences
 
 The three hosts can expose different support levels without false parity.

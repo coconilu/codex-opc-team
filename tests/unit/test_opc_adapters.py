@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -144,9 +145,10 @@ class FakeHosts:
                 return opc_adapters.CommandResult(1, "", "No model configured")
             if host in self.fail_verify:
                 return opc_adapters.CommandResult(0, "")
+            skills_root = Path(values[values.index("--skills-dir") + 1])
             skills = [
                 path.name
-                for path in (ROOT / "plugins" / "codex-opc-team" / "skills").iterdir()
+                for path in skills_root.iterdir()
                 if path.is_dir()
             ]
             return opc_adapters.CommandResult(
@@ -166,6 +168,8 @@ class AdapterTests(unittest.TestCase):
         self,
         base: Path,
         fake: FakeHosts,
+        *,
+        source_root: Path = ROOT,
         **manager_options,
     ) -> opc_adapters.AdapterManager:
         homes = {}
@@ -180,13 +184,24 @@ class AdapterTests(unittest.TestCase):
             }
             executables[host] = str(base / f"{host}.fake")
         return opc_adapters.AdapterManager(
-            source_root=ROOT,
+            source_root=source_root,
             app_state_root=base / "app-state",
             runner=fake,
             environments=homes,
             executables=executables,
             **manager_options,
         )
+
+    @staticmethod
+    def copied_source(base: Path) -> Path:
+        source = base / "source"
+        plugin = source / "plugins" / "codex-opc-team"
+        plugin.parent.mkdir(parents=True)
+        shutil.copytree(ROOT / "plugins" / "codex-opc-team", plugin)
+        scripts = source / "scripts"
+        scripts.mkdir()
+        shutil.copy2(ROOT / "scripts" / "plugin_admin.py", scripts / "plugin_admin.py")
+        return source
 
     @staticmethod
     def apply(
@@ -494,6 +509,149 @@ class AdapterTests(unittest.TestCase):
             reinstalled = self.apply(manager, "kimi", "install")
             self.assertEqual(reinstalled["state"], "completed")
 
+    def test_kimi_update_rejects_new_user_owned_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = self.copied_source(base)
+            manager = self.manager(base, FakeHosts(), source_root=source)
+            self.apply(manager, "kimi", "install")
+            plugin_skills = source / "plugins" / "codex-opc-team" / "skills"
+            shutil.copytree(plugin_skills / "opc-manager", plugin_skills / "user-skill")
+            target = manager.adapters["kimi"]._target("user-skill")
+            target.mkdir()
+            sentinel = target / "user-sentinel"
+            sentinel.write_text("preserve", encoding="utf-8")
+
+            plan = manager.create_plan("kimi", "update")
+            with self.assertRaisesRegex(
+                opc_adapters.AdapterError,
+                "UNKNOWN_TARGET_CONFLICT",
+            ):
+                manager.apply(
+                    plan_id=plan["plan_id"],
+                    confirmation_token=plan["confirmation_token"],
+                )
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
+            self.assertNotIn(
+                "user-skill",
+                {
+                    item["name"]
+                    for item in manager.store.read("kimi")["managed_targets"]
+                },
+            )
+
+    def test_kimi_update_removes_deleted_owned_skill_and_rollback_restores_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = self.copied_source(base)
+            manager = self.manager(base, FakeHosts(), source_root=source)
+            self.apply(manager, "kimi", "install")
+            manifest = manager.store.read("kimi")
+            removed_name = manifest["managed_targets"][0]["name"]
+            removed_target = manager.adapters["kimi"]._target(removed_name)
+            removed_hash = opc_adapters.tree_digest(removed_target)
+            shutil.rmtree(
+                source
+                / "plugins"
+                / "codex-opc-team"
+                / "skills"
+                / removed_name
+            )
+
+            plan = manager.create_plan("kimi", "update")
+            self.assertIn(
+                {"action": "remove", "target": f"kimi:skill/{removed_name}"},
+                plan["changes"],
+            )
+            updated = manager.apply(
+                plan_id=plan["plan_id"],
+                confirmation_token=plan["confirmation_token"],
+            )
+            self.assertFalse(removed_target.exists())
+            self.assertNotIn(
+                removed_name,
+                {
+                    item["name"]
+                    for item in manager.store.read("kimi")["managed_targets"]
+                },
+            )
+
+            manager.rollback("kimi", updated["rollback_id"])
+            self.assertTrue(removed_target.is_dir())
+            self.assertEqual(opc_adapters.tree_digest(removed_target), removed_hash)
+            self.assertIn(
+                removed_name,
+                {
+                    item["name"]
+                    for item in manager.store.read("kimi")["managed_targets"]
+                },
+            )
+
+    def test_kimi_rollback_rejects_post_operation_user_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = self.copied_source(base)
+            manager = self.manager(base, FakeHosts(), source_root=source)
+            self.apply(manager, "kimi", "install")
+            changed = (
+                source
+                / "plugins"
+                / "codex-opc-team"
+                / "skills"
+                / "opc-manager"
+                / "SKILL.md"
+            )
+            changed.write_text(
+                changed.read_text(encoding="utf-8") + "\nUpdate marker.\n",
+                encoding="utf-8",
+            )
+            updated = self.apply(manager, "kimi", "update")
+            target = manager.adapters["kimi"]._target("opc-manager")
+            edit = target / "user-after-update.txt"
+            edit.write_text("preserve", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                opc_adapters.AdapterError,
+                "ROLLBACK_CONFLICT",
+            ):
+                manager.rollback("kimi", updated["rollback_id"])
+
+            self.assertEqual(edit.read_text(encoding="utf-8"), "preserve")
+
+    def test_codex_projection_key_includes_content_hash_and_claude_requires_exact_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = self.copied_source(base)
+            manager = self.manager(base, FakeHosts(), source_root=source)
+            codex = manager.adapters["codex"]
+            first = codex._codex_source()
+            skill = (
+                source
+                / "plugins"
+                / "codex-opc-team"
+                / "skills"
+                / "opc-manager"
+                / "SKILL.md"
+            )
+            skill.write_text(
+                skill.read_text(encoding="utf-8") + "\nContent revision.\n",
+                encoding="utf-8",
+            )
+            second = codex._codex_source()
+            self.assertNotEqual(first, second)
+            self.assertTrue(second.name.endswith(codex.content_hash[:16]))
+            self.assertFalse(
+                opc_adapters.ClaudeAdapter._is_installed(
+                    [{"name": "codex-opc-team"}]
+                )
+            )
+            self.assertTrue(
+                opc_adapters.ClaudeAdapter._is_installed(
+                    [{"id": "codex-opc-team@opc"}]
+                )
+            )
+
     def test_user_modified_target_fails_closed_and_preserves_edit(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -660,17 +818,121 @@ class AdapterTests(unittest.TestCase):
 
             manager.adapters["claude"].runner = fail_cleanup
             plan = manager.create_plan("claude", "install")
-            with self.assertRaisesRegex(opc_adapters.AdapterError, "ROLLBACK_FAILED"):
+            with self.assertRaisesRegex(
+                opc_adapters.AdapterError,
+                "ROLLBACK_FAILED",
+            ) as caught:
                 manager.apply(
                     plan_id=plan["plan_id"],
                     confirmation_token=plan["confirmation_token"],
                 )
+            self.assertIsNotNone(caught.exception.rollback_id)
             self.assertIsNone(manager.store.read("claude"))
             self.assertTrue(manager.adapters["claude"].marketplace_root.is_dir())
             self.assertTrue(fake.installed["claude"])
             self.assertEqual(fake.claude_plugin_data["sentinel"], "preserved")
             self.assertIn("unrelated-marketplace", fake.claude_marketplaces)
             self.assertTrue(cleanup_failed)
+            recovery = {
+                item["host_id"]: item
+                for item in manager.inventory()["hosts"]
+            }["claude"]["recovery"]
+            self.assertEqual(recovery["rollback_id"], caught.exception.rollback_id)
+            self.assertEqual(recovery["status"], "failed")
+
+            rolled_back = manager.rollback("claude", caught.exception.rollback_id)
+            self.assertEqual(rolled_back["state"], "rolled_back")
+            self.assertFalse(fake.installed["claude"])
+            self.assertNotIn(
+                "recovery",
+                {
+                    item["host_id"]: item
+                    for item in manager.inventory()["hosts"]
+                }["claude"],
+            )
+
+    def test_manifest_publication_failure_keeps_a_recoverable_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            manager = self.manager(base, FakeHosts())
+            original_write = manager.store.write
+            injected = False
+
+            def fail_once(host_id, manifest):
+                nonlocal injected
+                if host_id == "kimi" and not injected:
+                    injected = True
+                    raise OSError("injected manifest publication failure")
+                return original_write(host_id, manifest)
+
+            manager.store.write = fail_once
+            plan = manager.create_plan("kimi", "install")
+            with self.assertRaisesRegex(
+                opc_adapters.AdapterError,
+                "APPLY_FAILED",
+            ) as caught:
+                manager.apply(
+                    plan_id=plan["plan_id"],
+                    confirmation_token=plan["confirmation_token"],
+                )
+            self.assertTrue(injected)
+            self.assertIsNotNone(caught.exception.rollback_id)
+            self.assertIsNone(manager.store.read("kimi"))
+            recovery = {
+                item["host_id"]: item
+                for item in manager.inventory()["hosts"]
+            }["kimi"]["recovery"]
+            self.assertEqual(recovery["rollback_id"], caught.exception.rollback_id)
+            self.assertEqual(recovery["status"], "failed")
+
+            rolled_back = manager.rollback("kimi", caught.exception.rollback_id)
+            self.assertEqual(rolled_back["state"], "rolled_back")
+            for name in manager.adapters["kimi"].skill_names:
+                self.assertFalse(manager.adapters["kimi"]._target(name).exists())
+
+    def test_same_host_applies_are_serialized_across_state_check_and_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            manager = self.manager(base, FakeHosts())
+            first_plan = manager.create_plan("kimi", "install")
+            second_plan = manager.create_plan("kimi", "install")
+            adapter = manager.adapters["kimi"]
+            original = adapter.apply_operation
+            entered = threading.Event()
+            release = threading.Event()
+            calls = 0
+
+            def blocked_apply(operation, operation_id):
+                nonlocal calls
+                calls += 1
+                entered.set()
+                self.assertTrue(release.wait(timeout=10))
+                return original(operation, operation_id)
+
+            adapter.apply_operation = blocked_apply
+            outcomes: list[str] = []
+
+            def run(plan):
+                try:
+                    manager.apply(
+                        plan_id=plan["plan_id"],
+                        confirmation_token=plan["confirmation_token"],
+                    )
+                    outcomes.append("completed")
+                except opc_adapters.AdapterError as exc:
+                    outcomes.append(exc.code)
+
+            first = threading.Thread(target=run, args=(first_plan,))
+            second = threading.Thread(target=run, args=(second_plan,))
+            first.start()
+            self.assertTrue(entered.wait(timeout=10))
+            second.start()
+            release.set()
+            first.join(timeout=20)
+            second.join(timeout=20)
+
+            self.assertEqual(sorted(outcomes), ["PLAN_STATE_CHANGED", "completed"])
+            self.assertEqual(calls, 1)
 
     def test_claude_uninstall_rollback_install_failure_preserves_absent_prestate(self):
         with tempfile.TemporaryDirectory() as directory:

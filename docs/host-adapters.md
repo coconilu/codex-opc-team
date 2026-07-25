@@ -51,11 +51,21 @@ writes an ownership manifest or host file.
 The browser API emits logical targets such as `kimi:skill/opc-manager`, not
 absolute user-home paths.
 
+Codex and Claude drift detection is intentionally limited to the official
+installed-state discovery result plus the App-owned immutable projection or
+marketplace source. Their public CLIs do not expose a supported installed-cache
+content digest, so the Adapter does not claim byte-level host-cache drift
+detection. Kimi is different: its public integration unit is the managed Skill
+directory itself, so every owned target is hash-verified.
+
 ## Conflict and recovery rules
 
 - Install refuses an existing unknown target.
 - Update and uninstall require an ownership manifest and an unchanged current
   hash. User edits and links are preserved as conflicts.
+- A Kimi update rejects a newly introduced canonical Skill when its target is
+  already user-owned, and removes a deleted canonical Skill only when the old
+  manifest and current hash still prove OPC ownership.
 - Kimi directory swaps use App-owned staging and backups. A partial swap
   restores already moved targets in reverse order.
 - Claude update and rollback never remove its marketplace. The stable source
@@ -68,6 +78,17 @@ absolute user-home paths.
   manager preferences/rules/experience, optional Mem0 data, or other hosts.
 - Verification failure is not PASS. The operation attempts rollback and returns
   a structured failure or recovery requirement.
+- Operation records are persisted before mutation. Successful and recoverable
+  failed operations expose a logical rollback ID in the App; no backup path is
+  returned. Rollback rechecks the exact post-operation target fingerprint and
+  refuses to remove user changes.
+- Apply and rollback are serialized per host across fingerprint verification,
+  mutation, manifest publication, and operation-record publication. Different
+  hosts remain independent.
+- `/api/adapters/rollback` is protected by the same Host, Origin, and CSRF
+  boundary as apply. The App additionally requires a dedicated visible
+  confirmation dialog before it sends the rollback request; rollback IDs alone
+  are not treated as authorization.
 
 ## Installed-state QA
 

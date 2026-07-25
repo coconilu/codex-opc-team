@@ -1473,6 +1473,22 @@ dialog::backdrop {
   padding: 9px 10px;
 }
 
+.adapter-recovery {
+  background: color-mix(in srgb, var(--amber-600) 8%, white);
+  border: 1px solid color-mix(in srgb, var(--amber-600) 30%, var(--line));
+  border-radius: 9px;
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 11px;
+}
+
+.adapter-recovery code {
+  color: var(--text-500);
+  font-size: .72rem;
+  overflow-wrap: anywhere;
+}
+
 .adapter-actions {
   display: flex;
   gap: 8px;

@@ -245,6 +245,19 @@
     <div class="drawer-actions"><button class="secondary-button" id="cancel-adapter-plan" type="button">取消</button><button class="primary-button" id="apply-adapter-plan" type="button" disabled>确认并执行</button></div>
   </dialog>
 
+  <dialog class="detail-dialog adapter-dialog" id="adapter-rollback-dialog" aria-labelledby="adapter-rollback-title">
+    <div class="dialog-header">
+      <div><span id="adapter-rollback-host">Adapter</span><h2 id="adapter-rollback-title">回滚本次操作</h2></div>
+      <button class="icon-button" id="close-adapter-rollback" type="button" aria-label="关闭 Adapter 回滚"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button>
+    </div>
+    <p id="adapter-rollback-reason">将恢复该操作记录绑定的 OPC-owned 前置状态。</p>
+    <div class="next-step-box"><strong>回滚点</strong><code id="adapter-rollback-id">—</code></div>
+    <p class="surface-note">执行前会重新核对目标指纹；若用户在操作后修改过内容，将拒绝删除或覆盖。</p>
+    <label class="adapter-confirm"><input id="adapter-rollback-confirm" type="checkbox">我已确认回滚范围，仅恢复本次 OPC-owned 操作。</label>
+    <p class="field-error" id="adapter-rollback-error" role="alert" hidden></p>
+    <div class="drawer-actions"><button class="secondary-button" id="cancel-adapter-rollback" type="button">取消</button><button class="primary-button" id="confirm-adapter-rollback" type="button" disabled>确认回滚</button></div>
+  </dialog>
+
   <script src="/dashboard.js" defer></script>
 </body>
 </html>
