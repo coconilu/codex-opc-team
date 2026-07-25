@@ -102,6 +102,18 @@ it. Missing, modified, extra, linked, or unreadable content fails closed. A
 trusted `update --apply` can repair the same damaged release, and the current
 pointer changes only after successful verification.
 
+The three launchers are also one complete artifact set with their own manifest,
+sizes, and SHA-256 digests. A launcher verifies that set before it verifies the
+current release. The installer rejects linked, reparse, or unsafe `bin` and
+launcher entries, writes and flushes a fresh sibling staging directory, verifies
+it by readback, then activates it through a recoverable old-set backup and
+directory swap. On Windows this is explicitly a recoverable transaction, not a
+claim that directory replacement is atomic. Activation failure restores the old
+set; failed restoration preserves `.launcher-backup-*` for manual recovery.
+Launchers are release-agnostic, so the release pointer changes only after the
+launcher set is active and an unchanged old pointer remains safe if pointer
+activation fails.
+
 ## 4. Project and privacy boundary
 
 The user submits one absolute directory. The server checks only that directory

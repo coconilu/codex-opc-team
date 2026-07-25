@@ -97,6 +97,14 @@ App 状态、项目 `.opc`、File/Git knowledge、Git 历史、用户配置和 M
 链接或不可读内容会 fail closed。对同一可信源码再次执行 `update --apply` 可修复
 损坏 release，current pointer 只在复验成功后原子切换。
 
+三个 launcher 也组成带 manifest、文件大小和 SHA-256 的完整制品集合；launcher
+启动时先复验自身集合，再复验 current release。安装器拒绝 linked/reparse/unsafe
+的 `bin` 和 launcher entry，在同级 fresh staging 中写入、flush/fsync、readback
+验证后，以旧集合 backup + directory swap 激活。在 Windows 上这是可恢复事务，
+不宣称目录替换原子；激活失败恢复旧集合，恢复失败则保留 `.launcher-backup-*`。
+launcher 不绑定单个 release，因此只有 launcher 集合完整激活后才切换 pointer，
+pointer 写失败时旧 pointer 仍可安全使用。
+
 ## 4. 项目接入与隐私
 
 接入流程固定为：

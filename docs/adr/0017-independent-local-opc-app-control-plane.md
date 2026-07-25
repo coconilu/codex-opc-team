@@ -45,7 +45,13 @@ loopback-only 浏览器视图可以安全降低经理理解 OPC 状态的成本�
 9. **独立可回滚分发。** App 安装器把公开插件快照复制到用户级 runtime，
    为每个 release 持久化完整文件清单、大小与 SHA-256，用内容哈希 release
    与原子 current pointer 支持安装、升级和回滚。staging、激活、启动、状态检查
-   和回滚前都会复验完整性；损坏 release 不会被激活。卸载只删除 runtime；
+   和回滚前都会复验完整性；损坏 release 不会被激活。launcher 也作为带完整
+   manifest 和 SHA-256 的独立制品集合，在 runtime 同级 staging 后以
+   `bin → backup`、`stage → bin` 的可恢复目录交换激活；Windows 不将目录交换
+   描述为原子操作。失败时先恢复完整旧集合，恢复本身失败则保留 backup 供人工
+   恢复。launcher 与 release 解耦并在运行时复验 current release，因此 launcher
+   激活完成后才切换 pointer，pointer 写失败时旧 pointer 仍可由新 launcher 安全
+   启动。卸载只删除 runtime；
    App 状态、项目、File/Git knowledge、Git 历史、用户配置和 Mem0 数据全部保留。
 10. **旧入口兼容。** 不安装或不启动 App 时，Codex Plugin、Skills、Hook、
     脚本和 `opc_dashboard.py` 的行为与生命周期 Gate 不变。

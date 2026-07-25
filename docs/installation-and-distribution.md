@@ -167,6 +167,13 @@ pointer；staging、激活、status、launcher 和 rollback 均复验完整性�
 位于独立用户状态目录，并拒绝与 checkout、plugin/runtime、项目/`.opc`、
 knowledge/data root 的 lexical 或 canonical 双向重叠。
 
+`bin` launcher 集合另有完整 manifest、逐文件 SHA-256 和启动时自检。安装器拒绝
+linked/reparse/unsafe `bin` 或 launcher entry，在 runtime 同级 fresh staging
+写完并复验整套文件后，才以 backup + directory swap 激活。此流程在 Windows
+明确是可恢复事务而非“目录原子替换”：激活失败会恢复旧 launcher；恢复本身失败
+会保留 `.launcher-backup-*` 供人工恢复。launcher 不绑定单个 release，并在每次
+启动时复验 current release，所以 pointer 只在 launcher 完整激活后切换。
+
 App 卸载不删除 App 接入清单、项目 `.opc`、File/Git knowledge、Git 历史、
 用户配置或 Mem0 数据。它不安装或管理 Codex、Claude、Kimi 本体，也不写这些
 宿主的全局配置；宿主 Adapters 属于 Issue #26。完整边界与恢复说明见

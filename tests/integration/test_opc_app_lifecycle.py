@@ -85,6 +85,33 @@ def make_source(base: Path, version: str) -> Path:
     return source
 
 
+def launcher_snapshot(path: Path) -> dict[str, bytes]:
+    return {
+        item.name: item.read_bytes()
+        for item in path.iterdir()
+        if item.is_file() and not item.is_symlink()
+    }
+
+
+def assert_launcher_usable(
+    testcase: unittest.TestCase,
+    launcher: Path,
+    *,
+    environment: dict[str, str],
+    cwd: Path,
+) -> None:
+    result = subprocess.run(
+        [sys.executable, str(launcher), "--help"],
+        cwd=cwd,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    testcase.assertEqual(result.returncode, 0, result.stderr)
+    testcase.assertIn("usage:", result.stdout)
+
+
 class OPCAppLifecycleTests(unittest.TestCase):
     def test_uninstall_refuses_an_unowned_directory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -434,6 +461,329 @@ class OPCAppLifecycleTests(unittest.TestCase):
             self.assertEqual(linked.returncode, 1)
             self.assertIn("linked content", linked.stderr)
 
+    def test_linked_launcher_boundaries_never_modify_outside_sentinels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            home.mkdir()
+            state_root = base / "app-state"
+            install_root = base / "runtime"
+            environment = clean_environment(home, state_root)
+            source = make_source(base, "9.1.1-launcher-links")
+            run_admin(
+                "install",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            pointer_before = (install_root / "current.json").read_bytes()
+            launcher_root = install_root / "bin"
+            launcher_backup = base / "safe-launchers"
+            shutil.copytree(launcher_root, launcher_backup)
+
+            outside_directory = base / "outside-bin"
+            outside_directory.mkdir()
+            outside_directory_sentinel = outside_directory / "sentinel.bin"
+            outside_directory_sentinel.write_bytes(b"outside-directory-preserve")
+            shutil.rmtree(launcher_root)
+            try:
+                os.symlink(outside_directory, launcher_root, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlink creation is not permitted")
+            linked_bin = run_admin_raw(
+                "update",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            self.assertEqual(linked_bin.returncode, 1)
+            self.assertIn("outside the install root", linked_bin.stderr)
+            self.assertEqual(
+                outside_directory_sentinel.read_bytes(),
+                b"outside-directory-preserve",
+            )
+            self.assertEqual((install_root / "current.json").read_bytes(), pointer_before)
+            launcher_root.unlink()
+            shutil.copytree(launcher_backup, launcher_root)
+
+            outside_file = base / "outside-launcher.cmd"
+            outside_file.write_bytes(b"outside-file-preserve")
+            linked_launcher = launcher_root / "opc-app.cmd"
+            linked_launcher.unlink()
+            try:
+                os.symlink(outside_file, linked_launcher)
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlink creation is not permitted")
+            linked_entry = run_admin_raw(
+                "update",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            self.assertEqual(linked_entry.returncode, 1)
+            self.assertIn("outside the install root", linked_entry.stderr)
+            self.assertEqual(outside_file.read_bytes(), b"outside-file-preserve")
+            self.assertEqual((install_root / "current.json").read_bytes(), pointer_before)
+
+    def test_first_and_second_launcher_write_failures_preserve_old_complete_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            home.mkdir()
+            state_root = base / "app-state"
+            install_root = base / "runtime"
+            environment = clean_environment(home, state_root)
+            source = make_source(base, "9.1.2-launcher-writes")
+            run_admin(
+                "install",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            launcher_root = install_root / "bin"
+            before = launcher_snapshot(launcher_root)
+            pointer_before = (install_root / "current.json").read_bytes()
+            arguments = SimpleNamespace(
+                source=str(source),
+                install_root=str(install_root),
+                apply=True,
+                dry_run=False,
+            )
+            original_write = opc_app_admin._write_launcher_file
+
+            for fail_at in (1, 2):
+                with self.subTest(fail_at=fail_at):
+                    calls = 0
+
+                    def fail_selected_write(path, payload, *, executable=False):
+                        nonlocal calls
+                        calls += 1
+                        if calls == fail_at:
+                            raise opc_app_admin.AppInstallError(
+                                f"injected launcher write {fail_at}"
+                            )
+                        return original_write(
+                            path,
+                            payload,
+                            executable=executable,
+                        )
+
+                    with (
+                        mock.patch.object(
+                            opc_app_admin,
+                            "_write_launcher_file",
+                            side_effect=fail_selected_write,
+                        ),
+                        self.assertRaises(opc_app_admin.AppInstallError),
+                    ):
+                        opc_app_admin.install_or_update(arguments)
+                    self.assertEqual(launcher_snapshot(launcher_root), before)
+                    self.assertEqual(
+                        (install_root / "current.json").read_bytes(),
+                        pointer_before,
+                    )
+                    self.assertEqual(list(install_root.glob(".launcher-stage-*")), [])
+                    self.assertEqual(list(install_root.glob(".launcher-backup-*")), [])
+                    assert_launcher_usable(
+                        self,
+                        launcher_root / "opc-app.py",
+                        environment=environment,
+                        cwd=base,
+                    )
+
+    def test_launcher_digest_tamper_fails_status_and_launch_then_repairs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            home.mkdir()
+            state_root = base / "app-state"
+            install_root = base / "runtime"
+            environment = clean_environment(home, state_root)
+            source = make_source(base, "9.1.25-launcher-integrity")
+            run_admin(
+                "install",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            command_launcher = install_root / "bin" / "opc-app.cmd"
+            command_launcher.write_bytes(command_launcher.read_bytes() + b"\r\nrem tampered")
+            status = run_admin_raw(
+                "status",
+                "--install-root",
+                str(install_root),
+                environment=environment,
+            )
+            self.assertEqual(status.returncode, 1)
+            self.assertIn("launcher artifact failed integrity", status.stderr)
+            launch = subprocess.run(
+                [
+                    sys.executable,
+                    str(install_root / "bin" / "opc-app.py"),
+                    "--help",
+                ],
+                cwd=base,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(launch.returncode, 1)
+            self.assertIn("launcher or active release", launch.stderr)
+
+            run_admin(
+                "update",
+                "--source",
+                str(source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            opc_app_admin._validate_launcher_set(install_root)
+            assert_launcher_usable(
+                self,
+                install_root / "bin" / "opc-app.py",
+                environment=environment,
+                cwd=base,
+            )
+
+    def test_launcher_activation_failure_restores_old_set_and_pointer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            home.mkdir()
+            state_root = base / "app-state"
+            install_root = base / "runtime"
+            environment = clean_environment(home, state_root)
+            first_source = make_source(base, "9.1.3-launcher-old")
+            second_source = make_source(base, "9.1.4-launcher-new")
+            run_admin(
+                "install",
+                "--source",
+                str(first_source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            launcher_root = install_root / "bin"
+            before = launcher_snapshot(launcher_root)
+            pointer_before = (install_root / "current.json").read_bytes()
+            arguments = SimpleNamespace(
+                source=str(second_source),
+                install_root=str(install_root),
+                apply=True,
+                dry_run=False,
+            )
+            original_replace = opc_app_admin.os.replace
+
+            def fail_activation(source_path, destination_path):
+                source_path = Path(source_path)
+                destination_path = Path(destination_path)
+                if (
+                    source_path.name.startswith(".launcher-stage-")
+                    and destination_path == launcher_root
+                ):
+                    raise PermissionError("injected launcher activation failure")
+                return original_replace(source_path, destination_path)
+
+            with (
+                mock.patch.object(
+                    opc_app_admin.os,
+                    "replace",
+                    side_effect=fail_activation,
+                ),
+                self.assertRaises(opc_app_admin.AppInstallError),
+            ):
+                opc_app_admin.install_or_update(arguments)
+            self.assertEqual(launcher_snapshot(launcher_root), before)
+            self.assertEqual((install_root / "current.json").read_bytes(), pointer_before)
+            self.assertEqual(list(install_root.glob(".launcher-backup-*")), [])
+            assert_launcher_usable(
+                self,
+                launcher_root / "opc-app.py",
+                environment=environment,
+                cwd=base,
+            )
+
+    def test_launcher_restore_failure_preserves_recoverable_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            home.mkdir()
+            state_root = base / "app-state"
+            install_root = base / "runtime"
+            environment = clean_environment(home, state_root)
+            first_source = make_source(base, "9.1.5-launcher-old")
+            second_source = make_source(base, "9.1.6-launcher-new")
+            run_admin(
+                "install",
+                "--source",
+                str(first_source),
+                "--install-root",
+                str(install_root),
+                "--apply",
+                environment=environment,
+            )
+            launcher_root = install_root / "bin"
+            before = launcher_snapshot(launcher_root)
+            pointer_before = (install_root / "current.json").read_bytes()
+            arguments = SimpleNamespace(
+                source=str(second_source),
+                install_root=str(install_root),
+                apply=True,
+                dry_run=False,
+            )
+            original_replace = opc_app_admin.os.replace
+
+            def fail_activation_and_restore(source_path, destination_path):
+                source_path = Path(source_path)
+                destination_path = Path(destination_path)
+                if destination_path == launcher_root and (
+                    source_path.name.startswith(".launcher-stage-")
+                    or source_path.name.startswith(".launcher-backup-")
+                ):
+                    raise PermissionError("injected launcher swap failure")
+                return original_replace(source_path, destination_path)
+
+            with (
+                mock.patch.object(
+                    opc_app_admin.os,
+                    "replace",
+                    side_effect=fail_activation_and_restore,
+                ),
+                self.assertRaises(opc_app_admin.AppInstallError),
+            ):
+                opc_app_admin.install_or_update(arguments)
+            self.assertFalse(launcher_root.exists())
+            backups = list(install_root.glob(".launcher-backup-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(launcher_snapshot(backups[0]), before)
+            opc_app_admin._validate_launcher_set(install_root, backups[0])
+            self.assertEqual((install_root / "current.json").read_bytes(), pointer_before)
+            assert_launcher_usable(
+                self,
+                backups[0] / "opc-app.py",
+                environment=environment,
+                cwd=base,
+            )
+
     def test_permission_and_pointer_activation_failures_preserve_current_release(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -501,6 +851,13 @@ class OPCAppLifecycleTests(unittest.TestCase):
             opc_app_admin._validate_release(
                 install_root / "releases" / before["current"],
                 expected_release=before["current"],
+            )
+            opc_app_admin._validate_launcher_set(install_root)
+            assert_launcher_usable(
+                self,
+                install_root / "bin" / "opc-app.py",
+                environment=environment,
+                cwd=base,
             )
 
             second_plugin = opc_app_admin._plugin_source(second_source)

@@ -27,9 +27,11 @@ MAX_MANIFEST_BYTES = 64 * 1024
 POINTER_SCHEMA = "opc-app.install.v1"
 OWNER_SCHEMA = "opc-app.runtime-owner.v1"
 RELEASE_MANIFEST_SCHEMA = "opc-app.release-manifest.v1"
+LAUNCHER_MANIFEST_SCHEMA = "opc-app.launcher-manifest.v1"
 RELEASE_ID = re.compile(r"^v[A-Za-z0-9.-]{1,64}-[0-9a-f]{12}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_RELEASE_FILES = 4096
+LAUNCHER_NAMES = ("opc-app.py", "opc-app.cmd", "opc-app")
 
 
 class AppInstallError(RuntimeError):
@@ -93,6 +95,49 @@ def _safe_install_root(value: str | Path) -> Path:
     if root.exists() and (_is_link(root) or not root.is_dir()):
         raise AppInstallError("install root is not a safe directory")
     return root
+
+
+def _assert_runtime_boundary(root: Path, candidate: Path) -> None:
+    lexical_root = Path(os.path.abspath(root))
+    lexical_candidate = Path(os.path.abspath(candidate))
+    try:
+        relative = lexical_candidate.relative_to(lexical_root)
+    except ValueError as exc:
+        raise AppInstallError("runtime artifact escapes the install root") from exc
+    if not relative.parts:
+        raise AppInstallError("runtime artifact cannot replace the install root")
+
+    canonical_root = lexical_root.resolve(strict=False)
+    canonical_candidate = lexical_candidate.resolve(strict=False)
+    try:
+        canonical_candidate.relative_to(canonical_root)
+    except ValueError as exc:
+        raise AppInstallError("runtime artifact resolves outside the install root") from exc
+
+    current = lexical_root
+    if current.exists() and _is_link(current):
+        raise AppInstallError("runtime artifact has a linked ancestor")
+    for part in relative.parts:
+        current = current / part
+        if current.exists() and _is_link(current):
+            raise AppInstallError("runtime artifact has a linked ancestor")
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        if os.name == "nt":
+            return
+        raise AppInstallError("failed to open runtime directory for synchronization") from exc
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        if os.name != "nt":
+            raise AppInstallError("failed to synchronize runtime directory") from exc
+    finally:
+        os.close(descriptor)
 
 
 def _plugin_source(source: Path) -> Path:
@@ -374,7 +419,61 @@ def linked(path: Path) -> bool:
     return stat.S_ISLNK(metadata.st_mode) or bool(reparse and attributes & reparse)
 
 try:
-    root = Path(__file__).resolve().parents[1]
+    launcher_path = Path(__file__).absolute()
+    launcher_root = launcher_path.parent
+    launcher_manifest_path = launcher_root / "launcher-manifest.json"
+    if linked(launcher_path) or linked(launcher_root) or linked(launcher_manifest_path):
+        raise ValueError
+    launcher_manifest_metadata = launcher_manifest_path.lstat()
+    if (
+        not stat.S_ISREG(launcher_manifest_metadata.st_mode)
+        or launcher_manifest_metadata.st_nlink != 1
+    ):
+        raise ValueError
+    launcher_manifest = json.loads(
+        launcher_manifest_path.read_text(encoding="utf-8")
+    )
+    if (
+        set(launcher_manifest) != {"schema_version", "files"}
+        or launcher_manifest.get("schema_version") != "opc-app.launcher-manifest.v1"
+        or not isinstance(launcher_manifest.get("files"), list)
+        or len(launcher_manifest["files"]) != 3
+    ):
+        raise ValueError
+    expected_launchers = {}
+    for item in launcher_manifest["files"]:
+        name = item.get("path")
+        size = item.get("size")
+        digest = item.get("sha256")
+        if (
+            set(item) != {"path", "size", "sha256"}
+            or name not in {"opc-app.py", "opc-app.cmd", "opc-app"}
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or name in expected_launchers
+        ):
+            raise ValueError
+        expected_launchers[name] = (size, digest)
+    actual_names = {path.name for path in launcher_root.iterdir()}
+    if actual_names != {*expected_launchers, "launcher-manifest.json"}:
+        raise ValueError
+    for name, expected in expected_launchers.items():
+        path = launcher_root / name
+        metadata = path.lstat()
+        if (
+            linked(path)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+        ):
+            raise ValueError
+        raw = path.read_bytes()
+        if (len(raw), hashlib.sha256(raw).hexdigest()) != expected:
+            raise ValueError
+
+    root = launcher_root.parent
     pointer_path = root / "current.json"
     pointer_metadata = pointer_path.lstat()
     if linked(pointer_path) or not stat.S_ISREG(pointer_metadata.st_mode) or pointer_metadata.st_nlink != 1:
@@ -456,7 +555,7 @@ try:
     if f"v{safe_version}-{identity.hexdigest()[:12]}" != release:
         raise ValueError
 except Exception:
-    raise SystemExit("OPC_APP_LAUNCH_FAILED: active release failed integrity validation")
+    raise SystemExit("OPC_APP_LAUNCH_FAILED: launcher or active release failed integrity validation")
 
 script = plugin / "scripts" / "opc_app.py"
 sys.dont_write_bytecode = True
@@ -466,25 +565,233 @@ runpy.run_path(str(script), run_name="__main__")
 """
 
 
+CMD_LAUNCHER = b'@echo off\r\npython "%~dp0opc-app.py" %*\r\n'
+SHELL_LAUNCHER = b'#!/usr/bin/env sh\nexec python3 "$(dirname "$0")/opc-app.py" "$@"\n'
+
+
+def _launcher_payloads() -> dict[str, bytes]:
+    return {
+        "opc-app.py": LAUNCHER.encode("utf-8"),
+        "opc-app.cmd": CMD_LAUNCHER,
+        "opc-app": SHELL_LAUNCHER,
+    }
+
+
+def _launcher_manifest(payloads: dict[str, bytes]) -> dict[str, Any]:
+    return {
+        "schema_version": LAUNCHER_MANIFEST_SCHEMA,
+        "files": [
+            {
+                "path": name,
+                "size": len(payloads[name]),
+                "sha256": hashlib.sha256(payloads[name]).hexdigest(),
+            }
+            for name in LAUNCHER_NAMES
+        ],
+    }
+
+
+def _launcher_manifest_bytes(payloads: dict[str, bytes]) -> bytes:
+    return (
+        json.dumps(
+            _launcher_manifest(payloads),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _write_launcher_file(path: Path, payload: bytes, *, executable: bool = False) -> None:
+    try:
+        with path.open("xb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as exc:
+        raise AppInstallError("failed to write staged launcher artifact") from exc
+    if executable:
+        try:
+            path.chmod(0o755)
+        except OSError:
+            pass
+
+
+def _validate_launcher_container(root: Path, target: Path) -> set[str]:
+    _assert_runtime_boundary(root, target)
+    if _is_link(target):
+        raise AppInstallError("launcher directory contains linked content")
+    if not target.exists():
+        return set()
+    try:
+        metadata = target.lstat()
+        entries = list(target.iterdir())
+    except OSError as exc:
+        raise AppInstallError("launcher directory is unreadable") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise AppInstallError("launcher path is not a safe directory")
+    names: set[str] = set()
+    for path in entries:
+        _assert_runtime_boundary(root, path)
+        if _is_link(path):
+            raise AppInstallError("launcher directory contains linked content")
+        try:
+            entry_metadata = path.lstat()
+        except OSError as exc:
+            raise AppInstallError("launcher artifact is unreadable") from exc
+        if not stat.S_ISREG(entry_metadata.st_mode) or entry_metadata.st_nlink != 1:
+            raise AppInstallError("launcher directory contains unsafe content")
+        names.add(path.name)
+    allowed = set(LAUNCHER_NAMES) | {"launcher-manifest.json"}
+    if not names.issubset(allowed):
+        raise AppInstallError("launcher directory contains unexpected content")
+    return names
+
+
+def _validate_launcher_set(root: Path, target: Path | None = None) -> dict[str, Any]:
+    target = target or root / "bin"
+    names = _validate_launcher_container(root, target)
+    if names != set(LAUNCHER_NAMES) | {"launcher-manifest.json"}:
+        raise AppInstallError("launcher artifact set is incomplete")
+    manifest_path = target / "launcher-manifest.json"
+    try:
+        metadata = manifest_path.lstat()
+        raw_manifest = manifest_path.read_bytes()
+    except OSError as exc:
+        raise AppInstallError("launcher manifest is unreadable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or not raw_manifest
+        or len(raw_manifest) > MAX_MANIFEST_BYTES
+    ):
+        raise AppInstallError("launcher manifest is unsafe")
+    try:
+        manifest = json.loads(raw_manifest.decode("utf-8"))
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise AppInstallError("launcher manifest is invalid") from exc
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schema_version", "files"}
+        or manifest.get("schema_version") != LAUNCHER_MANIFEST_SCHEMA
+        or not isinstance(manifest.get("files"), list)
+        or len(manifest["files"]) != len(LAUNCHER_NAMES)
+    ):
+        raise AppInstallError("launcher manifest is invalid")
+    expected: dict[str, tuple[int, str]] = {}
+    for item in manifest["files"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "size", "sha256"}
+            or item.get("path") not in LAUNCHER_NAMES
+            or item["path"] in expected
+            or not isinstance(item.get("size"), int)
+            or isinstance(item["size"], bool)
+            or item["size"] < 0
+            or not isinstance(item.get("sha256"), str)
+            or HEX64.fullmatch(item["sha256"]) is None
+        ):
+            raise AppInstallError("launcher manifest is invalid")
+        expected[item["path"]] = (item["size"], item["sha256"])
+    if set(expected) != set(LAUNCHER_NAMES):
+        raise AppInstallError("launcher manifest is invalid")
+    for name in LAUNCHER_NAMES:
+        path = target / name
+        _assert_runtime_boundary(root, path)
+        try:
+            metadata = path.lstat()
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise AppInstallError("launcher artifact is unreadable") from exc
+        if (
+            _is_link(path)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or (len(raw), hashlib.sha256(raw).hexdigest()) != expected[name]
+        ):
+            raise AppInstallError("launcher artifact failed integrity validation")
+    return manifest
+
+
 def _write_launchers(root: Path) -> None:
     target = root / "bin"
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "opc-app.py").write_text(LAUNCHER, encoding="utf-8", newline="\n")
-    (target / "opc-app.cmd").write_text(
-        '@echo off\r\npython "%~dp0opc-app.py" %*\r\n',
-        encoding="utf-8",
-        newline="",
-    )
-    shell = target / "opc-app"
-    shell.write_text(
-        '#!/usr/bin/env sh\nexec python3 "$(dirname "$0")/opc-app.py" "$@"\n',
-        encoding="utf-8",
-        newline="\n",
-    )
+    stage = root / f".launcher-stage-{secrets.token_hex(6)}"
+    backup: Path | None = None
+    failed: Path | None = None
+    activated = False
+    _assert_runtime_boundary(root, target)
+    existing_names = _validate_launcher_container(root, target)
+    if existing_names and existing_names not in (
+        set(LAUNCHER_NAMES),
+        set(LAUNCHER_NAMES) | {"launcher-manifest.json"},
+    ):
+        raise AppInstallError("existing launcher artifact set is incomplete")
+
+    payloads = _launcher_payloads()
     try:
-        shell.chmod(0o755)
-    except OSError:
-        pass
+        _assert_runtime_boundary(root, stage)
+        stage.mkdir()
+        for name in LAUNCHER_NAMES:
+            _write_launcher_file(
+                stage / name,
+                payloads[name],
+                executable=name == "opc-app",
+            )
+        _write_launcher_file(
+            stage / "launcher-manifest.json",
+            _launcher_manifest_bytes(payloads),
+        )
+        _fsync_directory(stage)
+        _validate_launcher_set(root, stage)
+
+        if target.exists():
+            backup = root / f".launcher-backup-{secrets.token_hex(6)}"
+            _assert_runtime_boundary(root, backup)
+            os.replace(target, backup)
+            _fsync_directory(root)
+        try:
+            os.replace(stage, target)
+            activated = True
+            _fsync_directory(root)
+        except OSError:
+            if backup is not None and backup.exists() and not target.exists():
+                os.replace(backup, target)
+                backup = None
+                _fsync_directory(root)
+            raise
+        _validate_launcher_set(root, target)
+        if backup is not None and backup.exists():
+            # The verified active set is now the commit point. Backup cleanup
+            # is best-effort and must never roll back into a partially removed
+            # old directory.
+            shutil.rmtree(backup, ignore_errors=True)
+            backup = None
+    except (OSError, AppInstallError) as exc:
+        if activated and target.exists():
+            failed = root / f".launcher-failed-{secrets.token_hex(6)}"
+            try:
+                _assert_runtime_boundary(root, failed)
+                os.replace(target, failed)
+                activated = False
+                _fsync_directory(root)
+            except (OSError, AppInstallError):
+                failed = None
+        if backup is not None and backup.exists() and not target.exists():
+            try:
+                os.replace(backup, target)
+                backup = None
+                _fsync_directory(root)
+            except (OSError, AppInstallError):
+                pass
+        if failed is not None and failed.exists() and target.exists():
+            shutil.rmtree(failed, ignore_errors=True)
+            failed = None
+        if isinstance(exc, AppInstallError):
+            raise
+        raise AppInstallError("failed to activate verified launcher artifacts") from exc
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def _install_validated_release(
@@ -630,6 +937,7 @@ def rollback(args: argparse.Namespace) -> int:
         raise AppInstallError("install root is not owned by OPC App")
     pointer = _read_pointer(root)
     _validate_pointer_releases(root, pointer)
+    _validate_launcher_set(root)
     previous = pointer.get("previous")
     if not previous:
         raise AppInstallError("no complete previous release is available")
@@ -646,6 +954,7 @@ def rollback(args: argparse.Namespace) -> int:
         print("Dry run only. Re-run with --apply after reviewing this plan.")
         return 0
     _validate_pointer_releases(root, pointer)
+    _validate_launcher_set(root)
     _atomic_json(
         root / "current.json",
         {
@@ -696,6 +1005,7 @@ def status(args: argparse.Namespace) -> int:
     }
     if pointer["current"] is not None:
         _validate_pointer_releases(root, pointer)
+        _validate_launcher_set(root)
     print(
         json.dumps(
             {
