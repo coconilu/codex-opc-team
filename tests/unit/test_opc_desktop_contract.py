@@ -27,9 +27,13 @@ class DesktopContractTests(unittest.TestCase):
         self.assertFalse((TAURI / "capabilities").exists())
         rust = (TAURI / "src" / "lib.rs").read_text(encoding="utf-8")
         self.assertNotIn("invoke_handler", rust)
-        self.assertIn(
-            '.args(["--no-open", "--host", "127.0.0.1", "--port", "0"])',
+        self.assertIn(".set_raw_out(true)", rust)
+        self.assertRegex(
             rust,
+            re.compile(
+                r'\.args\(\[\s*"--no-open",\s*"--host",\s*"127\.0\.0\.1",'
+                r'\s*"--port",\s*"0",?\s*\]\)'
+            ),
         )
 
     def test_build_dependencies_are_exact_and_outputs_are_ignored(self):

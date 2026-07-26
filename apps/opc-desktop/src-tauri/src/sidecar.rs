@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 
 use crate::process_tree::ProcessTreeGuard;
@@ -20,9 +20,11 @@ pub enum StartupError {
     InvalidUtf8,
     UnexpectedLine,
     InvalidPort,
+    UnexpectedOutput,
     Timeout,
     Process(String),
     Terminated,
+    Eof,
 }
 
 impl std::fmt::Display for StartupError {
@@ -36,9 +38,13 @@ impl std::fmt::Display for StartupError {
             Self::InvalidUtf8 => write!(formatter, "sidecar startup output was not UTF-8"),
             Self::UnexpectedLine => write!(formatter, "sidecar returned an untrusted startup URL"),
             Self::InvalidPort => write!(formatter, "sidecar returned an invalid loopback port"),
+            Self::UnexpectedOutput => {
+                write!(formatter, "sidecar emitted unexpected startup output")
+            }
             Self::Timeout => write!(formatter, "sidecar did not become ready before timeout"),
             Self::Process(_) => write!(formatter, "sidecar reported a startup error"),
             Self::Terminated => write!(formatter, "sidecar stopped before becoming ready"),
+            Self::Eof => write!(formatter, "sidecar output closed before becoming ready"),
         }
     }
 }
@@ -79,6 +85,61 @@ pub fn parse_startup_line(bytes: &[u8]) -> Result<(String, u16), StartupError> {
         return Err(StartupError::InvalidPort);
     }
     Ok((url.to_owned(), port))
+}
+
+#[derive(Debug, Default)]
+struct StartupStdoutDecoder {
+    line: Vec<u8>,
+    complete: bool,
+    allow_split_lf: bool,
+}
+
+impl StartupStdoutDecoder {
+    fn push(&mut self, chunk: &[u8]) -> Result<Option<(String, u16)>, StartupError> {
+        if chunk.is_empty() {
+            return Ok(None);
+        }
+
+        if self.complete {
+            let mut remaining = chunk;
+            if self.allow_split_lf && remaining.first() == Some(&b'\n') {
+                remaining = &remaining[1..];
+            }
+            self.allow_split_lf = false;
+            return if remaining.is_empty() {
+                Ok(None)
+            } else {
+                Err(StartupError::UnexpectedOutput)
+            };
+        }
+
+        for (index, byte) in chunk.iter().copied().enumerate() {
+            if byte == b'\r' || byte == b'\n' {
+                self.complete = true;
+                let mut next = index + 1;
+                if byte == b'\r' {
+                    if chunk.get(next) == Some(&b'\n') {
+                        next += 1;
+                    } else if next == chunk.len() {
+                        self.allow_split_lf = true;
+                    }
+                }
+                if next != chunk.len() {
+                    return Err(StartupError::UnexpectedOutput);
+                }
+                return parse_startup_line(&self.line).map(Some);
+            }
+
+            // Check before pushing so attacker-controlled output can never
+            // grow this allocation beyond the hard protocol limit.
+            if self.line.len() == MAX_STARTUP_LINE_BYTES {
+                return Err(StartupError::TooLong);
+            }
+            self.line.push(byte);
+        }
+
+        Ok(None)
+    }
 }
 
 pub fn wait_for_loopback(port: u16, timeout: Duration) -> Result<(), StartupError> {
@@ -149,28 +210,38 @@ pub fn observe_sidecar<R: Runtime>(
 ) {
     tauri::async_runtime::spawn(async move {
         let mut startup_pending = Some(startup);
-        let mut pending_linefeed = false;
+        let mut stdout = StartupStdoutDecoder::default();
         while let Some(event) = events.recv().await {
             match event {
-                CommandEvent::Stdout(line) => {
-                    if let Some(sender) = startup_pending.take() {
-                        pending_linefeed = line.ends_with(b"\r");
-                        let parsed = parse_startup_line(&line);
-                        let _ = sender.send(parsed);
-                    } else if pending_linefeed && line == b"\n" {
-                        // Tauri's line reader emits the LF separately when it
-                        // first split a Windows CRLF sequence at the CR.
-                        pending_linefeed = false;
-                        continue;
-                    } else {
-                        app.exit(1);
-                        break;
+                CommandEvent::Stdout(chunk) => match stdout.push(&chunk) {
+                    Ok(Some(ready)) => {
+                        if let Some(sender) = startup_pending.take() {
+                            let _ = sender.send(Ok(ready));
+                        } else {
+                            app.state::<SidecarState>().stop();
+                            app.exit(1);
+                            return;
+                        }
                     }
-                }
-                CommandEvent::Stderr(line) => {
-                    if let Some(sender) = startup_pending.take() {
-                        let safe_code = if line.len() <= MAX_STARTUP_LINE_BYTES {
-                            std::str::from_utf8(&line)
+                    Ok(None) => {}
+                    Err(error) => {
+                        let was_starting = if let Some(sender) = startup_pending.take() {
+                            let _ = sender.send(Err(error));
+                            true
+                        } else {
+                            false
+                        };
+                        app.state::<SidecarState>().stop();
+                        if !was_starting {
+                            app.exit(1);
+                        }
+                        return;
+                    }
+                },
+                CommandEvent::Stderr(chunk) => {
+                    let was_starting = if let Some(sender) = startup_pending.take() {
+                        let safe_code = if chunk.len() <= MAX_STARTUP_LINE_BYTES {
+                            std::str::from_utf8(&chunk)
                                 .ok()
                                 .filter(|value| value.starts_with("OPC_APP_ERROR: "))
                                 .unwrap_or("OPC_APP_ERROR")
@@ -179,26 +250,56 @@ pub fn observe_sidecar<R: Runtime>(
                             "OPC_APP_ERROR".to_owned()
                         };
                         let _ = sender.send(Err(StartupError::Process(safe_code)));
-                    }
-                }
-                CommandEvent::Error(_) => {
-                    if let Some(sender) = startup_pending.take() {
-                        let _ = sender
-                            .send(Err(StartupError::Process("SIDECAR_EVENT_ERROR".to_owned())));
-                    }
-                    app.exit(1);
-                    break;
-                }
-                CommandEvent::Terminated(_) => {
-                    if let Some(sender) = startup_pending.take() {
-                        let _ = sender.send(Err(StartupError::Terminated));
+                        true
                     } else {
+                        false
+                    };
+                    app.state::<SidecarState>().stop();
+                    if !was_starting {
                         app.exit(1);
                     }
-                    break;
+                    return;
+                }
+                CommandEvent::Error(_) => {
+                    let was_starting = if let Some(sender) = startup_pending.take() {
+                        let _ = sender
+                            .send(Err(StartupError::Process("SIDECAR_EVENT_ERROR".to_owned())));
+                        true
+                    } else {
+                        false
+                    };
+                    app.state::<SidecarState>().stop();
+                    if !was_starting {
+                        app.exit(1);
+                    }
+                    return;
+                }
+                CommandEvent::Terminated(_) => {
+                    let was_starting = if let Some(sender) = startup_pending.take() {
+                        let _ = sender.send(Err(StartupError::Terminated));
+                        true
+                    } else {
+                        false
+                    };
+                    app.state::<SidecarState>().stop();
+                    if !was_starting {
+                        app.exit(1);
+                    }
+                    return;
                 }
                 _ => {}
             }
+        }
+
+        let was_starting = if let Some(sender) = startup_pending.take() {
+            let _ = sender.send(Err(StartupError::Eof));
+            true
+        } else {
+            false
+        };
+        app.state::<SidecarState>().stop();
+        if !was_starting {
+            app.exit(1);
         }
     });
 }
@@ -250,6 +351,57 @@ mod tests {
         assert_eq!(
             parse_startup_line(&vec![b'x'; MAX_STARTUP_LINE_BYTES + 1]),
             Err(StartupError::TooLong)
+        );
+    }
+
+    #[test]
+    fn raw_stream_is_bounded_before_a_newline_arrives() {
+        let mut decoder = StartupStdoutDecoder::default();
+        assert_eq!(
+            decoder.push(&vec![b'x'; MAX_STARTUP_LINE_BYTES + 1]),
+            Err(StartupError::TooLong)
+        );
+        assert_eq!(decoder.line.len(), MAX_STARTUP_LINE_BYTES);
+    }
+
+    #[test]
+    fn raw_stream_accepts_chunked_line_and_crlf_splits() {
+        let expected = ("http://127.0.0.1:49152/".to_owned(), 49152);
+        let mut decoder = StartupStdoutDecoder::default();
+        assert_eq!(decoder.push(b"OPC App: http://127."), Ok(None));
+        assert_eq!(decoder.push(b"0.0.1:49152"), Ok(None));
+        assert_eq!(decoder.push(b"/\r"), Ok(Some(expected.clone())));
+        assert_eq!(decoder.push(b"\n"), Ok(None));
+
+        let mut same_chunk = StartupStdoutDecoder::default();
+        assert_eq!(
+            same_chunk.push(b"OPC App: http://127.0.0.1:49152/\r\n"),
+            Ok(Some(expected))
+        );
+    }
+
+    #[test]
+    fn raw_stream_rejects_forged_urls_and_extra_stdout() {
+        let mut forged = StartupStdoutDecoder::default();
+        assert_eq!(
+            forged.push(b"OPC App: http://0.0.0.0:49152/\n"),
+            Err(StartupError::UnexpectedLine)
+        );
+
+        let mut same_chunk = StartupStdoutDecoder::default();
+        assert_eq!(
+            same_chunk.push(b"OPC App: http://127.0.0.1:49152/\nforged\n"),
+            Err(StartupError::UnexpectedOutput)
+        );
+
+        let mut later_chunk = StartupStdoutDecoder::default();
+        assert!(matches!(
+            later_chunk.push(b"OPC App: http://127.0.0.1:49152/\n"),
+            Ok(Some(_))
+        ));
+        assert_eq!(
+            later_chunk.push(b"forged\n"),
+            Err(StartupError::UnexpectedOutput)
         );
     }
 }

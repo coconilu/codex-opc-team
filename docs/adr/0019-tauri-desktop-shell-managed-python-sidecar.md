@@ -28,9 +28,12 @@ plane into an unsafe general-purpose execution surface.
    Python interpreter as a Tauri external binary. Installed users need neither
    system Python, Node, Rust nor an active Agent session.
 3. Rust starts exactly its packaged binary with fixed arguments
-   `--no-open --host 127.0.0.1 --port 0`. It accepts only the first bounded
-   UTF-8 stdout line matching `OPC App: http://127.0.0.1:<1-65535>/`, confirms
-   the port is listening, and only then creates the main WebView.
+   `--no-open --host 127.0.0.1 --port 0`. The shell plugin is configured for
+   raw chunks so its line reader cannot accumulate attacker-controlled output.
+   Rust incrementally assembles at most 512 bytes and accepts only the first
+   UTF-8 stdout line matching `OPC App: http://127.0.0.1:<1-65535>/`; excess
+   bytes, extra stdout, malformed CR/LF framing, EOF, termination and timeout
+   all fail closed before the main WebView is created.
 4. Startup timeout, malformed output, remote/ambiguous URL, early termination,
    or window creation failure is fail closed. Tauri kills only the child
    handle it created. Runtime sidecar termination exits the desktop process;

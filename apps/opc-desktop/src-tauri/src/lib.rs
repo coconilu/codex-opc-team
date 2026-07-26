@@ -38,7 +38,13 @@ pub fn run() {
         .manage(SidecarState::new())
         .setup(|app| {
             let command = match app.shell().sidecar("opc-sidecar") {
-                Ok(command) => command.args(["--no-open", "--host", "127.0.0.1", "--port", "0"]),
+                Ok(command) => command.set_raw_out(true).args([
+                    "--no-open",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "0",
+                ]),
                 Err(_) => return show_recovery_window(app),
             };
             let (events, child) = match command.spawn() {
