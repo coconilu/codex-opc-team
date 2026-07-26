@@ -236,6 +236,14 @@ class PrivacyScanTests(unittest.TestCase):
             (root / "README.md").write_text("portable example", encoding="utf-8")
             self.assertEqual([], privacy_scan.scan(root))
 
+    def test_extensionless_binary_build_metadata_is_not_a_path_escape(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "dep-lib-example").write_bytes(
+                b"\x01\x00\x00\x00\xff\x01\x00\x00"
+            )
+            self.assertEqual([], privacy_scan.scan(root))
+
     def test_user_home_and_runtime_log_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

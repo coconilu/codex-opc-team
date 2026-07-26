@@ -57,6 +57,25 @@ class DesktopContractTests(unittest.TestCase):
         ]:
             self.assertIn(output, ignored)
 
+    def test_github_desktop_build_is_bounded_and_reproducible(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "desktop-build.yml"
+        ).read_text(encoding="utf-8")
+        for contract in [
+            'node-version: "24"',
+            'python-version: "3.12"',
+            "npm ci --ignore-scripts",
+            "npm run tauri:build",
+            "permissions:\n  contents: read",
+            "if-no-files-found: error",
+            "Get-FileHash",
+            "unsigned development artifact",
+        ]:
+            self.assertIn(contract, workflow)
+        self.assertNotIn("release-action", workflow)
+        self.assertNotIn("contents: write", workflow)
+        self.assertNotIn(".opc/", workflow)
+
     def test_desktop_does_not_copy_python_business_modules(self):
         forbidden_names = {
             "opc_adapters.py",

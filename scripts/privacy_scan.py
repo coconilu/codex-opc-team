@@ -190,10 +190,15 @@ def scan(root: Path) -> list[str]:
                 findings.append(f"{relative}: SCAN_PATH_CHANGED")
                 continue
             text = read_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Cargo and similar build tools emit extensionless binary metadata.
+            # UnicodeDecodeError inherits ValueError, so it must be handled
+            # before the path-boundary ValueError branch.
+            continue
         except ValueError:
             findings.append(f"{relative}: SCAN_PATH_ESCAPED")
             continue
-        except (UnicodeDecodeError, OSError):
+        except OSError:
             continue
         findings.extend(scan_text(relative, text))
     return findings
