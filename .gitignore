@@ -12,6 +12,16 @@ dist/
 build/
 *.egg-info/
 
+# Tauri/Python sidecar build output is reproducible and must not be committed.
+apps/opc-desktop/node_modules/
+apps/opc-desktop/src-tauri/target/
+apps/opc-desktop/src-tauri/gen/
+apps/opc-desktop/src-tauri/binaries/*
+!apps/opc-desktop/src-tauri/binaries/.gitkeep
+apps/opc-desktop/src-tauri/icons/*
+!apps/opc-desktop/src-tauri/icons/icon.ico
+apps/opc-desktop/.sidecar-build/
+
 # Runtime and private organizational state never belong in the public repo.
 .opc/
 opc-knowledge/

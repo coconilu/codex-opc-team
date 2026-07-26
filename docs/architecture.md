@@ -147,6 +147,7 @@ sequenceDiagram
 | OPC App 接入清单与偏好 | `OPC_APP_HOME` 或平台用户状态目录 | 独立于 runtime、checkout、项目和知识；可删除重建 |
 | Host Adapter manifest、投影与备份 | `OPC_APP_HOME/adapters` | 仅记录 OPC 所有权、版本、Ref、哈希和恢复引用；不是组织知识 |
 | OPC App runtime releases | 平台用户数据目录 | 内容哈希版本可升级/回滚；卸载不触碰 App 状态或业务数据 |
+| Tauri 桌面程序文件 | Windows current-user 安装目录 | 可替换、可卸载；不包含 App 状态或组织知识 |
 | 原始运行日志 | 默认最小化并设置保留策略 | 不进入公共仓库和知识层 |
 
 具体路径应由安装器和环境解析，代码和文档示例不得硬编码作者本机路径。
@@ -192,6 +193,7 @@ v0.1 以 `plugins/codex-opc-team/scripts/opc_memory.py` 为真实可调用契约
 | 共享本地投影服务 | `opc_snapshot_service.py`；旧 Dashboard 与 OPC App 使用同一 snapshot builder、DTO 和脱敏器 |
 | Host Adapter 核心 | `opc_adapters.py`；UI 只调用 probe/plan/apply/verify/rollback 契约，不实现宿主安装逻辑 |
 | 独立本地控制平面 | `opc_app.py`；治理 API 只读，唯一写状态为显式项目清单与当前选择，不承担 Agent Harness |
+| Windows 桌面生命周期层 | `apps/opc-desktop`；只管理窗口、单实例、受管 sidecar 和 NSIS 分发，不复制 Python 业务逻辑 |
 | 候选只读回放与 control/treatment 证据 | `opc_shadow.py preview` / `evaluate` / `report`；不属于 `MemoryService` 状态迁移 |
 | 角色/Skill/组织策略版本生命周期 | `opc_evolution.py` 的 private proposal/pilot/evaluate/transition/confirm；只产生一个 unstaged allowlisted diff，不修改全局 Codex 配置 |
 

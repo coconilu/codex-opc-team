@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added a Windows-first Tauri v2 desktop shell with single-instance enforcement, a fixed-argument managed Python sidecar, exact random-loopback startup validation, fail-closed child cleanup, and an unsigned current-user NSIS development bundle.
 - Added preview-first host Adapters for Codex, Claude Code, and Kimi Code CLI, with pinned public contracts, App-owned ownership manifests, exact logical Diff, explicit confirmation, host discovery verification, drift protection, and rollback without changing File/Git knowledge authority.
 - Added an explicitly started, loopback-only, read-only OPC Dashboard for project status, acceptance, knowledge governance, manager queue, lineage evidence, and provider health.
 - Added fixed-field privacy projection, safe optional-provider degradation, synthetic demo data, and local server security gates without introducing Node, a database, or remote assets.

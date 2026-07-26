@@ -49,8 +49,19 @@ APP_SETTINGS_SCHEMA = "opc-app.settings.v1"
 MAX_SETTINGS_BYTES = 256 * 1024
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_PROJECTS = 64
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+def resolve_plugin_root() -> Path:
+    """Resolve the plugin snapshot in source and frozen-sidecar layouts."""
+
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        return Path(frozen_root) / "plugins" / "codex-opc-team"
+    return Path(__file__).resolve().parents[1]
+
+
+PLUGIN_ROOT = resolve_plugin_root()
 SOURCE_CONTAINER_ROOT = Path(__file__).resolve().parents[3]
+if getattr(sys, "_MEIPASS", None):
+    SOURCE_CONTAINER_ROOT = Path(getattr(sys, "_MEIPASS"))
 APP_ASSET_ROOT = PLUGIN_ROOT / "assets" / "app"
 
 

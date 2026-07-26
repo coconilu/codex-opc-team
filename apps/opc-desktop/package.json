@@ -1,0 +1,19 @@
+{
+  "name": "opc-desktop",
+  "private": true,
+  "version": "0.1.1",
+  "description": "Windows-first Tauri lifecycle and distribution shell for the OPC App",
+  "scripts": {
+    "check": "npm run tauri:info && cargo test --manifest-path src-tauri/Cargo.toml",
+    "sidecar:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1",
+    "tauri": "tauri",
+    "tauri:build": "tauri build",
+    "tauri:info": "tauri info"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

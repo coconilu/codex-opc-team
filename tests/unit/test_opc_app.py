@@ -109,6 +109,23 @@ def request(
     return response.status, decoded, response_headers, content
 
 
+class FrozenSidecarLayoutTests(unittest.TestCase):
+    def test_frozen_sidecar_resolves_bundled_plugin_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = getattr(sys, "_MEIPASS", None)
+            try:
+                sys._MEIPASS = directory
+                self.assertEqual(
+                    opc_app.resolve_plugin_root(),
+                    Path(directory) / "plugins" / "codex-opc-team",
+                )
+            finally:
+                if previous is None:
+                    del sys._MEIPASS
+                else:
+                    sys._MEIPASS = previous
+
+
 class SettingsStoreTests(unittest.TestCase):
     def test_relative_app_state_root_is_rejected_by_runtime_and_installer(self):
         with self.assertRaises(opc_app.AppSettingsError) as runtime:
