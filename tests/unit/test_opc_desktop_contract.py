@@ -68,13 +68,21 @@ class DesktopContractTests(unittest.TestCase):
             "npm run tauri:build",
             "permissions:\n  contents: read",
             "if-no-files-found: error",
-            "Get-FileHash",
+            "[System.Security.Cryptography.SHA256]::Create()",
             "unsigned development artifact",
         ]:
             self.assertIn(contract, workflow)
         self.assertNotIn("release-action", workflow)
         self.assertNotIn("contents: write", workflow)
         self.assertNotIn(".opc/", workflow)
+
+    def test_sidecar_hashing_does_not_require_get_file_hash_cmdlet(self):
+        script = (DESKTOP / "scripts" / "build-sidecar.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("[System.Security.Cryptography.SHA256]::Create()", script)
+        self.assertIn("$algorithm.ComputeHash($stream)", script)
+        self.assertNotIn("Get-FileHash", script)
 
     def test_desktop_does_not_copy_python_business_modules(self):
         forbidden_names = {

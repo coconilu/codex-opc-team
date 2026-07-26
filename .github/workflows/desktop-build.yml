@@ -76,7 +76,15 @@ jobs:
             throw "Expected exactly one NSIS installer, found $($installers.Count)."
           }
           $installer = $installers[0]
-          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $algorithm = [System.Security.Cryptography.SHA256]::Create()
+          $stream = [System.IO.File]::OpenRead($installer.FullName)
+          try {
+            $hashBytes = $algorithm.ComputeHash($stream)
+            $hash = (($hashBytes | ForEach-Object { $_.ToString("x2") }) -join "")
+          } finally {
+            $stream.Dispose()
+            $algorithm.Dispose()
+          }
           "$hash  $($installer.Name)" |
             Set-Content -LiteralPath "$($installer.FullName).sha256" -Encoding ascii
           "installer_name=$($installer.Name)" >> $env:GITHUB_OUTPUT
