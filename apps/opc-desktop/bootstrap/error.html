@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+    <title>OPC App 启动失败</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font: 16px system-ui; background: #f5f7fb; color: #263449; }
+      main { width: min(34rem, calc(100% - 3rem)); padding: 2rem; border: 1px solid #dbe3ef; border-radius: 1rem; background: white; box-shadow: 0 1rem 3rem #10233f1a; }
+      h1 { margin-top: 0; font-size: 1.4rem; }
+      p { line-height: 1.65; }
+      code { padding: .15rem .35rem; border-radius: .3rem; background: #eef3f8; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>OPC App 已安全停止启动</h1>
+      <p>随包服务没有通过本机启动检查，因此主控制台没有加载，也没有降级到远程地址。</p>
+      <p>请关闭窗口后重试；若问题持续，请重新安装同一可信安装包，并确认 <code>OPC_APP_HOME</code> 指向可访问且不重叠的数据目录。</p>
+    </main>
+  </body>
+</html>

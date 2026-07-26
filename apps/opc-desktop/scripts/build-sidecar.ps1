@@ -41,9 +41,15 @@ if ($TargetTriple -notmatch "^[A-Za-z0-9_.-]+$") {
 New-Item -ItemType Directory -Force -Path $buildRoot, $binaryRoot | Out-Null
 if (-not (Test-Path -LiteralPath (Join-Path $venvRoot "Scripts\python.exe"))) {
     & $Python -m venv $venvRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to create the isolated Python build environment."
+    }
 }
 $venvPython = Join-Path $venvRoot "Scripts\python.exe"
 & $venvPython -m pip install --disable-pip-version-check --no-input --requirement (Join-Path $desktopRoot "requirements-build.txt")
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to install the pinned sidecar build dependencies."
+}
 
 $distRoot = Join-Path $buildRoot "dist"
 $workRoot = Join-Path $buildRoot "work"
@@ -62,6 +68,9 @@ $dataMapping = "$pluginRoot${dataSeparator}plugins\codex-opc-team"
     --paths (Join-Path $pluginRoot "scripts") `
     --add-data $dataMapping `
     $entrypoint
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed to build the OPC sidecar."
+}
 
 $extension = if ($IsWindows -or $env:OS -eq "Windows_NT") { ".exe" } else { "" }
 $sourceBinary = Join-Path $distRoot "opc-sidecar$extension"

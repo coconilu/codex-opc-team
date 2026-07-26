@@ -19,6 +19,14 @@ tauri = { version = "=2.11.5", features = [] }
 tauri-plugin-shell = "=2.3.5"
 tauri-plugin-single-instance = "=2.4.3"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [profile.release]
 codegen-units = 1
 lto = true

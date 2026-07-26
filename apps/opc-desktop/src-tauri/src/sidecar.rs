@@ -7,6 +7,8 @@ use std::{
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 
+use crate::process_tree::ProcessTreeGuard;
+
 pub const STARTUP_PREFIX: &str = "OPC App: ";
 pub const MAX_STARTUP_LINE_BYTES: usize = 512;
 pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -51,6 +53,11 @@ pub fn parse_startup_line(bytes: &[u8]) -> Result<(String, u16), StartupError> {
         return Err(StartupError::TooLong);
     }
     let line = std::str::from_utf8(bytes).map_err(|_| StartupError::InvalidUtf8)?;
+    let line = line
+        .strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .or_else(|| line.strip_suffix('\r'))
+        .unwrap_or(line);
     if line.trim() != line || !line.starts_with(STARTUP_PREFIX) {
         return Err(StartupError::UnexpectedLine);
     }
@@ -89,7 +96,12 @@ pub fn wait_for_loopback(port: u16, timeout: Duration) -> Result<(), StartupErro
 }
 
 pub struct SidecarState {
-    child: std::sync::Mutex<Option<CommandChild>>,
+    child: std::sync::Mutex<Option<OwnedSidecar>>,
+}
+
+struct OwnedSidecar {
+    child: CommandChild,
+    tree: ProcessTreeGuard,
 }
 
 impl SidecarState {
@@ -100,6 +112,13 @@ impl SidecarState {
     }
 
     pub fn set(&self, child: CommandChild) -> Result<(), String> {
+        let tree = match ProcessTreeGuard::attach(child.pid()) {
+            Ok(tree) => tree,
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("unable to contain sidecar process tree: {error}"));
+            }
+        };
         let mut guard = self
             .child
             .lock()
@@ -107,14 +126,17 @@ impl SidecarState {
         if guard.is_some() {
             return Err("sidecar already owned by this desktop process".to_owned());
         }
-        *guard = Some(child);
+        *guard = Some(OwnedSidecar { child, tree });
         Ok(())
     }
 
     pub fn stop(&self) {
         if let Ok(mut guard) = self.child.lock() {
-            if let Some(child) = guard.take() {
-                let _ = child.kill();
+            if let Some(owned) = guard.take() {
+                // Closing the Windows job first terminates PyInstaller's
+                // onefile worker as well as the launcher handle.
+                drop(owned.tree);
+                let _ = owned.child.kill();
             }
         }
     }
@@ -127,11 +149,19 @@ pub fn observe_sidecar<R: Runtime>(
 ) {
     tauri::async_runtime::spawn(async move {
         let mut startup_pending = Some(startup);
+        let mut pending_linefeed = false;
         while let Some(event) = events.recv().await {
             match event {
                 CommandEvent::Stdout(line) => {
                     if let Some(sender) = startup_pending.take() {
-                        let _ = sender.send(parse_startup_line(&line));
+                        pending_linefeed = line.ends_with(b"\r");
+                        let parsed = parse_startup_line(&line);
+                        let _ = sender.send(parsed);
+                    } else if pending_linefeed && line == b"\n" {
+                        // Tauri's line reader emits the LF separately when it
+                        // first split a Windows CRLF sequence at the CR.
+                        pending_linefeed = false;
+                        continue;
                     } else {
                         app.exit(1);
                         break;
@@ -179,10 +209,17 @@ mod tests {
 
     #[test]
     fn accepts_only_exact_ipv4_loopback_url() {
-        assert_eq!(
-            parse_startup_line(b"OPC App: http://127.0.0.1:49152/"),
-            Ok(("http://127.0.0.1:49152/".to_owned(), 49152))
-        );
+        for line in [
+            b"OPC App: http://127.0.0.1:49152/".as_slice(),
+            b"OPC App: http://127.0.0.1:49152/\n".as_slice(),
+            b"OPC App: http://127.0.0.1:49152/\r".as_slice(),
+            b"OPC App: http://127.0.0.1:49152/\r\n".as_slice(),
+        ] {
+            assert_eq!(
+                parse_startup_line(line),
+                Ok(("http://127.0.0.1:49152/".to_owned(), 49152))
+            );
+        }
     }
 
     #[test]
@@ -194,7 +231,7 @@ mod tests {
             b"OPC App: http://127.0.0.1:49152/path".as_slice(),
             b"OPC App: http://127.0.0.1:49152/?next=evil".as_slice(),
             b" OPC App: http://127.0.0.1:49152/".as_slice(),
-            b"OPC App: http://127.0.0.1:49152/\n".as_slice(),
+            b"OPC App: http://127.0.0.1:49152/ \n".as_slice(),
         ] {
             assert!(parse_startup_line(line).is_err(), "{line:?}");
         }

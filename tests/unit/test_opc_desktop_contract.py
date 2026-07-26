@@ -64,6 +64,18 @@ class DesktopContractTests(unittest.TestCase):
             forbidden_names.intersection(path.name for path in DESKTOP.rglob("*.py"))
         )
 
+    def test_minimum_desktop_width_uses_compact_two_row_layout(self):
+        css = (
+            ROOT
+            / "plugins"
+            / "codex-opc-team"
+            / "assets"
+            / "app"
+            / "dashboard.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn("@media (max-width: 760px)", css)
+        self.assertIn("overflow-x: hidden", css)
+
 
 if __name__ == "__main__":
     unittest.main()

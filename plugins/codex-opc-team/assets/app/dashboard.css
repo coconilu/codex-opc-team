@@ -1759,7 +1759,7 @@ dialog::backdrop {
   }
 }
 
-@media (max-width: 680px) {
+@media (max-width: 760px) {
   .topbar {
     position: static;
     grid-template-columns: 44px 1fr max-content;

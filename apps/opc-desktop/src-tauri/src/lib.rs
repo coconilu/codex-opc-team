@@ -1,3 +1,4 @@
+mod process_tree;
 mod sidecar;
 
 use std::{sync::mpsc, time::Duration};
@@ -8,6 +9,19 @@ use tauri_plugin_shell::ShellExt;
 
 fn stop_owned_sidecar(app: &tauri::AppHandle) {
     app.state::<SidecarState>().stop();
+}
+
+fn show_recovery_window<R: tauri::Runtime>(
+    app: &mut tauri::App<R>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("OPC_DESKTOP_ERROR: STARTUP_FAILED");
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("error.html".into()))
+        .title("OPC App — 启动失败")
+        .inner_size(720.0, 480.0)
+        .min_inner_size(560.0, 400.0)
+        .center()
+        .build()?;
+    Ok(())
 }
 
 pub fn run() {
@@ -23,15 +37,17 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(SidecarState::new())
         .setup(|app| {
-            let command = app
-                .shell()
-                .sidecar("opc-sidecar")
-                .map_err(|error| format!("unable to resolve packaged OPC sidecar: {error}"))?
-                .args(["--no-open", "--host", "127.0.0.1", "--port", "0"]);
-            let (events, child) = command
-                .spawn()
-                .map_err(|error| format!("unable to start packaged OPC sidecar: {error}"))?;
-            app.state::<SidecarState>().set(child)?;
+            let command = match app.shell().sidecar("opc-sidecar") {
+                Ok(command) => command.args(["--no-open", "--host", "127.0.0.1", "--port", "0"]),
+                Err(_) => return show_recovery_window(app),
+            };
+            let (events, child) = match command.spawn() {
+                Ok(spawned) => spawned,
+                Err(_) => return show_recovery_window(app),
+            };
+            if app.state::<SidecarState>().set(child).is_err() {
+                return show_recovery_window(app);
+            }
 
             let (startup_tx, startup_rx) = mpsc::sync_channel(1);
             observe_sidecar(app.handle().clone(), events, startup_tx);
@@ -45,14 +61,15 @@ pub fn run() {
                 let window =
                     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed_url))
                         .title("OPC App")
-                        .inner_size(1280.0, 820.0)
+                        .inner_size(1180.0, 760.0)
                         .min_inner_size(720.0, 560.0)
+                        .center()
                         .build()?;
                 Ok(window)
             })();
-            if let Err(error) = ready {
+            if ready.is_err() {
                 app.state::<SidecarState>().stop();
-                return Err(format!("OPC App startup failed safely: {error}").into());
+                show_recovery_window(app)?;
             }
             Ok(())
         });
