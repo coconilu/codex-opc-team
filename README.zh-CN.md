@@ -103,6 +103,11 @@ Claude 仅在钉住的安全版本范围内调用公开 Plugin CLI；Kimi 只管
 用户 Skill 投影，非交互 Plugin 安装仍明确阻止。能力矩阵、所有权规则、限制与
 独立验收步骤见 [Host Adapters](docs/host-adapters.md)。
 
+需要可双击的 Windows 独立窗口时，`apps/opc-desktop` 会把同一个 Python App
+打成由 Tauri v2 管理的 sidecar，并生成 current-user NSIS 开发安装包。安装后
+不需要系统 Python、Node、Rust 或活动 Agent 会话。当前安装包未签名，也不代表
+Microsoft Store 就绪；构建与验收见 [OPC Desktop](docs/opc-desktop.md)。
+
 ### 兼容的本地 Dashboard
 
 `main` 提供一个显式启动、仅本机访问、只读的经理 Dashboard。它不属于稳定版 `v0.1.0`，不会扫描磁盘发现项目，也没有批准或晋升操作：

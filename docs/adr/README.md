@@ -21,5 +21,7 @@ ADR 用于保存影响长期架构、安全边界或用户数据的决策。每�
 | [0015](0015-release-evidence-separates-public-fixtures-and-private-pilots.md) | Accepted | v0.2 发布证据严格分离公开 fixture、私有 pilot 与 exact-commit Gate |
 | [0016](0016-local-read-only-opc-dashboard.md) | Accepted | OPC Dashboard 采用显式启动、loopback-only、固定字段投影的本地只读架构 |
 | [0017](0017-independent-local-opc-app-control-plane.md) | Accepted | 独立 OPC App 只扩展本地控制平面，不成为 Agent Harness 或第二事实来源 |
+| [0018](0018-host-adapters-use-public-contracts.md) | Accepted | Host Adapter 只使用各宿主公开生命周期并按 OPC 所有权预览、验证和回滚 |
+| [0019](0019-tauri-desktop-shell-managed-python-sidecar.md) | Accepted | Tauri 只管理桌面窗口、单实例、分发和受管 Python sidecar |
 
 新 ADR 使用递增四位编号，至少包含：Status、Date、Context、Decision、Consequences、Rejected Alternatives。

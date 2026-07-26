@@ -95,6 +95,12 @@ and Kimi manages only its documented user Skill projection while non-interactive
 Plugin management remains blocked. See [Host Adapters](docs/host-adapters.md)
 for the capability matrix, limits, ownership rules, and independent QA steps.
 
+For a double-clickable Windows shell, `apps/opc-desktop` packages the same
+Python App as a managed Tauri v2 sidecar and emits a current-user NSIS
+development installer. The installed App needs no system Python, Node, Rust, or
+active Agent session. It is unsigned and not Store-ready; build and acceptance
+instructions are in [OPC Desktop](docs/opc-desktop.en.md).
+
 ### Compatible local Dashboard
 
 The `main` branch includes an explicitly started, loopback-only, read-only Dashboard for manager visibility. It is not part of stable `v0.1.0`, does not scan for projects, and has no approval or promotion actions:
