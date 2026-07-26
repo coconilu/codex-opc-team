@@ -91,7 +91,7 @@ jobs:
           "installer_sha256=$hash" >> $env:GITHUB_OUTPUT
 
       - name: Upload unsigned installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: opc-app-windows-x64-unsigned-${{ github.sha }}
           path: |
