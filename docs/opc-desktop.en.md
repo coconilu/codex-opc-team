@@ -62,6 +62,20 @@ The unsigned NSIS installer is emitted under
 acceptance and can trigger SmartScreen. It is not production- or Store-ready
 without signing and release evidence.
 
+The repository's `.github/workflows/desktop-build.yml` reproduces the same
+build on `windows-latest` with Node.js 24, Python 3.12, and Rust stable, then
+uploads exactly one unsigned NSIS installer and its SHA-256 for 14 days. Pull
+requests, `main`, version tags, and manual dispatch are supported. The workflow
+has only `contents: read` permission and does not create a Release, sign, or
+publish the installer.
+
+There is no portable build today. Tauri only configures a current-user NSIS
+target, and App state remains under `%LOCALAPPDATA%\OPC\App` by default.
+Copying `opc-desktop.exe` alone omits the managed sidecar and is not a portable
+distribution. A future portable ZIP needs explicit relative-state, upgrade and
+rollback, WebView2 prerequisite, sidecar-integrity, and zero-residue contracts;
+zipping the Release directory is not sufficient.
+
 Acceptance must use a newly installed process, not `cargo run`, and prove the
 real WebView/API, single-instance behavior, owned-child cleanup, and state
 preservation after uninstall. Implementer self-tests do not replace an

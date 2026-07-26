@@ -64,6 +64,17 @@ Remove-Item Env:TAURI_CONFIG
 `apps/opc-desktop/src-tauri/target/release/bundle/nsis/`。它仅用于开发验收，
 可能触发 SmartScreen；没有签名与发布证据时不得宣称生产就绪或 Store 发布。
 
+仓库的 `.github/workflows/desktop-build.yml` 在 `windows-latest` 上使用 Node.js
+24、Python 3.12 和 Rust stable 重放同一构建，并上传唯一的未签名 NSIS 安装包
+及其 SHA-256，保留 14 天。Pull Request、`main`、版本 tag 和手动触发均受支持；
+工作流只有 `contents: read` 权限，不创建 Release，也不签名或发布安装包。
+
+当前没有绿色版。Tauri 只配置了 current-user NSIS target，而且 App 状态默认保留
+在 `%LOCALAPPDATA%\OPC\App`；直接复制 `opc-desktop.exe` 会缺少受管 sidecar，
+不能称为绿色版。若以后提供便携 ZIP，需要同时定义相对状态根、升级/回滚、
+WebView2 前置条件、sidecar 完整性与卸载后零残留契约，不能只是压缩 Release
+目录。
+
 验收必须使用 installer 安装后的新进程，而不是 `cargo run`，并逐项证明：
 
 1. 在未提供系统 Python/Node/Cargo 的子进程环境中打开真实 WebView；

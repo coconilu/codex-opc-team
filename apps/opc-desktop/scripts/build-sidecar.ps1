@@ -14,6 +14,26 @@ $pluginRoot = Join-Path $repoRoot "plugins\codex-opc-team"
 $entrypoint = Join-Path $pluginRoot "scripts\opc_app.py"
 $binaryRoot = Join-Path $desktopRoot "src-tauri\binaries"
 
+function Get-Sha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        $bytes = $algorithm.ComputeHash($stream)
+        return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
+    }
+    finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
 if ($Clean -and (Test-Path -LiteralPath $buildRoot)) {
     $resolvedBuild = [System.IO.Path]::GetFullPath($buildRoot)
     $resolvedDesktop = [System.IO.Path]::GetFullPath($desktopRoot)
@@ -79,6 +99,6 @@ if (-not (Test-Path -LiteralPath $sourceBinary -PathType Leaf)) {
     throw "PyInstaller did not produce the expected sidecar binary."
 }
 Copy-Item -LiteralPath $sourceBinary -Destination $targetBinary -Force
-$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $targetBinary).Hash.ToLowerInvariant()
+$hash = Get-Sha256 -Path $targetBinary
 Write-Output "SIDECAR_PATH=$targetBinary"
 Write-Output "SIDECAR_SHA256=$hash"
