@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OPC App",
+  "version": "0.1.1",
+  "identifier": "com.coconilu.opc-app",
+  "build": {
+    "beforeBuildCommand": "npm run sidecar:build",
+    "frontendDist": "../bootstrap"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'none'; style-src 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/opc-sidecar"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "publisher": "Codex OPC Team contributors",
+    "shortDescription": "Local OPC control plane",
+    "longDescription": "A Windows-first desktop lifecycle and distribution shell for the local OPC control plane.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
